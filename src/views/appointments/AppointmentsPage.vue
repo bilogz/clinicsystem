@@ -2,8 +2,10 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { EyeIcon, EditIcon } from 'vue-tabler-icons';
 import {
+  createAppointment,
   fetchAppointments,
   updateAppointment,
+  type CreateAppointmentPayload,
   type AppointmentAnalytics,
   type AppointmentRow,
   type AppointmentStatus
@@ -11,8 +13,7 @@ import {
 
 const loading = ref(false);
 const saving = ref(false);
-const errorMessage = ref('');
-const successMessage = ref('');
+const addSaving = ref(false);
 
 const statusFilter = ref('All Statuses');
 const serviceFilter = ref('All Services');
@@ -38,6 +39,11 @@ const totalPages = ref(1);
 
 const viewDialog = ref(false);
 const editDialog = ref(false);
+const addDialog = ref(false);
+const feedbackDialog = ref(false);
+const feedbackTitle = ref('Success');
+const feedbackMessage = ref('');
+const feedbackVariant = ref<'success' | 'error'>('success');
 const selected = ref<AppointmentRow | null>(null);
 const editForm = reactive({
   doctorName: '',
@@ -46,6 +52,21 @@ const editForm = reactive({
   time: '',
   status: 'Pending' as AppointmentStatus,
   reason: ''
+});
+
+const addForm = reactive<CreateAppointmentPayload>({
+  patient_name: '',
+  patient_email: '',
+  phone_number: '',
+  doctor_name: '',
+  department_name: '',
+  visit_type: '',
+  appointment_date: '',
+  preferred_time: '',
+  visit_reason: '',
+  patient_age: null,
+  patient_gender: '',
+  status: 'Pending'
 });
 
 const serviceOptions = computed(() => {
@@ -88,6 +109,17 @@ function formatDate(dateValue: string): string {
   return new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: '2-digit', year: 'numeric' }).format(date);
 }
 
+function toInputDate(dateValue: string): string {
+  if (!dateValue) return '';
+  const parsed = new Date(dateValue);
+  if (Number.isNaN(parsed.getTime())) {
+    const raw = String(dateValue).slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : '';
+  }
+  const utc = new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60000);
+  return utc.toISOString().slice(0, 10);
+}
+
 function statusColor(status: AppointmentStatus): string {
   const lowered = status.toLowerCase();
   if (lowered === 'confirmed' || lowered === 'accepted') return 'success';
@@ -110,7 +142,6 @@ function normalizeDoctor(value: string): string {
 
 async function loadAppointments(): Promise<void> {
   loading.value = true;
-  errorMessage.value = '';
   try {
     const payload = await fetchAppointments({
       search: searchValue.value.trim(),
@@ -126,10 +157,17 @@ async function loadAppointments(): Promise<void> {
     totalItems.value = payload.meta.total;
     totalPages.value = payload.meta.totalPages;
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    showFeedback('error', 'Loading failed', error instanceof Error ? error.message : String(error));
   } finally {
     loading.value = false;
   }
+}
+
+function showFeedback(variant: 'success' | 'error', title: string, message: string): void {
+  feedbackVariant.value = variant;
+  feedbackTitle.value = title;
+  feedbackMessage.value = message;
+  feedbackDialog.value = true;
 }
 
 function clearFilters(): void {
@@ -151,18 +189,32 @@ function openEdit(item: AppointmentRow): void {
   selected.value = item;
   editForm.doctorName = item.doctor;
   editForm.service = item.service;
-  editForm.date = item.scheduleDate;
+  editForm.date = toInputDate(item.scheduleDate);
   editForm.time = item.scheduleTime;
   editForm.status = item.status;
   editForm.reason = item.visitReason || '';
   editDialog.value = true;
 }
 
+function openAddDialog(): void {
+  addForm.patient_name = '';
+  addForm.patient_email = '';
+  addForm.phone_number = '';
+  addForm.doctor_name = doctorOptions.value.find((item) => item !== 'Doctor: Any') || '';
+  addForm.department_name = '';
+  addForm.visit_type = '';
+  addForm.appointment_date = toInputDate(new Date().toISOString());
+  addForm.preferred_time = '';
+  addForm.visit_reason = '';
+  addForm.patient_age = null;
+  addForm.patient_gender = '';
+  addForm.status = 'Pending';
+  addDialog.value = true;
+}
+
 async function saveEdit(): Promise<void> {
   if (!selected.value) return;
   saving.value = true;
-  successMessage.value = '';
-  errorMessage.value = '';
   try {
     await updateAppointment({
       booking_id: selected.value.bookingId,
@@ -173,11 +225,11 @@ async function saveEdit(): Promise<void> {
       status: editForm.status,
       visit_reason: editForm.reason
     });
-    successMessage.value = 'Appointment updated successfully.';
+    showFeedback('success', 'Appointment updated', 'Appointment updated successfully.');
     editDialog.value = false;
     await loadAppointments();
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    showFeedback('error', 'Update failed', error instanceof Error ? error.message : String(error));
   } finally {
     saving.value = false;
   }
@@ -185,19 +237,36 @@ async function saveEdit(): Promise<void> {
 
 async function markReschedule(item: AppointmentRow): Promise<void> {
   saving.value = true;
-  errorMessage.value = '';
-  successMessage.value = '';
   try {
     await updateAppointment({
       booking_id: item.bookingId,
       status: 'Pending'
     });
-    successMessage.value = 'Appointment moved to pending queue for reschedule.';
+    showFeedback('success', 'Reschedule queued', 'Appointment moved to pending queue for reschedule.');
     await loadAppointments();
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    showFeedback('error', 'Reschedule failed', error instanceof Error ? error.message : String(error));
   } finally {
     saving.value = false;
+  }
+}
+
+async function saveAdd(): Promise<void> {
+  if (!addForm.patient_name || !addForm.phone_number || !addForm.doctor_name || !addForm.department_name || !addForm.visit_type || !addForm.appointment_date) {
+    showFeedback('error', 'Missing fields', 'Please complete required appointment fields.');
+    return;
+  }
+
+  addSaving.value = true;
+  try {
+    await createAppointment(addForm);
+    addDialog.value = false;
+    showFeedback('success', 'Appointment created', 'New appointment has been added successfully.');
+    await loadAppointments();
+  } catch (error) {
+    showFeedback('error', 'Create failed', error instanceof Error ? error.message : String(error));
+  } finally {
+    addSaving.value = false;
   }
 }
 
@@ -228,7 +297,7 @@ onMounted(() => {
           <div class="hero-side-card">
             <div class="hero-side-label">Booking Actions</div>
             <div class="hero-side-text">Create and manage schedule entries from one queue.</div>
-            <v-btn color="primary" prepend-icon="mdi-plus" rounded="lg" class="mt-2">Add Appointment</v-btn>
+            <v-btn color="primary" prepend-icon="mdi-plus" rounded="pill" class="mt-2 saas-primary-btn" @click="openAddDialog">Add Appointment</v-btn>
           </div>
         </div>
       </v-card-text>
@@ -250,9 +319,6 @@ onMounted(() => {
         </v-card>
       </v-col>
     </v-row>
-
-    <v-alert v-if="errorMessage" type="error" variant="tonal" class="mb-3">{{ errorMessage }}</v-alert>
-    <v-alert v-if="successMessage" type="success" variant="tonal" class="mb-3">{{ successMessage }}</v-alert>
 
     <v-card rounded="xl" variant="flat">
       <v-card-text class="pa-4 pa-md-5">
@@ -288,8 +354,8 @@ onMounted(() => {
           </div>
 
           <div class="d-flex flex-wrap ga-2">
-            <v-btn variant="outlined" color="secondary" prepend-icon="mdi-filter-off-outline" @click="clearFilters">Clear Filters</v-btn>
-            <v-btn color="primary" prepend-icon="mdi-refresh" :loading="loading" @click="loadAppointments">Reload</v-btn>
+            <v-btn variant="outlined" color="secondary" rounded="pill" class="saas-outline-btn" prepend-icon="mdi-filter-off-outline" @click="clearFilters">Clear Filters</v-btn>
+            <v-btn color="primary" rounded="pill" class="saas-primary-btn" prepend-icon="mdi-refresh" :loading="loading" @click="loadAppointments">Reload</v-btn>
           </div>
         </div>
 
@@ -341,7 +407,7 @@ onMounted(() => {
                   <v-btn icon size="small" class="saas-icon-btn" color="indigo" variant="tonal" @click="openEdit(item)">
                     <EditIcon class="action-icon action-icon-edit" size="16" stroke-width="2.2" />
                   </v-btn>
-                  <v-btn size="small" color="error" variant="flat" append-icon="mdi-chevron-down" @click="markReschedule(item)">Reschedule</v-btn>
+                  <v-btn size="small" color="error" variant="flat" rounded="pill" class="saas-danger-btn" append-icon="mdi-chevron-down" @click="markReschedule(item)">Reschedule</v-btn>
                 </div>
               </td>
             </tr>
@@ -359,8 +425,8 @@ onMounted(() => {
     </v-card>
 
     <v-dialog v-model="viewDialog" max-width="600">
-      <v-card>
-        <v-card-title class="text-h6">Appointment Details</v-card-title>
+      <v-card class="saas-modal-card">
+        <v-card-title class="saas-modal-title text-h6 font-weight-bold">Appointment Details</v-card-title>
         <v-card-text v-if="selected">
           <div><strong>Booking ID:</strong> {{ selected.bookingId }}</div>
           <div><strong>Patient:</strong> {{ selected.patientName }}</div>
@@ -380,22 +446,62 @@ onMounted(() => {
     </v-dialog>
 
     <v-dialog v-model="editDialog" max-width="700">
-      <v-card>
-        <v-card-title class="text-h6">Edit Appointment</v-card-title>
+      <v-card class="saas-modal-card">
+        <v-card-title class="saas-modal-title text-h6 font-weight-bold">Edit Appointment</v-card-title>
         <v-card-text>
           <v-row>
-            <v-col cols="12" md="6"><v-text-field v-model="editForm.doctorName" label="Doctor" variant="outlined" density="comfortable" /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="editForm.service" label="Service" variant="outlined" density="comfortable" /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="editForm.date" label="Date (YYYY-MM-DD)" variant="outlined" density="comfortable" /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="editForm.time" label="Preferred Time" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="editForm.doctorName" label="Doctor" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="editForm.service" label="Service" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="editForm.date" type="date" label="Date" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="editForm.time" label="Preferred Time" variant="outlined" density="comfortable" hide-details /></v-col>
             <v-col cols="12" md="6"><v-select v-model="editForm.status" :items="['Confirmed', 'Pending', 'Accepted', 'Awaiting', 'Canceled']" label="Status" variant="outlined" density="comfortable" /></v-col>
             <v-col cols="12"><v-textarea v-model="editForm.reason" label="Visit Reason" rows="3" variant="outlined" density="comfortable" /></v-col>
           </v-row>
         </v-card-text>
         <v-card-actions class="justify-end">
           <v-btn variant="text" @click="editDialog = false">Cancel</v-btn>
-          <v-btn color="primary" :loading="saving" @click="saveEdit">Save</v-btn>
+          <v-btn color="primary" rounded="pill" class="saas-primary-btn" :loading="saving" @click="saveEdit">Save Changes</v-btn>
         </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="addDialog" max-width="840">
+      <v-card class="saas-modal-card">
+        <v-card-title class="saas-modal-title text-h6 font-weight-bold">Add Appointment</v-card-title>
+        <v-card-text>
+          <v-row>
+            <v-col cols="12" md="6"><v-text-field v-model="addForm.patient_name" label="Patient Name*" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="addForm.patient_email" label="Patient Email" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="addForm.phone_number" label="Phone Number*" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="addForm.doctor_name" label="Doctor*" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="addForm.department_name" label="Department*" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="addForm.visit_type" label="Visit Type*" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="addForm.appointment_date" type="date" label="Appointment Date*" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="addForm.preferred_time" label="Preferred Time" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model.number="addForm.patient_age" type="number" min="0" label="Patient Age" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="addForm.patient_gender" label="Patient Gender" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12"><v-textarea v-model="addForm.visit_reason" label="Visit Reason" rows="3" variant="outlined" density="comfortable" /></v-col>
+          </v-row>
+        </v-card-text>
+        <v-card-actions class="justify-end">
+          <v-btn variant="text" @click="addDialog = false">Cancel</v-btn>
+          <v-btn color="primary" rounded="pill" class="saas-primary-btn" :loading="addSaving" @click="saveAdd">Create Appointment</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="feedbackDialog" max-width="430">
+      <v-card class="saas-modal-card feedback-card">
+        <v-card-text class="pa-6">
+          <div class="d-flex flex-column align-center text-center ga-3">
+            <v-avatar :color="feedbackVariant === 'success' ? 'success' : 'error'" size="56" variant="tonal">
+              <v-icon :icon="feedbackVariant === 'success' ? 'mdi-check-bold' : 'mdi-alert-circle-outline'" size="30" />
+            </v-avatar>
+            <h3 class="text-h6 font-weight-bold mb-0">{{ feedbackTitle }}</h3>
+            <p class="text-body-2 text-medium-emphasis mb-0">{{ feedbackMessage }}</p>
+            <v-btn color="primary" rounded="pill" class="saas-primary-btn mt-1" @click="feedbackDialog = false">Okay</v-btn>
+          </div>
+        </v-card-text>
       </v-card>
     </v-dialog>
   </section>
@@ -451,6 +557,22 @@ onMounted(() => {
 .appointment-table th { font-size: 0.78rem; font-weight: 700; }
 .appointment-table td { vertical-align: middle; }
 
+.saas-primary-btn {
+  box-shadow: 0 8px 18px rgba(24, 104, 208, 0.3);
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  text-transform: none;
+}
+.saas-outline-btn {
+  border-width: 1px !important;
+  text-transform: none;
+  font-weight: 600;
+}
+.saas-danger-btn {
+  box-shadow: 0 8px 16px rgba(248, 79, 66, 0.22);
+  text-transform: none;
+  font-weight: 700;
+}
 .saas-icon-btn {
   border-radius: 10px;
   border: 1px solid rgba(69, 98, 175, 0.22) !important;
@@ -466,5 +588,23 @@ onMounted(() => {
 }
 .action-icon-edit {
   color: #4f46e5;
+}
+
+.feedback-card {
+  border: 1px solid rgba(76, 104, 168, 0.12);
+  box-shadow: 0 20px 50px rgba(13, 36, 89, 0.22);
+}
+
+.saas-modal-card {
+  border-radius: 16px !important;
+  border: 1px solid rgba(76, 104, 168, 0.16);
+  overflow: hidden;
+}
+
+.saas-modal-title {
+  padding: 16px 24px !important;
+  color: #1b2e67 !important;
+  background: linear-gradient(180deg, rgba(35, 101, 226, 0.08) 0%, rgba(35, 101, 226, 0) 100%);
+  border-bottom: 1px solid rgba(76, 104, 168, 0.14);
 }
 </style>

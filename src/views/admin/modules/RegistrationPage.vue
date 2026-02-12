@@ -1,5 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
+import { EyeIcon, EditIcon, CheckIcon } from 'vue-tabler-icons';
+import {
+  approveRegistration,
+  createRegistration,
+  fetchRegistrations,
+  updateRegistration,
+  type RegistrationAnalytics,
+  type RegistrationRow,
+  type RegistrationStatus
+} from '@/services/registrationsAdmin';
 
 type StatCard = {
   title: string;
@@ -8,131 +18,54 @@ type StatCard = {
   cardClass: string;
 };
 
-type PatientStatus = 'Pending' | 'Active' | 'Archived';
-
-type PatientRecord = {
-  id: number;
-  initials: string;
-  name: string;
-  age: number;
-  concern: string;
-  intakeTime: string;
-  bookedTime: string;
-  status: PatientStatus;
-  assigned: string;
-};
-
 type ActionType = 'add' | 'view' | 'edit' | 'approve' | 'clear';
 
 type PatientForm = {
   name: string;
+  email: string;
   age: number;
   concern: string;
   assigned: string;
   intakeTime: string;
   bookedTime: string;
-  status: PatientStatus;
+  status: RegistrationStatus;
 };
-
-const statCards: StatCard[] = [
-  { title: 'Pending', value: '3', subtitle: 'Awaiting Action', cardClass: 'stat-green' },
-  { title: 'Active', value: '11', subtitle: 'Processed Records', cardClass: 'stat-blue' },
-  { title: 'Concerns', value: '4', subtitle: 'New Concerns', cardClass: 'stat-orange' },
-  { title: 'Approval Rate', value: '72%', subtitle: 'Based on Totals (18)', cardClass: 'stat-purple' }
-];
 
 const statusFilters = ['All Statuses', 'Pending', 'Active', 'Archived'];
 const sortFilters = ['Sort Latest Intake', 'Sort Name A-Z', 'Sort Name Z-A'];
-const statusItems: PatientStatus[] = ['Pending', 'Active', 'Archived'];
+const statusItems: RegistrationStatus[] = ['Pending', 'Active', 'Archived'];
 const pageSize = 6;
 
-const records = ref<PatientRecord[]>([
-  {
-    id: 1,
-    initials: 'MS',
-    name: 'Maria Santos',
-    age: 34,
-    concern: 'Back pain',
-    intakeTime: 'Today at 10:45 AM',
-    bookedTime: 'Today at 10:45 AM',
-    status: 'Pending',
-    assigned: 'Dr. Humour'
-  },
-  {
-    id: 2,
-    initials: 'JL',
-    name: 'Juana Locsin',
-    age: 31,
-    concern: 'Headache',
-    intakeTime: 'Yesterday at 8:00 AM',
-    bookedTime: 'Yesterday at 9:00 AM',
-    status: 'Active',
-    assigned: 'Dr. Morco'
-  },
-  {
-    id: 3,
-    initials: 'GM',
-    name: 'Gina Marquez',
-    age: 41,
-    concern: 'Anxiety',
-    intakeTime: 'Feb 17, 2024 2:15 PM',
-    bookedTime: 'February 17, 2024 2:15 PM',
-    status: 'Active',
-    assigned: 'Dr. Jenni'
-  },
-  {
-    id: 4,
-    initials: 'LM',
-    name: 'Leo Magno',
-    age: 45,
-    concern: 'New Concern',
-    intakeTime: 'Feb 16, 2024 4:50 PM',
-    bookedTime: 'Feb 16, 2024 4:30 PM',
-    status: 'Pending',
-    assigned: 'Register Marion'
-  },
-  {
-    id: 5,
-    initials: 'JD',
-    name: 'Juan Dela Cruz',
-    age: 39,
-    concern: 'Cold',
-    intakeTime: 'Feb 15, 2024 11:20 AM',
-    bookedTime: 'Feb 13, 11:20 AM',
-    status: 'Pending',
-    assigned: 'Dr. Humour'
-  },
-  {
-    id: 6,
-    initials: 'AP',
-    name: 'Ana Perez',
-    age: 27,
-    concern: 'Archived',
-    intakeTime: 'Feb 14, 2024 1:00 PM',
-    bookedTime: 'Thu, Feb 14, 1:00 PM',
-    status: 'Archived',
-    assigned: 'Dr. S. Villaraza'
-  }
-]);
+const records = ref<RegistrationRow[]>([]);
+const analytics = ref<RegistrationAnalytics>({
+  pending: 0,
+  active: 0,
+  concerns: 0,
+  approvalRate: 0
+});
 
 const pageLoading = ref(true);
 const pageReady = ref(false);
 const listPage = ref(1);
+const pageCount = ref(1);
+const totalItems = ref(0);
+
 const searchQuery = ref('');
 const selectedStatus = ref('All Statuses');
 const selectedSort = ref('Sort Latest Intake');
 
 const actionDialog = ref(false);
 const actionType = ref<ActionType>('view');
-const actionRecord = ref<PatientRecord | null>(null);
+const actionRecord = ref<RegistrationRow | null>(null);
 const actionLoading = ref(false);
 
 const snackbar = ref(false);
 const snackbarText = ref('');
-const snackbarColor = ref<'success' | 'info' | 'warning'>('success');
+const snackbarColor = ref<'success' | 'info' | 'warning' | 'error'>('success');
 
 const patientForm = ref<PatientForm>({
   name: '',
+  email: '',
   age: 18,
   concern: '',
   assigned: '',
@@ -141,57 +74,21 @@ const patientForm = ref<PatientForm>({
   status: 'Pending'
 });
 
-onMounted(() => {
-  setTimeout(() => {
-    pageLoading.value = false;
-    requestAnimationFrame(() => {
-      pageReady.value = true;
-    });
-  }, 700);
-});
+const statCards = computed<StatCard[]>(() => [
+  { title: 'Pending', value: String(analytics.value.pending), subtitle: 'Awaiting Action', cardClass: 'stat-green' },
+  { title: 'Active', value: String(analytics.value.active), subtitle: 'Processed Records', cardClass: 'stat-blue' },
+  { title: 'Concerns', value: String(analytics.value.concerns), subtitle: 'New Concerns', cardClass: 'stat-orange' },
+  { title: 'Approval Rate', value: `${analytics.value.approvalRate}%`, subtitle: `Based on Totals (${totalItems.value})`, cardClass: 'stat-purple' }
+]);
 
-const filteredRecords = computed(() => {
-  let rows = [...records.value];
-  const query = searchQuery.value.trim().toLowerCase();
+const activeCount = computed(() => analytics.value.active);
+const pendingCount = computed(() => analytics.value.pending);
 
-  if (query) {
-    rows = rows.filter((record) => {
-      const target = `${record.name} ${record.concern} ${record.assigned} ${record.intakeTime} ${record.bookedTime}`.toLowerCase();
-      return target.includes(query);
-    });
-  }
-
-  if (selectedStatus.value !== 'All Statuses') {
-    rows = rows.filter((record) => record.status === selectedStatus.value);
-  }
-
-  if (selectedSort.value === 'Sort Name A-Z') {
-    rows.sort((a, b) => a.name.localeCompare(b.name));
-  } else if (selectedSort.value === 'Sort Name Z-A') {
-    rows.sort((a, b) => b.name.localeCompare(a.name));
-  } else {
-    rows.sort((a, b) => b.id - a.id);
-  }
-
-  return rows;
-});
-
-const pagedRecords = computed(() => {
-  const start = (listPage.value - 1) * pageSize;
-  return filteredRecords.value.slice(start, start + pageSize);
-});
-
-const pageCount = computed(() => Math.max(1, Math.ceil(filteredRecords.value.length / pageSize)));
-const activeCount = computed(() => records.value.filter((record) => record.status === 'Active').length);
-const pendingCount = computed(() => records.value.filter((record) => record.status === 'Pending').length);
 const totalCountText = computed(() => {
-  if (filteredRecords.value.length === 0) {
-    return 'Showing 0-0 of 0';
-  }
-
+  if (totalItems.value === 0) return 'Showing 0-0 of 0';
   const first = (listPage.value - 1) * pageSize + 1;
-  const last = Math.min(listPage.value * pageSize, filteredRecords.value.length);
-  return `Showing ${first}-${last} of ${filteredRecords.value.length}`;
+  const last = Math.min(listPage.value * pageSize, totalItems.value);
+  return `Showing ${first}-${last} of ${totalItems.value}`;
 });
 
 const modalTitle = computed(() => {
@@ -203,35 +100,50 @@ const modalTitle = computed(() => {
 });
 
 const modalSubtitle = computed(() => {
-  if (actionType.value === 'add') return 'Static form preview only. Data is local and not persisted to API.';
+  if (actionType.value === 'add') return 'Create a new registration intake entry.';
   if (actionType.value === 'view') return 'Review this record before taking any action.';
-  if (actionType.value === 'edit') return 'Apply local changes to this row.';
+  if (actionType.value === 'edit') return 'Apply updates to this patient registration record.';
   if (actionType.value === 'approve') return 'This will set the selected patient status to Active.';
   return 'Reset search, status, and sort filters to default values.';
 });
 
 const modalActionText = computed(() => {
-  if (actionType.value === 'add') return 'Add';
+  if (actionType.value === 'add') return 'Add Patient';
   if (actionType.value === 'view') return 'Close';
-  if (actionType.value === 'edit') return 'Save';
-  if (actionType.value === 'approve') return 'Approve';
-  return 'Reset';
+  if (actionType.value === 'edit') return 'Save Changes';
+  if (actionType.value === 'approve') return 'Approve Patient';
+  return 'Reset Filters';
 });
 
-watch(pageCount, (newPageCount) => {
-  if (listPage.value > newPageCount) {
-    listPage.value = newPageCount;
-  }
+const modalActionIcon = computed(() => {
+  if (actionType.value === 'add') return 'mdi-account-plus-outline';
+  if (actionType.value === 'view') return 'mdi-check';
+  if (actionType.value === 'edit') return 'mdi-content-save-outline';
+  if (actionType.value === 'approve') return 'mdi-check-circle-outline';
+  return 'mdi-filter-off-outline';
 });
 
-watch([searchQuery, selectedStatus, selectedSort], () => {
-  listPage.value = 1;
-});
+const pagedRecords = computed(() => records.value);
 
-function statusColor(status: PatientRecord['status']): string {
-  if (status === 'Active') return 'success';
-  if (status === 'Pending') return 'warning';
-  return 'secondary';
+function formatDateTime(value: string): string {
+  if (!value) return '--';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(parsed);
+}
+
+function toInputDateTime(value: string): string {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const local = new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
 }
 
 function toInitials(name: string): string {
@@ -241,42 +153,69 @@ function toInitials(name: string): string {
   return `${words[0][0] || ''}${words[1][0] || ''}`.toUpperCase();
 }
 
+function statusColor(status: RegistrationStatus): string {
+  if (status === 'Active') return 'success';
+  if (status === 'Pending') return 'warning';
+  return 'secondary';
+}
+
+function showToast(message: string, color: 'success' | 'info' | 'warning' | 'error' = 'success'): void {
+  snackbarText.value = message;
+  snackbarColor.value = color;
+  snackbar.value = true;
+}
+
+async function loadRecords(): Promise<void> {
+  try {
+    const payload = await fetchRegistrations({
+      search: searchQuery.value.trim(),
+      status: selectedStatus.value,
+      sort: selectedSort.value,
+      page: listPage.value,
+      perPage: pageSize
+    });
+    records.value = payload.items;
+    analytics.value = payload.analytics;
+    totalItems.value = payload.meta.total;
+    pageCount.value = payload.meta.totalPages;
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error), 'error');
+  }
+}
+
 function resetForm(): void {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
   patientForm.value = {
     name: '',
+    email: '',
     age: 18,
     concern: '',
     assigned: '',
-    intakeTime: '',
-    bookedTime: '',
+    intakeTime: local,
+    bookedTime: local,
     status: 'Pending'
   };
 }
 
-function copyRecordToForm(record: PatientRecord): void {
+function copyRecordToForm(record: RegistrationRow): void {
   patientForm.value = {
-    name: record.name,
-    age: record.age,
-    concern: record.concern,
-    assigned: record.assigned,
-    intakeTime: record.intakeTime,
-    bookedTime: record.bookedTime,
+    name: record.patient_name,
+    email: record.patient_email || '',
+    age: Number(record.age || 0),
+    concern: record.concern || '',
+    assigned: record.assigned_to || '',
+    intakeTime: toInputDateTime(record.intake_time),
+    bookedTime: toInputDateTime(record.booked_time),
     status: record.status
   };
 }
 
-function openActionModal(action: ActionType, record?: PatientRecord): void {
+function openActionModal(action: ActionType, record?: RegistrationRow): void {
   actionType.value = action;
   actionRecord.value = record || null;
-
-  if (action === 'add') {
-    resetForm();
-  }
-
-  if ((action === 'edit' || action === 'view') && record) {
-    copyRecordToForm(record);
-  }
-
+  if (action === 'add') resetForm();
+  if ((action === 'edit' || action === 'view') && record) copyRecordToForm(record);
   actionDialog.value = true;
 }
 
@@ -289,66 +228,84 @@ function clearFilters(): void {
   searchQuery.value = '';
   selectedStatus.value = 'All Statuses';
   selectedSort.value = 'Sort Latest Intake';
+  listPage.value = 1;
+  void loadRecords();
 }
 
-function showToast(message: string, color: 'success' | 'info' | 'warning' = 'success'): void {
-  snackbarText.value = message;
-  snackbarColor.value = color;
-  snackbar.value = true;
-}
+async function handleModalAction(): Promise<void> {
+  if (actionType.value === 'view') {
+    actionDialog.value = false;
+    return;
+  }
 
-function handleModalAction(): void {
+  if (actionType.value === 'clear') {
+    clearFilters();
+    showToast('Filters reset.', 'info');
+    actionDialog.value = false;
+    return;
+  }
+
   actionLoading.value = true;
-
-  setTimeout(() => {
+  try {
     if (actionType.value === 'add') {
-      const nextId = records.value.length === 0 ? 1 : Math.max(...records.value.map((record) => record.id)) + 1;
-      const newRecord: PatientRecord = {
-        id: nextId,
-        initials: toInitials(patientForm.value.name),
-        name: patientForm.value.name || 'New Patient',
-        age: patientForm.value.age || 18,
-        concern: patientForm.value.concern || 'General Concern',
-        intakeTime: patientForm.value.intakeTime || 'Today at 11:00 AM',
-        bookedTime: patientForm.value.bookedTime || 'Today at 11:00 AM',
-        status: patientForm.value.status,
-        assigned: patientForm.value.assigned || 'Unassigned'
-      };
-      records.value.unshift(newRecord);
-      showToast('Patient added (static local change).');
-    } else if (actionType.value === 'edit' && actionRecord.value) {
-      const rowIndex = records.value.findIndex((record) => record.id === actionRecord.value?.id);
-      if (rowIndex >= 0) {
-        records.value[rowIndex] = {
-          ...records.value[rowIndex],
-          initials: toInitials(patientForm.value.name),
-          name: patientForm.value.name,
-          age: patientForm.value.age,
-          concern: patientForm.value.concern,
-          assigned: patientForm.value.assigned,
-          intakeTime: patientForm.value.intakeTime,
-          bookedTime: patientForm.value.bookedTime,
-          status: patientForm.value.status
-        };
-      }
-      showToast('Patient record updated (static local change).');
-    } else if (actionType.value === 'approve' && actionRecord.value) {
-      const rowIndex = records.value.findIndex((record) => record.id === actionRecord.value?.id);
-      if (rowIndex >= 0) {
-        records.value[rowIndex].status = 'Active';
-      }
-      showToast('Patient approved (status set to Active).');
-    } else if (actionType.value === 'clear') {
-      clearFilters();
-      showToast('Filters reset.', 'info');
-    } else {
-      showToast('Action preview complete.', 'info');
+      await createRegistration({
+        patient_name: patientForm.value.name,
+        patient_email: patientForm.value.email,
+        age: patientForm.value.age,
+        concern: patientForm.value.concern,
+        assigned_to: patientForm.value.assigned,
+        intake_time: patientForm.value.intakeTime,
+        booked_time: patientForm.value.bookedTime,
+        status: patientForm.value.status
+      });
+      showToast('Patient added successfully.');
     }
 
-    actionLoading.value = false;
+    if (actionType.value === 'edit' && actionRecord.value) {
+      await updateRegistration({
+        id: actionRecord.value.id,
+        patient_name: patientForm.value.name,
+        patient_email: patientForm.value.email,
+        age: patientForm.value.age,
+        concern: patientForm.value.concern,
+        assigned_to: patientForm.value.assigned,
+        intake_time: patientForm.value.intakeTime,
+        booked_time: patientForm.value.bookedTime,
+        status: patientForm.value.status
+      });
+      showToast('Patient record updated.');
+    }
+
+    if (actionType.value === 'approve' && actionRecord.value) {
+      await approveRegistration(actionRecord.value.id);
+      showToast('Patient approved.', 'success');
+    }
+
     actionDialog.value = false;
-  }, 350);
+    await loadRecords();
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    actionLoading.value = false;
+  }
 }
+
+watch([searchQuery, selectedStatus, selectedSort], () => {
+  listPage.value = 1;
+  void loadRecords();
+});
+
+watch(listPage, () => {
+  void loadRecords();
+});
+
+onMounted(async () => {
+  await loadRecords();
+  pageLoading.value = false;
+  requestAnimationFrame(() => {
+    pageReady.value = true;
+  });
+});
 </script>
 
 <template>
@@ -378,8 +335,8 @@ function handleModalAction(): void {
             </div>
             <div class="hero-side-card">
               <div class="hero-side-label">Patient Intake</div>
-              <div class="hero-side-text">Use static actions to review, update, and approve records.</div>
-              <v-btn color="primary" variant="flat" prepend-icon="mdi-plus" class="mt-2" @click="openActionModal('add')">Add Patient</v-btn>
+              <div class="hero-side-text">Review, update, and approve records from one queue.</div>
+              <v-btn color="primary" variant="flat" prepend-icon="mdi-account-plus-outline" class="mt-2 saas-primary-btn" rounded="pill" @click="openActionModal('add')">Add Patient</v-btn>
             </div>
           </div>
         </v-card-text>
@@ -414,20 +371,20 @@ function handleModalAction(): void {
               />
             </v-col>
             <v-col cols="12" sm="6" md="3">
-              <v-select :items="statusFilters" v-model="selectedStatus" density="comfortable" variant="outlined" hide-details />
+              <v-select :items="statusFilters" v-model="selectedStatus" density="comfortable" variant="outlined" hide-details prepend-inner-icon="mdi-filter-outline" />
             </v-col>
             <v-col cols="12" sm="6" md="3">
-              <v-select :items="sortFilters" v-model="selectedSort" density="comfortable" variant="outlined" hide-details />
+              <v-select :items="sortFilters" v-model="selectedSort" density="comfortable" variant="outlined" hide-details prepend-inner-icon="mdi-sort" />
             </v-col>
           </v-row>
 
-          <div class="mb-3 d-flex flex-wrap ga-2">
+          <div class="mb-3 d-flex flex-wrap ga-2 align-center">
             <v-chip color="secondary" variant="tonal" size="small">Online Registration</v-chip>
             <v-chip color="primary" variant="tonal" size="small">Register Marion</v-chip>
             <v-chip color="warning" variant="tonal" size="small">Active: {{ activeCount }}</v-chip>
             <v-chip color="info" variant="tonal" size="small">Pending: {{ pendingCount }}</v-chip>
             <v-spacer />
-            <v-btn size="small" variant="text" color="primary" prepend-icon="mdi-refresh" @click="openActionModal('clear')">Clear Filters</v-btn>
+            <v-btn size="small" variant="outlined" color="primary" rounded="pill" prepend-icon="mdi-filter-off-outline" class="saas-outline-btn" @click="openActionModal('clear')">Clear Filters</v-btn>
           </div>
 
           <v-table density="comfortable">
@@ -446,25 +403,31 @@ function handleModalAction(): void {
               <tr v-for="record in pagedRecords" :key="record.id">
                 <td>
                   <div class="d-flex align-center ga-3">
-                    <v-avatar size="34" color="primary" variant="tonal">{{ record.initials }}</v-avatar>
+                    <v-avatar size="34" color="primary" variant="tonal">{{ toInitials(record.patient_name) }}</v-avatar>
                     <div>
-                      <div class="font-weight-medium">{{ record.name }} <span class="text-medium-emphasis">{{ record.age }}</span></div>
-                      <div class="text-caption text-medium-emphasis">{{ record.assigned }}</div>
+                      <div class="font-weight-medium">{{ record.patient_name }} <span class="text-medium-emphasis">{{ record.age || '--' }}</span></div>
+                      <div class="text-caption text-medium-emphasis">{{ record.patient_email || record.case_id }}</div>
                     </div>
                   </div>
                 </td>
-                <td>{{ record.concern }}</td>
-                <td>{{ record.intakeTime }}</td>
-                <td>{{ record.bookedTime }}</td>
+                <td>{{ record.concern || '--' }}</td>
+                <td>{{ formatDateTime(record.intake_time) }}</td>
+                <td>{{ formatDateTime(record.booked_time) }}</td>
                 <td>
                   <v-chip size="small" :color="statusColor(record.status)" variant="tonal">{{ record.status }}</v-chip>
                 </td>
-                <td>{{ record.assigned }}</td>
+                <td>{{ record.assigned_to }}</td>
                 <td>
-                  <div class="d-flex ga-1 flex-wrap">
-                    <v-btn size="x-small" color="primary" variant="flat" @click="openActionModal('view', record)">View</v-btn>
-                    <v-btn size="x-small" color="secondary" variant="flat" @click="openActionModal('edit', record)">Edit</v-btn>
-                    <v-btn size="x-small" color="error" variant="flat" @click="openActionModal('approve', record)">Approve</v-btn>
+                  <div class="d-flex ga-2 flex-wrap align-center">
+                    <v-btn icon size="small" class="saas-icon-btn" color="primary" variant="tonal" @click="openActionModal('view', record)">
+                      <EyeIcon size="16" stroke-width="2.2" />
+                    </v-btn>
+                    <v-btn icon size="small" class="saas-icon-btn" color="indigo" variant="tonal" @click="openActionModal('edit', record)">
+                      <EditIcon size="16" stroke-width="2.2" />
+                    </v-btn>
+                    <v-btn icon size="small" class="saas-icon-btn saas-approve-btn" color="success" variant="tonal" @click="openActionModal('approve', record)">
+                      <CheckIcon size="16" stroke-width="2.4" />
+                    </v-btn>
                   </div>
                 </td>
               </tr>
@@ -483,20 +446,21 @@ function handleModalAction(): void {
       </v-card>
     </div>
 
-    <v-dialog v-model="actionDialog" max-width="560" class="action-dialog" transition="dialog-bottom-transition">
+    <v-dialog v-model="actionDialog" max-width="620" class="action-dialog" transition="dialog-bottom-transition">
       <v-card class="action-modal-card">
         <v-card-title class="text-h4">{{ modalTitle }}</v-card-title>
         <v-card-subtitle>{{ modalSubtitle }}</v-card-subtitle>
         <v-card-text class="pt-4">
           <template v-if="actionType === 'view' && actionRecord">
             <v-list lines="one" density="compact">
-              <v-list-item title="Patient" :subtitle="actionRecord.name" />
-              <v-list-item title="Age" :subtitle="String(actionRecord.age)" />
-              <v-list-item title="Concern" :subtitle="actionRecord.concern" />
-              <v-list-item title="Assigned" :subtitle="actionRecord.assigned" />
+              <v-list-item title="Case ID" :subtitle="actionRecord.case_id" />
+              <v-list-item title="Patient" :subtitle="actionRecord.patient_name" />
+              <v-list-item title="Age" :subtitle="String(actionRecord.age || '--')" />
+              <v-list-item title="Concern" :subtitle="actionRecord.concern || '--'" />
+              <v-list-item title="Assigned" :subtitle="actionRecord.assigned_to" />
               <v-list-item title="Status" :subtitle="actionRecord.status" />
-              <v-list-item title="Intake Time" :subtitle="actionRecord.intakeTime" />
-              <v-list-item title="Booked Time" :subtitle="actionRecord.bookedTime" />
+              <v-list-item title="Intake Time" :subtitle="formatDateTime(actionRecord.intake_time)" />
+              <v-list-item title="Booked Time" :subtitle="formatDateTime(actionRecord.booked_time)" />
             </v-list>
           </template>
 
@@ -508,47 +472,50 @@ function handleModalAction(): void {
               <v-col cols="12" md="5">
                 <v-text-field v-model.number="patientForm.age" type="number" label="Age" variant="outlined" density="comfortable" />
               </v-col>
-              <v-col cols="12">
-                <v-text-field v-model="patientForm.concern" label="Concern" variant="outlined" density="comfortable" />
+              <v-col cols="12" md="6">
+                <v-text-field v-model="patientForm.email" label="Email" variant="outlined" density="comfortable" />
               </v-col>
               <v-col cols="12" md="6">
                 <v-text-field v-model="patientForm.assigned" label="Assigned Staff/Doctor" variant="outlined" density="comfortable" />
+              </v-col>
+              <v-col cols="12">
+                <v-text-field v-model="patientForm.concern" label="Concern" variant="outlined" density="comfortable" />
               </v-col>
               <v-col cols="12" md="6">
                 <v-select v-model="patientForm.status" :items="statusItems" label="Status" variant="outlined" density="comfortable" />
               </v-col>
               <v-col cols="12" md="6">
-                <v-text-field v-model="patientForm.intakeTime" label="Intake Time" variant="outlined" density="comfortable" />
+                <v-text-field v-model="patientForm.intakeTime" type="datetime-local" label="Intake Time" variant="outlined" density="comfortable" />
               </v-col>
               <v-col cols="12" md="6">
-                <v-text-field v-model="patientForm.bookedTime" label="Booked Time" variant="outlined" density="comfortable" />
+                <v-text-field v-model="patientForm.bookedTime" type="datetime-local" label="Booked Time" variant="outlined" density="comfortable" />
               </v-col>
             </v-row>
           </template>
 
           <template v-else-if="actionType === 'approve' && actionRecord">
-            <v-alert type="warning" variant="tonal" class="mb-3">
-              You are about to approve <strong>{{ actionRecord.name }}</strong>.
+            <v-alert type="warning" variant="tonal" class="mb-3" icon="mdi-check-circle-outline">
+              You are about to approve <strong>{{ actionRecord.patient_name }}</strong>.
             </v-alert>
             <div class="text-medium-emphasis">Current status: <strong>{{ actionRecord.status }}</strong></div>
             <div class="text-medium-emphasis">New status after approval: <strong>Active</strong></div>
           </template>
 
           <template v-else-if="actionType === 'clear'">
-            <v-alert type="info" variant="tonal">Reset search, status, and sort filters to defaults?</v-alert>
+            <v-alert type="info" variant="tonal" icon="mdi-filter-off-outline">Reset search, status, and sort filters to defaults?</v-alert>
           </template>
         </v-card-text>
         <v-card-actions class="px-6 pb-5">
           <v-spacer />
-          <v-btn variant="text" @click="closeActionModal">Cancel</v-btn>
-          <v-btn color="primary" variant="flat" :loading="actionLoading" @click="handleModalAction">
+          <v-btn variant="text" prepend-icon="mdi-close" @click="closeActionModal">Cancel</v-btn>
+          <v-btn color="primary" variant="flat" rounded="pill" prepend-icon="mdi-check-circle-outline" :append-icon="modalActionIcon" :loading="actionLoading" class="saas-primary-btn" @click="handleModalAction">
             {{ modalActionText }}
           </v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
 
-    <v-snackbar v-model="snackbar" :timeout="2200" :color="snackbarColor">
+    <v-snackbar v-model="snackbar" :timeout="2400" :color="snackbarColor">
       {{ snackbarText }}
     </v-snackbar>
   </div>
@@ -624,21 +591,10 @@ function handleModalAction(): void {
   box-shadow: 0 14px 26px rgba(12, 31, 60, 0.2);
 }
 
-.stat-green {
-  background: linear-gradient(135deg, #23ba63 0%, #129a51 100%);
-}
-
-.stat-blue {
-  background: linear-gradient(135deg, #40a9f2 0%, #357adf 100%);
-}
-
-.stat-orange {
-  background: linear-gradient(135deg, #ff9800 0%, #ff6f00 100%);
-}
-
-.stat-purple {
-  background: linear-gradient(135deg, #a82cf0 0%, #7a1fca 100%);
-}
+.stat-green { background: linear-gradient(135deg, #23ba63 0%, #129a51 100%); }
+.stat-blue { background: linear-gradient(135deg, #40a9f2 0%, #357adf 100%); }
+.stat-orange { background: linear-gradient(135deg, #ff9800 0%, #ff6f00 100%); }
+.stat-purple { background: linear-gradient(135deg, #a82cf0 0%, #7a1fca 100%); }
 
 .stats-value {
   margin-top: 4px;
@@ -650,6 +606,30 @@ function handleModalAction(): void {
 .stats-subtitle {
   margin-top: 2px;
   opacity: 0.95;
+}
+
+.saas-primary-btn {
+  box-shadow: 0 8px 18px rgba(24, 104, 208, 0.3);
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  text-transform: none;
+}
+
+.saas-outline-btn {
+  border-width: 1px !important;
+  text-transform: none;
+  font-weight: 600;
+}
+
+.saas-icon-btn {
+  border-radius: 10px;
+  border: 1px solid rgba(69, 98, 175, 0.22) !important;
+  box-shadow: 0 4px 12px rgba(23, 50, 103, 0.14);
+}
+
+.saas-approve-btn {
+  border-color: rgba(0, 167, 93, 0.24) !important;
+  box-shadow: 0 4px 12px rgba(0, 167, 93, 0.16);
 }
 
 .action-dialog :deep(.v-overlay__content) {

@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@mdi/js": "^7.4.47",
+    "@neondatabase/serverless": "^1.0.2",
     "@tsconfig/node22": "^22.0.0",
     "@typescript-eslint/parser": "^8.19.0",
     "apexcharts": "4.3.0",

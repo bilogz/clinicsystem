@@ -62,16 +62,38 @@ type UpdateAppointmentPayload = {
   visit_reason?: string;
 };
 
+export type CreateAppointmentPayload = {
+  patient_name: string;
+  patient_email?: string;
+  phone_number: string;
+  doctor_name: string;
+  department_name: string;
+  visit_type: string;
+  appointment_date: string;
+  preferred_time?: string;
+  visit_reason?: string;
+  patient_age?: number | null;
+  patient_gender?: string;
+  status?: AppointmentStatus;
+};
+
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '');
 }
 
 function resolveApiUrl(): string {
+  const directApi = import.meta.env.VITE_APPOINTMENTS_API_URL?.trim();
+  if (directApi) {
+    return trimTrailingSlashes(directApi);
+  }
+
   const configured = import.meta.env.VITE_BACKEND_API_BASE_URL?.trim();
   if (configured) {
-    return `${trimTrailingSlashes(configured)}/appointments_admin.php`;
+    return `${trimTrailingSlashes(configured)}/appointments`;
   }
-  return '/backend/api/appointments_admin.php';
+
+  // Frontend-only default: keep this module backend-agnostic (no PHP path binding).
+  return '/api/appointments';
 }
 
 function buildUrl(query: AppointmentQuery = {}): string {
@@ -159,6 +181,27 @@ export async function updateAppointment(payload: UpdateAppointmentPayload): Prom
   const parsed = await parseResponse<Record<string, unknown>>(response);
   if (!parsed.data) {
     throw 'No updated appointment returned.';
+  }
+
+  return normalizeRow(parsed.data);
+}
+
+export async function createAppointment(payload: CreateAppointmentPayload): Promise<AppointmentRow> {
+  const response = await fetch(resolveApiUrl(), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    credentials: 'include',
+    body: JSON.stringify({
+      action: 'create',
+      ...payload
+    })
+  });
+
+  const parsed = await parseResponse<Record<string, unknown>>(response);
+  if (!parsed.data) {
+    throw 'No created appointment returned.';
   }
 
   return normalizeRow(parsed.data);
