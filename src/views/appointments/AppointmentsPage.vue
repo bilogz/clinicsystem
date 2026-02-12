@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { EyeIcon, EditIcon } from 'vue-tabler-icons';
 import {
   fetchAppointments,
   updateAppointment,
@@ -335,10 +336,10 @@ onMounted(() => {
               <td>
                 <div class="d-flex flex-wrap ga-2 align-center">
                   <v-btn icon size="small" class="saas-icon-btn" color="primary" variant="tonal" @click="openView(item)">
-                    <v-icon icon="mdi-eye-outline" />
+                    <EyeIcon class="action-icon action-icon-view" size="16" stroke-width="2.2" />
                   </v-btn>
                   <v-btn icon size="small" class="saas-icon-btn" color="indigo" variant="tonal" @click="openEdit(item)">
-                    <v-icon icon="mdi-pencil-outline" />
+                    <EditIcon class="action-icon action-icon-edit" size="16" stroke-width="2.2" />
                   </v-btn>
                   <v-btn size="small" color="error" variant="flat" append-icon="mdi-chevron-down" @click="markReschedule(item)">Reschedule</v-btn>
                 </div>
@@ -454,5 +455,16 @@ onMounted(() => {
   border-radius: 10px;
   border: 1px solid rgba(69, 98, 175, 0.22) !important;
   box-shadow: 0 4px 12px rgba(23, 50, 103, 0.14);
+}
+.action-icon {
+  display: block;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.action-icon-view {
+  color: #2365e2;
+}
+.action-icon-edit {
+  color: #4f46e5;
 }
 </style>
