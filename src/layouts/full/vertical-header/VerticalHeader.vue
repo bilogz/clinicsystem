@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { useCustomizerStore } from '../../../stores/customizer';
 // Icon Imports
-import { BellIcon, SettingsIcon, SearchIcon, Menu2Icon } from 'vue-tabler-icons';
+import { BellIcon, SettingsIcon, SearchIcon, Menu2Icon, ClockIcon, TemperatureIcon } from 'vue-tabler-icons';
 
 // dropdown imports
 import NotificationDD from './NotificationDD.vue';
@@ -11,9 +11,72 @@ import Searchbar from './SearchBarPanel.vue';
 
 const customizer = useCustomizerStore();
 const showSearch = ref(false);
+const clockText = ref('');
+const temperatureText = ref('Temp --');
+let clockTimer: ReturnType<typeof setInterval> | null = null;
+let weatherTimer: ReturnType<typeof setInterval> | null = null;
+
 function searchbox() {
   showSearch.value = !showSearch.value;
 }
+
+function updateClock(): void {
+  const now = new Date();
+  const formatted = new Intl.DateTimeFormat(undefined, {
+    weekday: 'short',
+    hour: 'numeric',
+    minute: '2-digit'
+  }).format(now);
+  clockText.value = formatted;
+}
+
+async function fetchTemperature(lat: number, lon: number): Promise<void> {
+  try {
+    const response = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m`,
+      { method: 'GET' }
+    );
+    if (!response.ok) {
+      temperatureText.value = 'Temp --';
+      return;
+    }
+
+    const payload = (await response.json()) as { current?: { temperature_2m?: number } };
+    const value = payload.current?.temperature_2m;
+    temperatureText.value = Number.isFinite(value) ? `${Math.round(value as number)}°C` : 'Temp --';
+  } catch {
+    temperatureText.value = 'Temp --';
+  }
+}
+
+function refreshTemperature(): void {
+  if (!navigator.geolocation) {
+    temperatureText.value = 'Temp --';
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    ({ coords }) => {
+      fetchTemperature(coords.latitude, coords.longitude);
+    },
+    () => {
+      temperatureText.value = 'Temp --';
+    },
+    { enableHighAccuracy: false, timeout: 8000, maximumAge: 5 * 60 * 1000 }
+  );
+}
+
+onMounted(() => {
+  updateClock();
+  refreshTemperature();
+  clockTimer = setInterval(updateClock, 1000);
+  weatherTimer = setInterval(refreshTemperature, 10 * 60 * 1000);
+});
+
+onBeforeUnmount(() => {
+  if (clockTimer) clearInterval(clockTimer);
+  if (weatherTimer) clearInterval(weatherTimer);
+});
 </script>
 
 <template>
@@ -64,6 +127,17 @@ function searchbox() {
     <v-sheet class="mx-3 v-col-3 v-col-xl-2 v-col-lg-4 d-none d-lg-block">
       <Searchbar />
     </v-sheet>
+
+    <div class="d-none d-lg-flex align-center ga-2">
+      <v-chip color="lightsecondary" variant="flat" size="small" class="text-secondary">
+        <ClockIcon size="14" stroke-width="1.8" class="mr-1" />
+        {{ clockText }}
+      </v-chip>
+      <v-chip color="lightsecondary" variant="flat" size="small" class="text-secondary">
+        <TemperatureIcon size="14" stroke-width="1.8" class="mr-1" />
+        {{ temperatureText }}
+      </v-chip>
+    </div>
 
     <!---/Search part -->
 

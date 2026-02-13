@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { EyeIcon, EditIcon } from 'vue-tabler-icons';
+import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import {
   createAppointment,
   fetchAppointments,
@@ -24,8 +25,22 @@ const searchValue = ref('');
 const page = ref(1);
 const perPage = 8;
 
-const statusOptions = ['All Statuses', 'Confirmed', 'Pending', 'Accepted', 'Awaiting', 'Canceled'];
+const statusOptions = ['All Statuses', 'New', 'Confirmed', 'Pending', 'Accepted', 'Awaiting', 'Canceled'];
 const periodOptions = ['Period: Upcoming', 'Today', 'This Week', 'This Month'];
+const appointmentStatusOptions: AppointmentStatus[] = ['New', 'Pending', 'Confirmed', 'Accepted', 'Awaiting', 'Canceled'];
+const departmentOptions = ['General Medicine', 'Pediatrics', 'Orthopedic', 'Dental', 'Laboratory', 'Mental Health', 'Check-Up'];
+const paymentOptions = ['Cash', 'Card', 'HMO', 'Online'];
+const priorityOptions: Array<'Routine' | 'Urgent'> = ['Routine', 'Urgent'];
+const symptomTags = ['Fever', 'Cough', 'Headache', 'Chest Pain', 'Abdominal Pain', 'Dizziness', 'Back Pain', 'Nausea'];
+const departmentDoctorMap: Record<string, string[]> = {
+  'General Medicine': ['Dr. Humour', 'Dr. Jenni'],
+  Pediatrics: ['Dr. Rivera', 'Dr. Humour'],
+  Orthopedic: ['Dr. Morco', 'Dr. Martinez'],
+  Dental: ['Dr. Santos', 'Dr. Lim'],
+  Laboratory: ['Dr. A. Rivera', 'Dr. Jenni'],
+  'Mental Health': ['Dr. S. Villaraza', 'Dr. Jenni'],
+  'Check-Up': ['Dr. B. Martinez', 'Dr. Humour']
+};
 
 const rows = ref<AppointmentRow[]>([]);
 const analytics = ref<AppointmentAnalytics>({
@@ -55,19 +70,30 @@ const editForm = reactive({
 });
 
 const addForm = reactive<CreateAppointmentPayload>({
+  patient_id: '',
   patient_name: '',
   patient_email: '',
   phone_number: '',
+  emergency_contact: '',
+  insurance_provider: '',
+  payment_method: 'Cash',
+  appointment_priority: 'Routine',
   doctor_name: '',
   department_name: '',
   visit_type: '',
   appointment_date: '',
   preferred_time: '',
+  symptoms_summary: '',
+  doctor_notes: '',
   visit_reason: '',
   patient_age: null,
   patient_gender: '',
-  status: 'Pending'
+  status: 'New'
 });
+const addFormErrors = reactive<Record<string, string>>({});
+const useExistingPatient = ref(false);
+const patientLookupKey = ref('');
+const selectedSymptomTags = ref<string[]>([]);
 
 const serviceOptions = computed(() => {
   const dynamic = Array.from(new Set(rows.value.map((row) => row.service).filter(Boolean))).sort();
@@ -140,6 +166,32 @@ function normalizeDoctor(value: string): string {
   return value.replace(/^Doctor:\s*/i, '').trim();
 }
 
+const existingPatientOptions = computed(() => {
+  const seen = new Set<string>();
+  return rows.value
+    .map((row) => {
+      const pid = row.patientId || '';
+      const key = pid || `${row.patientName}|${row.phoneNumber}`;
+      if (seen.has(key)) return null;
+      seen.add(key);
+      return {
+        title: pid ? `${row.patientName} (${pid})` : `${row.patientName} (${row.phoneNumber})`,
+        value: key,
+        row
+      };
+    })
+    .filter((item): item is { title: string; value: string; row: AppointmentRow } => Boolean(item));
+});
+
+const doctorOptionsForDepartment = computed(() => {
+  const department = addForm.department_name || '';
+  const staticList = departmentDoctorMap[department] || [];
+  const dynamicList = rows.value
+    .filter((item) => item.department === addForm.department_name && item.doctor)
+    .map((item) => item.doctor);
+  return Array.from(new Set([...staticList, ...dynamicList]));
+});
+
 async function loadAppointments(): Promise<void> {
   loading.value = true;
   try {
@@ -197,18 +249,31 @@ function openEdit(item: AppointmentRow): void {
 }
 
 function openAddDialog(): void {
+  Object.keys(addFormErrors).forEach((key) => {
+    addFormErrors[key] = '';
+  });
+  useExistingPatient.value = false;
+  patientLookupKey.value = '';
+  selectedSymptomTags.value = [];
+  addForm.patient_id = '';
   addForm.patient_name = '';
   addForm.patient_email = '';
   addForm.phone_number = '';
-  addForm.doctor_name = doctorOptions.value.find((item) => item !== 'Doctor: Any') || '';
-  addForm.department_name = '';
-  addForm.visit_type = '';
+  addForm.emergency_contact = '';
+  addForm.insurance_provider = '';
+  addForm.payment_method = 'Cash';
+  addForm.appointment_priority = 'Routine';
+  addForm.department_name = 'General Medicine';
+  addForm.doctor_name = departmentDoctorMap['General Medicine'][0] || doctorOptions.value.find((item) => item !== 'Doctor: Any') || '';
+  addForm.visit_type = 'General Check-Up';
   addForm.appointment_date = toInputDate(new Date().toISOString());
   addForm.preferred_time = '';
+  addForm.symptoms_summary = '';
+  addForm.doctor_notes = '';
   addForm.visit_reason = '';
   addForm.patient_age = null;
   addForm.patient_gender = '';
-  addForm.status = 'Pending';
+  addForm.status = 'New';
   addDialog.value = true;
 }
 
@@ -252,11 +317,31 @@ async function markReschedule(item: AppointmentRow): Promise<void> {
 }
 
 async function saveAdd(): Promise<void> {
-  if (!addForm.patient_name || !addForm.phone_number || !addForm.doctor_name || !addForm.department_name || !addForm.visit_type || !addForm.appointment_date) {
-    showFeedback('error', 'Missing fields', 'Please complete required appointment fields.');
+  Object.keys(addFormErrors).forEach((key) => {
+    addFormErrors[key] = '';
+  });
+
+  const phone = String(addForm.phone_number || '').trim();
+  const isPhoneValid = /^[0-9+\-\s()]{7,20}$/.test(phone);
+  if (!String(addForm.patient_name || '').trim()) addFormErrors.patient_name = 'Patient name is required.';
+  if (!phone) addFormErrors.phone_number = 'Phone number is required.';
+  else if (!isPhoneValid) addFormErrors.phone_number = 'Enter a valid phone number.';
+  if (!String(addForm.department_name || '').trim()) addFormErrors.department_name = 'Department is required.';
+  if (!String(addForm.doctor_name || '').trim()) addFormErrors.doctor_name = 'Doctor is required.';
+  if (!String(addForm.visit_type || '').trim()) addFormErrors.visit_type = 'Visit type is required.';
+  if (!String(addForm.appointment_date || '').trim()) addFormErrors.appointment_date = 'Appointment date is required.';
+  if (!String(addForm.status || '').trim()) addFormErrors.status = 'Status is required.';
+  if (useExistingPatient.value && !String(addForm.patient_id || '').trim()) addFormErrors.patient_id = 'Patient ID is required for existing patient lookup.';
+  if (addForm.appointment_priority === 'Urgent' && !String(addForm.emergency_contact || '').trim()) {
+    addFormErrors.emergency_contact = 'Emergency contact is required for urgent appointments.';
+  }
+
+  if (Object.values(addFormErrors).some(Boolean)) {
+    showFeedback('error', 'Validation failed', 'Please fix highlighted fields before saving.');
     return;
   }
 
+  addForm.symptoms_summary = [selectedSymptomTags.value.join(', '), String(addForm.visit_reason || '').trim()].filter(Boolean).join(' | ');
   addSaving.value = true;
   try {
     await createAppointment(addForm);
@@ -269,6 +354,33 @@ async function saveAdd(): Promise<void> {
     addSaving.value = false;
   }
 }
+
+function applyExistingPatientLookup(value: string): void {
+  patientLookupKey.value = value;
+  const target = existingPatientOptions.value.find((item) => item.value === value);
+  if (!target) return;
+  const row = target.row;
+  addForm.patient_id = row.patientId || '';
+  addForm.patient_name = row.patientName;
+  addForm.patient_email = row.patientEmail || '';
+  addForm.phone_number = row.phoneNumber || '';
+}
+
+function onDepartmentChange(value: string): void {
+  const doctors = departmentDoctorMap[value] || [];
+  if (!doctors.length) return;
+  if (!doctors.includes(addForm.doctor_name || '')) {
+    addForm.doctor_name = doctors[0];
+  }
+}
+
+watch(
+  () => addForm.department_name,
+  (value) => {
+    if (!value) return;
+    onDepartmentChange(value);
+  }
+);
 
 watch([statusFilter, serviceFilter, doctorFilter, periodFilter], () => {
   page.value = 1;
@@ -429,14 +541,19 @@ onMounted(() => {
         <v-card-title class="saas-modal-title text-h6 font-weight-bold">Appointment Details</v-card-title>
         <v-card-text v-if="selected">
           <div><strong>Booking ID:</strong> {{ selected.bookingId }}</div>
+          <div><strong>Patient ID:</strong> {{ selected.patientId || '--' }}</div>
           <div><strong>Patient:</strong> {{ selected.patientName }}</div>
           <div><strong>Email:</strong> {{ selected.patientEmail || '--' }}</div>
           <div><strong>Phone:</strong> {{ selected.phoneNumber || '--' }}</div>
+          <div><strong>Emergency Contact:</strong> {{ selected.emergencyContact || '--' }}</div>
           <div><strong>Service:</strong> {{ selected.service }}</div>
           <div><strong>Doctor:</strong> {{ selected.doctor }}</div>
+          <div><strong>Priority:</strong> {{ selected.appointmentPriority || 'Routine' }}</div>
           <div><strong>Date:</strong> {{ formatDate(selected.scheduleDate) }}</div>
           <div><strong>Time:</strong> {{ selected.scheduleTime || '--' }}</div>
           <div><strong>Status:</strong> {{ selected.status }}</div>
+          <div><strong>Symptoms:</strong> {{ selected.symptomsSummary || '--' }}</div>
+          <div><strong>Doctor Notes:</strong> {{ selected.doctorNotes || '--' }}</div>
           <div><strong>Reason:</strong> {{ selected.visitReason || '--' }}</div>
         </v-card-text>
         <v-card-actions class="justify-end">
@@ -454,7 +571,7 @@ onMounted(() => {
             <v-col cols="12" md="6"><v-text-field v-model="editForm.service" label="Service" variant="outlined" density="comfortable" hide-details /></v-col>
             <v-col cols="12" md="6"><v-text-field v-model="editForm.date" type="date" label="Date" variant="outlined" density="comfortable" hide-details /></v-col>
             <v-col cols="12" md="6"><v-text-field v-model="editForm.time" label="Preferred Time" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12" md="6"><v-select v-model="editForm.status" :items="['Confirmed', 'Pending', 'Accepted', 'Awaiting', 'Canceled']" label="Status" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12" md="6"><v-select v-model="editForm.status" :items="appointmentStatusOptions" label="Status" variant="outlined" density="comfortable" /></v-col>
             <v-col cols="12"><v-textarea v-model="editForm.reason" label="Visit Reason" rows="3" variant="outlined" density="comfortable" /></v-col>
           </v-row>
         </v-card-text>
@@ -470,17 +587,106 @@ onMounted(() => {
         <v-card-title class="saas-modal-title text-h6 font-weight-bold">Add Appointment</v-card-title>
         <v-card-text>
           <v-row>
-            <v-col cols="12" md="6"><v-text-field v-model="addForm.patient_name" label="Patient Name*" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="addForm.patient_email" label="Patient Email" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="addForm.phone_number" label="Phone Number*" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="addForm.doctor_name" label="Doctor*" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="addForm.department_name" label="Department*" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="addForm.visit_type" label="Visit Type*" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="addForm.appointment_date" type="date" label="Appointment Date*" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="addForm.preferred_time" label="Preferred Time" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model.number="addForm.patient_age" type="number" min="0" label="Patient Age" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="addForm.patient_gender" label="Patient Gender" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12"><v-textarea v-model="addForm.visit_reason" label="Visit Reason" rows="3" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12"><div class="modal-section-title">Patient Info</div></v-col>
+            <v-col cols="12" md="5">
+              <v-switch v-model="useExistingPatient" inset color="primary" label="Existing Patient Lookup" hide-details />
+            </v-col>
+            <v-col cols="12" md="7" v-if="useExistingPatient">
+              <v-select
+                :items="existingPatientOptions"
+                item-title="title"
+                item-value="value"
+                :model-value="patientLookupKey"
+                label="Search Existing Patient"
+                variant="outlined"
+                density="comfortable"
+                hint="Select patient from previous appointment records"
+                persistent-hint
+                @update:model-value="applyExistingPatientLookup"
+              />
+            </v-col>
+            <v-col cols="12" md="4">
+              <v-text-field
+                v-model="addForm.patient_id"
+                label="Patient ID (MRN)"
+                variant="outlined"
+                density="comfortable"
+                :error-messages="addFormErrors.patient_id"
+                hint="Required if using existing patient flow"
+                persistent-hint
+              />
+            </v-col>
+            <v-col cols="12" md="8">
+              <v-text-field v-model="addForm.patient_name" label="Patient Name *" variant="outlined" density="comfortable" :error-messages="addFormErrors.patient_name" />
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-text-field v-model="addForm.phone_number" label="Phone Number *" variant="outlined" density="comfortable" :error-messages="addFormErrors.phone_number" />
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-text-field v-model="addForm.emergency_contact" label="Emergency / Contact Person" variant="outlined" density="comfortable" :error-messages="addFormErrors.emergency_contact" />
+            </v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="addForm.patient_email" label="Patient Email" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12" md="3"><v-text-field v-model.number="addForm.patient_age" type="number" min="0" label="Patient Age" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12" md="3"><v-select v-model="addForm.patient_gender" :items="['Male', 'Female', 'Other']" label="Patient Gender" variant="outlined" density="comfortable" /></v-col>
+
+            <v-col cols="12"><div class="modal-section-title">Appointment Details</div></v-col>
+            <v-col cols="12" md="6">
+              <v-select
+                v-model="addForm.department_name"
+                :items="departmentOptions"
+                label="Department *"
+                variant="outlined"
+                density="comfortable"
+                :error-messages="addFormErrors.department_name"
+                hint="Doctor list depends on selected department"
+                persistent-hint
+              />
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-select
+                v-model="addForm.doctor_name"
+                :items="doctorOptionsForDepartment"
+                label="Doctor *"
+                variant="outlined"
+                density="comfortable"
+                :error-messages="addFormErrors.doctor_name"
+              />
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-text-field v-model="addForm.visit_type" label="Visit Type *" variant="outlined" density="comfortable" :error-messages="addFormErrors.visit_type" hint="Example: Follow-up, General Check-Up" persistent-hint />
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-select v-model="addForm.appointment_priority" :items="priorityOptions" label="Appointment Priority" variant="outlined" density="comfortable" />
+            </v-col>
+            <v-col cols="12" md="4">
+              <SaasDateTimePickerField v-model="addForm.appointment_date" mode="date" label="Appointment Date *" :error-messages="addFormErrors.appointment_date" />
+            </v-col>
+            <v-col cols="12" md="4">
+              <SaasDateTimePickerField v-model="addForm.preferred_time" mode="time" label="Preferred Time" clearable />
+            </v-col>
+            <v-col cols="12" md="4">
+              <v-select v-model="addForm.status" :items="appointmentStatusOptions" label="Appointment Status *" variant="outlined" density="comfortable" :error-messages="addFormErrors.status" />
+            </v-col>
+
+            <v-col cols="12"><div class="modal-section-title">Medical Info</div></v-col>
+            <v-col cols="12" md="6"><v-select v-model="addForm.payment_method" :items="paymentOptions" label="Payment Method" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="addForm.insurance_provider" label="Insurance Provider / Plan" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12">
+              <v-combobox
+                v-model="selectedSymptomTags"
+                :items="symptomTags"
+                chips
+                multiple
+                clearable
+                label="Symptoms / Chief Complaint (Structured)"
+                variant="outlined"
+                density="comfortable"
+                hint="Pick common symptoms and add custom tags if needed"
+                persistent-hint
+              />
+            </v-col>
+            <v-col cols="12"><v-textarea v-model="addForm.visit_reason" label="Chief Complaint Details" rows="2" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12"><v-textarea v-model="addForm.doctor_notes" label="Notes for Doctor" rows="2" variant="outlined" density="comfortable" /></v-col>
           </v-row>
         </v-card-text>
         <v-card-actions class="justify-end">
@@ -606,5 +812,13 @@ onMounted(() => {
   color: #1b2e67 !important;
   background: linear-gradient(180deg, rgba(35, 101, 226, 0.08) 0%, rgba(35, 101, 226, 0) 100%);
   border-bottom: 1px solid rgba(76, 104, 168, 0.14);
+}
+
+.modal-section-title {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #26417f;
 }
 </style>

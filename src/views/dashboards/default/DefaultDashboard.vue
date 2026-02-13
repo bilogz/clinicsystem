@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { fetchClinicDashboard, type ClinicDashboardPayload } from '@/services/clinicDashboard';
+import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
+import { REALTIME_POLICY } from '@/config/realtimePolicy';
 
 const loading = ref(false);
 const loadError = ref('');
 const viewActive = ref(true);
+const realtime = useRealtimeListSync();
 const dashboard = ref<ClinicDashboardPayload>({
   generatedAt: '',
   summary: {
@@ -199,28 +202,38 @@ function statusColor(status: string): string {
 }
 
 async function loadDashboard(): Promise<void> {
-  loading.value = true;
-  loadError.value = '';
-
-  try {
-    const payload = await fetchClinicDashboard();
-    if (!viewActive.value) return;
-    dashboard.value = payload;
-  } catch (error) {
-    if (!viewActive.value) return;
-    loadError.value = error instanceof Error ? error.message : 'Unable to load clinic dashboard data.';
-  } finally {
-    if (!viewActive.value) return;
-    loading.value = false;
-  }
+  const payload = await realtime.runLatest(
+    async () => fetchClinicDashboard(),
+    {
+      onStart: () => {
+        loading.value = true;
+        loadError.value = '';
+      },
+      onFinish: () => {
+        if (!viewActive.value) return;
+        loading.value = false;
+      },
+      onError: (error) => {
+        if (!viewActive.value) return;
+        loadError.value = error instanceof Error ? error.message : 'Unable to load clinic dashboard data.';
+      }
+    }
+  );
+  if (!payload || !viewActive.value) return;
+  dashboard.value = payload;
 }
 
 onMounted(() => {
-  loadDashboard();
+  void loadDashboard();
+  realtime.startPolling(() => {
+    void loadDashboard();
+  }, REALTIME_POLICY.polling.reportsMs);
 });
 
 onBeforeUnmount(() => {
   viewActive.value = false;
+  realtime.stopPolling();
+  realtime.invalidatePending();
 });
 </script>
 

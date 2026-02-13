@@ -1,129 +1,234 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
-import { EyeIcon, EditIcon, CheckIcon } from 'vue-tabler-icons';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRouter } from 'vue-router';
+import { ArchiveIcon, CheckIcon, DotsIcon, EditIcon } from 'vue-tabler-icons';
+import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import { useAuthStore } from '@/stores/auth';
+import { createAppointment } from '@/services/appointmentsAdmin';
+import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
+import { REALTIME_POLICY } from '@/config/realtimePolicy';
 import {
-  approveRegistration,
+  archiveRegistration,
+  assignRegistration,
   createRegistration,
   fetchRegistrations,
+  rejectRegistration,
+  setRegistrationStatus,
   updateRegistration,
   type RegistrationAnalytics,
   type RegistrationRow,
   type RegistrationStatus
 } from '@/services/registrationsAdmin';
 
-type StatCard = {
-  title: string;
-  value: string;
-  subtitle: string;
-  cardClass: string;
-};
+type QueueStatus = 'All Statuses' | RegistrationStatus;
+type SortFilter = 'Sort Latest Intake' | 'Sort Name A-Z' | 'Sort Name Z-A';
+type ModalType = 'add' | 'edit' | 'triage' | 'decision' | 'archive' | 'assign';
+type DecisionType = 'approve' | 'reject';
+type UserRole = 'Admin' | 'Receptionist' | 'Doctor' | 'Nurse';
 
-type ActionType = 'add' | 'view' | 'edit' | 'approve' | 'clear';
-
-type PatientForm = {
+type PatientDraft = {
   name: string;
   email: string;
+  phone: string;
   age: number;
+  sex: 'Male' | 'Female' | 'Other' | '';
+  address: string;
+  emergencyName: string;
+  emergencyPhone: string;
+  insuranceProvider: string;
+  insuranceNumber: string;
+  medicalNotes: string;
   concern: string;
-  assigned: string;
+  assignedTo: string;
+  priority: 'Low' | 'Moderate' | 'High' | 'Critical';
   intakeTime: string;
   bookedTime: string;
   status: RegistrationStatus;
 };
 
-const statusFilters = ['All Statuses', 'Pending', 'Active', 'Archived'];
-const sortFilters = ['Sort Latest Intake', 'Sort Name A-Z', 'Sort Name Z-A'];
-const statusItems: RegistrationStatus[] = ['Pending', 'Active', 'Archived'];
-const pageSize = 6;
+type ValidationErrors = Partial<Record<keyof PatientDraft, string>>;
+
+type WorkflowEvent = {
+  title: string;
+  detail: string;
+  at: string;
+};
+
+const router = useRouter();
+const authStore = useAuthStore();
+
+const pageSize = 8;
+const statuses: RegistrationStatus[] = ['Pending', 'Review', 'Active', 'Archived'];
+const statusFilters: QueueStatus[] = ['All Statuses', 'Pending', 'Review', 'Active', 'Archived'];
+const sortFilters: SortFilter[] = ['Sort Latest Intake', 'Sort Name A-Z', 'Sort Name Z-A'];
 
 const records = ref<RegistrationRow[]>([]);
-const analytics = ref<RegistrationAnalytics>({
-  pending: 0,
-  active: 0,
-  concerns: 0,
-  approvalRate: 0
-});
+const analytics = ref<RegistrationAnalytics>({ pending: 0, active: 0, concerns: 0, approvalRate: 0 });
+const totalItems = ref(0);
+const pageCount = ref(1);
+const listPage = ref(1);
 
 const pageLoading = ref(true);
+const tableLoading = ref(false);
 const pageReady = ref(false);
-const listPage = ref(1);
-const pageCount = ref(1);
-const totalItems = ref(0);
 
 const searchQuery = ref('');
-const selectedStatus = ref('All Statuses');
-const selectedSort = ref('Sort Latest Intake');
+const selectedStatus = ref<QueueStatus>('All Statuses');
+const selectedSort = ref<SortFilter>('Sort Latest Intake');
+
+const previewOpen = ref(false);
+const previewRecord = ref<RegistrationRow | null>(null);
 
 const actionDialog = ref(false);
-const actionType = ref<ActionType>('view');
+const actionType = ref<ModalType>('add');
+const previewActionLoading = ref(false);
+const modalLoading = ref(false);
 const actionRecord = ref<RegistrationRow | null>(null);
-const actionLoading = ref(false);
+const decisionType = ref<DecisionType>('approve');
+const decisionReason = ref('');
+const archiveReason = ref('');
 
 const snackbar = ref(false);
 const snackbarText = ref('');
 const snackbarColor = ref<'success' | 'info' | 'warning' | 'error'>('success');
 
-const patientForm = ref<PatientForm>({
-  name: '',
-  email: '',
-  age: 18,
-  concern: '',
-  assigned: '',
-  intakeTime: '',
-  bookedTime: '',
-  status: 'Pending'
+const form = ref<PatientDraft>(buildEmptyDraft());
+const formErrors = ref<ValidationErrors>({});
+const realtime = useRealtimeListSync();
+
+const currentRole = computed<UserRole>(() => {
+  const role = String(authStore.user?.role || 'Receptionist').trim().toLowerCase();
+  if (role === 'admin') return 'Admin';
+  if (role === 'doctor') return 'Doctor';
+  if (role === 'nurse') return 'Nurse';
+  return 'Receptionist';
 });
 
-const statCards = computed<StatCard[]>(() => [
-  { title: 'Pending', value: String(analytics.value.pending), subtitle: 'Awaiting Action', cardClass: 'stat-green' },
-  { title: 'Active', value: String(analytics.value.active), subtitle: 'Processed Records', cardClass: 'stat-blue' },
-  { title: 'Concerns', value: String(analytics.value.concerns), subtitle: 'New Concerns', cardClass: 'stat-orange' },
-  { title: 'Approval Rate', value: `${analytics.value.approvalRate}%`, subtitle: `Based on Totals (${totalItems.value})`, cardClass: 'stat-purple' }
+const canEditByRole = computed(() => currentRole.value === 'Admin' || currentRole.value === 'Receptionist' || currentRole.value === 'Nurse');
+const canApproveByRole = computed(() => currentRole.value === 'Admin' || currentRole.value === 'Doctor');
+const canAssignByRole = computed(() => currentRole.value === 'Admin' || currentRole.value === 'Receptionist' || currentRole.value === 'Nurse');
+const canArchiveByRole = computed(() => currentRole.value === 'Admin');
+
+const statCards = computed(() => [
+  {
+    title: 'Pending',
+    value: String(analytics.value.pending),
+    subtitle: 'Awaiting review',
+    className: 'stat-pending'
+  },
+  {
+    title: 'Active',
+    value: String(analytics.value.active),
+    subtitle: 'In active care',
+    className: 'stat-active'
+  },
+  {
+    title: 'Concerns',
+    value: String(analytics.value.concerns),
+    subtitle: 'Need triage attention',
+    className: 'stat-concern'
+  },
+  {
+    title: 'Approval Rate',
+    value: `${analytics.value.approvalRate}%`,
+    subtitle: `Across ${totalItems.value} registrations`,
+    className: 'stat-rate'
+  }
 ]);
 
-const activeCount = computed(() => analytics.value.active);
-const pendingCount = computed(() => analytics.value.pending);
-
 const totalCountText = computed(() => {
-  if (totalItems.value === 0) return 'Showing 0-0 of 0';
+  if (totalItems.value === 0) return 'Showing 0-0 of 0 records';
   const first = (listPage.value - 1) * pageSize + 1;
   const last = Math.min(listPage.value * pageSize, totalItems.value);
-  return `Showing ${first}-${last} of ${totalItems.value}`;
+  return `Showing ${first}-${last} of ${totalItems.value} records`;
+});
+
+const duplicateWarning = computed(() => {
+  const currentName = form.value.name.trim().toLowerCase();
+  const currentEmail = form.value.email.trim().toLowerCase();
+  if (!currentName && !currentEmail) return '';
+
+  const duplicate = records.value.find((item) => {
+    const nameMatch = currentName && item.patient_name.trim().toLowerCase() === currentName;
+    const emailMatch = currentEmail && item.patient_email.trim().toLowerCase() === currentEmail;
+    return Boolean(nameMatch || emailMatch);
+  });
+
+  if (!duplicate) return '';
+  return `Possible duplicate: ${duplicate.patient_name} (${duplicate.case_id})`;
 });
 
 const modalTitle = computed(() => {
-  if (actionType.value === 'add') return 'Add Patient';
-  if (actionType.value === 'view') return 'View Patient Details';
-  if (actionType.value === 'edit') return 'Edit Patient Record';
-  if (actionType.value === 'approve') return 'Approve Patient';
-  return 'Clear Filters';
+  if (actionType.value === 'add') return 'Add Patient Registration';
+  if (actionType.value === 'edit') return 'Edit Registration';
+  if (actionType.value === 'triage') return 'Concern Review / Triage';
+  if (actionType.value === 'assign') return 'Assign Staff';
+  if (actionType.value === 'decision') return decisionType.value === 'approve' ? 'Approve Registration' : 'Reject Registration';
+  return 'Archive Registration';
 });
 
-const modalSubtitle = computed(() => {
-  if (actionType.value === 'add') return 'Create a new registration intake entry.';
-  if (actionType.value === 'view') return 'Review this record before taking any action.';
-  if (actionType.value === 'edit') return 'Apply updates to this patient registration record.';
-  if (actionType.value === 'approve') return 'This will set the selected patient status to Active.';
-  return 'Reset search, status, and sort filters to default values.';
-});
-
-const modalActionText = computed(() => {
-  if (actionType.value === 'add') return 'Add Patient';
-  if (actionType.value === 'view') return 'Close';
+const modalActionLabel = computed(() => {
+  if (actionType.value === 'add') return 'Create Registration';
   if (actionType.value === 'edit') return 'Save Changes';
-  if (actionType.value === 'approve') return 'Approve Patient';
-  return 'Reset Filters';
+  if (actionType.value === 'triage') return 'Save Routing';
+  if (actionType.value === 'assign') return 'Assign';
+  if (actionType.value === 'decision') return decisionType.value === 'approve' ? 'Approve' : 'Reject';
+  return 'Archive';
 });
 
-const modalActionIcon = computed(() => {
-  if (actionType.value === 'add') return 'mdi-account-plus-outline';
-  if (actionType.value === 'view') return 'mdi-check';
-  if (actionType.value === 'edit') return 'mdi-content-save-outline';
-  if (actionType.value === 'approve') return 'mdi-check-circle-outline';
-  return 'mdi-filter-off-outline';
+const timeline = computed<WorkflowEvent[]>(() => {
+  if (!previewRecord.value) return [];
+  const base = previewRecord.value;
+  return [
+    {
+      title: 'Registration Created',
+      detail: `Case ${base.case_id} registered under ${base.status}.`,
+      at: base.intake_time
+    },
+    {
+      title: 'Assigned Staff',
+      detail: `Current assignment: ${base.assigned_to || 'Unassigned'}.`,
+      at: base.booked_time
+    },
+    {
+      title: 'Workflow Status',
+      detail: `Patient is currently in ${base.status}.`,
+      at: base.booked_time
+    }
+  ];
 });
 
-const pagedRecords = computed(() => records.value);
+function buildEmptyDraft(): PatientDraft {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  return {
+    name: '',
+    email: '',
+    phone: '',
+    age: 18,
+    sex: '',
+    address: '',
+    emergencyName: '',
+    emergencyPhone: '',
+    insuranceProvider: '',
+    insuranceNumber: '',
+    medicalNotes: '',
+    concern: '',
+    assignedTo: 'Nurse Triage',
+    priority: 'Low',
+    intakeTime: local,
+    bookedTime: local,
+    status: 'Pending'
+  };
+}
+
+function toInputDateTime(value: string): string {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const local = new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
 
 function formatDateTime(value: string): string {
   if (!value) return '--';
@@ -138,25 +243,25 @@ function formatDateTime(value: string): string {
   }).format(parsed);
 }
 
-function toInputDateTime(value: string): string {
-  if (!value) return '';
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return '';
-  const local = new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60000);
-  return local.toISOString().slice(0, 16);
-}
-
-function toInitials(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return 'PT';
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return `${words[0][0] || ''}${words[1][0] || ''}`.toUpperCase();
-}
-
 function statusColor(status: RegistrationStatus): string {
   if (status === 'Active') return 'success';
-  if (status === 'Pending') return 'warning';
-  return 'secondary';
+  if (status === 'Review') return 'info';
+  if (status === 'Archived') return 'secondary';
+  return 'warning';
+}
+
+function priorityColor(priority: PatientDraft['priority']): string {
+  if (priority === 'Critical') return 'error';
+  if (priority === 'High') return 'warning';
+  if (priority === 'Moderate') return 'info';
+  return 'success';
+}
+
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return 'PT';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase();
 }
 
 function showToast(message: string, color: 'success' | 'info' | 'warning' | 'error' = 'success'): void {
@@ -165,120 +270,243 @@ function showToast(message: string, color: 'success' | 'info' | 'warning' | 'err
   snackbar.value = true;
 }
 
-async function loadRecords(): Promise<void> {
-  try {
-    const payload = await fetchRegistrations({
-      search: searchQuery.value.trim(),
-      status: selectedStatus.value,
-      sort: selectedSort.value,
-      page: listPage.value,
-      perPage: pageSize
-    });
-    records.value = payload.items;
-    analytics.value = payload.analytics;
-    totalItems.value = payload.meta.total;
-    pageCount.value = payload.meta.totalPages;
-  } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error), 'error');
-  }
-}
-
-function resetForm(): void {
-  const now = new Date();
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  patientForm.value = {
-    name: '',
-    email: '',
-    age: 18,
-    concern: '',
-    assigned: '',
-    intakeTime: local,
-    bookedTime: local,
-    status: 'Pending'
-  };
-}
-
-function copyRecordToForm(record: RegistrationRow): void {
-  patientForm.value = {
+function normalizeFormForRecord(record: RegistrationRow): void {
+  form.value = {
+    ...buildEmptyDraft(),
     name: record.patient_name,
     email: record.patient_email || '',
-    age: Number(record.age || 0),
+    age: Number(record.age || 18),
     concern: record.concern || '',
-    assigned: record.assigned_to || '',
+    assignedTo: record.assigned_to || 'Nurse Triage',
     intakeTime: toInputDateTime(record.intake_time),
     bookedTime: toInputDateTime(record.booked_time),
     status: record.status
   };
+  formErrors.value = {};
 }
 
-function openActionModal(action: ActionType, record?: RegistrationRow): void {
-  actionType.value = action;
+function validateDraft(): boolean {
+  const errors: ValidationErrors = {};
+  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  if (!form.value.name.trim()) {
+    errors.name = 'Patient name is required.';
+  }
+
+  if (form.value.email && !emailPattern.test(form.value.email.trim())) {
+    errors.email = 'Enter a valid email address.';
+  }
+
+  if (!Number.isFinite(form.value.age) || form.value.age < 0 || form.value.age > 120) {
+    errors.age = 'Age must be between 0 and 120.';
+  }
+
+  if (!form.value.concern.trim()) {
+    errors.concern = 'Chief concern is required.';
+  }
+
+  if (!form.value.assignedTo.trim()) {
+    errors.assignedTo = 'Assigned clinician is required.';
+  }
+
+  if (!form.value.intakeTime) {
+    errors.intakeTime = 'Intake time is required.';
+  }
+
+  if (!form.value.bookedTime) {
+    errors.bookedTime = 'Booked time is required.';
+  }
+
+  formErrors.value = errors;
+  return Object.keys(errors).length === 0;
+}
+
+async function loadRecords(options: { silent?: boolean } = {}): Promise<void> {
+  const payload = await realtime.runLatest(
+    async () =>
+      fetchRegistrations({
+        search: searchQuery.value.trim(),
+        status: selectedStatus.value,
+        sort: selectedSort.value,
+        page: listPage.value,
+        perPage: pageSize
+      }),
+    {
+      silent: options.silent,
+      onStart: () => {
+        tableLoading.value = true;
+      },
+      onFinish: () => {
+        tableLoading.value = false;
+      },
+      onError: (error) => {
+        showToast(error instanceof Error ? error.message : String(error), 'error');
+      }
+    }
+  );
+
+  if (!payload) return;
+  records.value = payload.items;
+  analytics.value = payload.analytics;
+  totalItems.value = payload.meta.total;
+  pageCount.value = payload.meta.totalPages;
+}
+
+function openModal(type: ModalType, record?: RegistrationRow): void {
+  actionType.value = type;
   actionRecord.value = record || null;
-  if (action === 'add') resetForm();
-  if ((action === 'edit' || action === 'view') && record) copyRecordToForm(record);
+  decisionType.value = 'approve';
+  decisionReason.value = '';
+  archiveReason.value = '';
+
+  if (type === 'add') {
+    form.value = buildEmptyDraft();
+    formErrors.value = {};
+  }
+
+  if ((type === 'edit' || type === 'triage' || type === 'assign') && record) {
+    normalizeFormForRecord(record);
+  }
+
   actionDialog.value = true;
 }
 
-function closeActionModal(): void {
-  if (actionLoading.value) return;
+function closeModal(): void {
+  if (modalLoading.value) return;
   actionDialog.value = false;
 }
 
-function clearFilters(): void {
+function openPreview(record: RegistrationRow): void {
+  previewRecord.value = record;
+  previewOpen.value = true;
+}
+
+function applySearchReset(): void {
   searchQuery.value = '';
   selectedStatus.value = 'All Statuses';
   selectedSort.value = 'Sort Latest Intake';
   listPage.value = 1;
-  void loadRecords();
 }
 
-async function handleModalAction(): Promise<void> {
-  if (actionType.value === 'view') {
-    actionDialog.value = false;
+function canDecision(record: RegistrationRow): boolean {
+  return canApproveByRole.value && (record.status === 'Pending' || record.status === 'Review');
+}
+
+function canEdit(record: RegistrationRow): boolean {
+  if (!canEditByRole.value) return false;
+  return record.status !== 'Archived';
+}
+
+function canAssign(record: RegistrationRow): boolean {
+  if (!canAssignByRole.value) return false;
+  return record.status === 'Pending' || record.status === 'Review' || record.status === 'Active';
+}
+
+function canArchive(record: RegistrationRow): boolean {
+  if (!canArchiveByRole.value) return false;
+  return record.status !== 'Archived';
+}
+
+async function runOverflowAction(action: 'history' | 'assign' | 'triage' | 'archive', record: RegistrationRow): Promise<void> {
+  if (action === 'history') {
+    openPreview(record);
     return;
   }
 
-  if (actionType.value === 'clear') {
-    clearFilters();
-    showToast('Filters reset.', 'info');
-    actionDialog.value = false;
+  if (action === 'assign') {
+    openModal('assign', record);
     return;
   }
 
-  actionLoading.value = true;
+  if (action === 'triage') {
+    openModal('triage', record);
+    return;
+  }
+
+  if (action === 'archive') {
+    openModal('archive', record);
+  }
+}
+
+async function submitModal(): Promise<void> {
+  if (actionType.value === 'add' || actionType.value === 'edit' || actionType.value === 'triage') {
+    if (!validateDraft()) return;
+  }
+
+  if (actionType.value === 'assign') {
+    if (!form.value.assignedTo.trim()) {
+      formErrors.value = { assignedTo: 'Assigned staff / doctor is required.' };
+      return;
+    }
+  }
+
+  modalLoading.value = true;
   try {
     if (actionType.value === 'add') {
       await createRegistration({
-        patient_name: patientForm.value.name,
-        patient_email: patientForm.value.email,
-        age: patientForm.value.age,
-        concern: patientForm.value.concern,
-        assigned_to: patientForm.value.assigned,
-        intake_time: patientForm.value.intakeTime,
-        booked_time: patientForm.value.bookedTime,
-        status: patientForm.value.status
+        patient_name: form.value.name,
+        patient_email: form.value.email,
+        age: form.value.age,
+        concern: `${form.value.concern}${form.value.medicalNotes ? ` | Notes: ${form.value.medicalNotes}` : ''}`,
+        assigned_to: form.value.assignedTo,
+        intake_time: form.value.intakeTime,
+        booked_time: form.value.bookedTime,
+        status: form.value.status
       });
-      showToast('Patient added successfully.');
+      showToast('Patient registration created.', 'success');
     }
 
     if (actionType.value === 'edit' && actionRecord.value) {
       await updateRegistration({
         id: actionRecord.value.id,
-        patient_name: patientForm.value.name,
-        patient_email: patientForm.value.email,
-        age: patientForm.value.age,
-        concern: patientForm.value.concern,
-        assigned_to: patientForm.value.assigned,
-        intake_time: patientForm.value.intakeTime,
-        booked_time: patientForm.value.bookedTime,
-        status: patientForm.value.status
+        patient_name: form.value.name,
+        patient_email: form.value.email,
+        age: form.value.age,
+        concern: `${form.value.concern}${form.value.medicalNotes ? ` | Notes: ${form.value.medicalNotes}` : ''}`,
+        assigned_to: form.value.assignedTo,
+        intake_time: form.value.intakeTime,
+        booked_time: form.value.bookedTime,
+        status: form.value.status
       });
-      showToast('Patient record updated.');
+      showToast('Registration updated.', 'success');
     }
 
-    if (actionType.value === 'approve' && actionRecord.value) {
-      await approveRegistration(actionRecord.value.id);
-      showToast('Patient approved.', 'success');
+    if (actionType.value === 'triage' && actionRecord.value) {
+      const triageSummary = `[Priority: ${form.value.priority}] ${form.value.concern}`;
+      await updateRegistration({
+        id: actionRecord.value.id,
+        patient_name: form.value.name,
+        patient_email: form.value.email,
+        age: form.value.age,
+        concern: triageSummary,
+        assigned_to: form.value.assignedTo,
+        intake_time: form.value.intakeTime,
+        booked_time: form.value.bookedTime,
+        status: 'Review'
+      });
+      showToast('Concern routing updated. Case moved to Review.', 'info');
+    }
+
+    if (actionType.value === 'decision' && actionRecord.value) {
+      if (decisionType.value === 'approve') {
+        await setRegistrationStatus(actionRecord.value.id, 'Active');
+        showToast('Registration approved and moved to Active.', 'success');
+      } else {
+        const reason = decisionReason.value.trim() || 'Rejected by reviewer';
+        await rejectRegistration(actionRecord.value.id, reason);
+        showToast('Registration rejected and archived.', 'warning');
+      }
+    }
+
+    if (actionType.value === 'assign' && actionRecord.value) {
+      await assignRegistration(actionRecord.value.id, form.value.assignedTo.trim());
+      showToast(`Assigned to ${form.value.assignedTo}.`, 'success');
+    }
+
+    if (actionType.value === 'archive' && actionRecord.value) {
+      const reason = archiveReason.value.trim() || 'Archived by registration staff';
+      await archiveRegistration(actionRecord.value.id, reason);
+      showToast('Registration archived.', 'info');
     }
 
     actionDialog.value = false;
@@ -286,13 +514,51 @@ async function handleModalAction(): Promise<void> {
   } catch (error) {
     showToast(error instanceof Error ? error.message : String(error), 'error');
   } finally {
-    actionLoading.value = false;
+    modalLoading.value = false;
   }
 }
 
-watch([searchQuery, selectedStatus, selectedSort], () => {
+async function createAppointmentFromPreview(): Promise<void> {
+  if (!previewRecord.value) return;
+  previewActionLoading.value = true;
+  try {
+    const target = previewRecord.value;
+    await createAppointment({
+      patient_name: target.patient_name,
+      patient_email: target.patient_email || undefined,
+      phone_number: 'N/A',
+      doctor_name: target.assigned_to || 'TBD',
+      department_name: 'General Medicine',
+      visit_type: 'Check-Up',
+      appointment_date: new Date().toISOString().slice(0, 10),
+      preferred_time: '09:00',
+      visit_reason: target.concern || 'Registration follow-up',
+      patient_age: target.age || undefined,
+      status: 'Pending'
+    });
+
+    await setRegistrationStatus(target.id, 'Review');
+    showToast('Appointment draft created and registration moved to Review.', 'success');
+    await loadRecords();
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    previewActionLoading.value = false;
+  }
+}
+
+watch([selectedStatus, selectedSort], () => {
   listPage.value = 1;
   void loadRecords();
+});
+
+let searchDebounce: ReturnType<typeof setTimeout> | null = null;
+watch(searchQuery, () => {
+  if (searchDebounce) clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    listPage.value = 1;
+    void loadRecords();
+  }, REALTIME_POLICY.debounce.registrationSearchMs);
 });
 
 watch(listPage, () => {
@@ -301,42 +567,54 @@ watch(listPage, () => {
 
 onMounted(async () => {
   await loadRecords();
+  realtime.startPolling(() => {
+    void loadRecords({ silent: true });
+  }, REALTIME_POLICY.polling.registrationMs);
   pageLoading.value = false;
   requestAnimationFrame(() => {
     pageReady.value = true;
   });
 });
-</script>
 
+onUnmounted(() => {
+  realtime.stopPolling();
+  realtime.invalidatePending();
+  if (searchDebounce) clearTimeout(searchDebounce);
+});
+</script>
 <template>
-  <div class="registration-page">
+  <div class="registration-refactor-page">
     <div v-if="pageLoading">
       <v-skeleton-loader type="heading, text" class="mb-5" />
       <v-row class="mb-4">
-        <v-col cols="12" sm="6" lg="3" v-for="n in 4" :key="`stat-skeleton-${n}`">
+        <v-col v-for="n in 4" :key="`sk-${n}`" cols="12" sm="6" lg="3">
           <v-skeleton-loader type="card" />
         </v-col>
       </v-row>
       <v-card variant="outlined">
         <v-card-text>
-          <v-skeleton-loader type="text, text, table-heading, table-row-divider@6" />
+          <v-skeleton-loader type="table-heading, table-row-divider@6" />
         </v-card-text>
       </v-card>
     </div>
 
-    <div v-else class="registration-content" :class="{ 'is-visible': pageReady }">
-      <v-card class="hero-banner mb-4" elevation="0">
+    <div v-else class="registration-refactor-content" :class="{ 'is-visible': pageReady }">
+      <v-card class="hero mb-4" elevation="0">
         <v-card-text class="pa-5">
-          <div class="d-flex flex-wrap align-center justify-space-between ga-4">
+          <div class="d-flex flex-wrap ga-4 justify-space-between align-center">
             <div>
-              <div class="hero-kicker">Clinical Operations</div>
-              <h1 class="text-h4 font-weight-black mb-1">Registration (Patient Management)</h1>
-              <p class="hero-subtitle mb-0">Manage patient details, intake records, and concerns.</p>
+              <div class="hero-kicker">Patient Management</div>
+              <h1 class="text-h4 font-weight-black mb-2">Registration Workflow Hub</h1>
+              <p class="hero-text mb-0">Track intake, triage concerns, approvals, and downstream handoffs across modules.</p>
             </div>
-            <div class="hero-side-card">
-              <div class="hero-side-label">Patient Intake</div>
-              <div class="hero-side-text">Review, update, and approve records from one queue.</div>
-              <v-btn color="primary" variant="flat" prepend-icon="mdi-account-plus-outline" class="mt-2 saas-primary-btn" rounded="pill" @click="openActionModal('add')">Add Patient</v-btn>
+
+            <div class="hero-actions d-flex ga-2 flex-wrap">
+              <v-btn class="capsule-btn" color="primary" prepend-icon="mdi-account-plus-outline" rounded="pill" @click="openModal('add')">
+                New Registration
+              </v-btn>
+              <v-btn class="capsule-btn" color="white" variant="outlined" prepend-icon="mdi-filter-off-outline" rounded="pill" @click="applySearchReset">
+                Reset Filters
+              </v-btn>
             </div>
           </div>
         </v-card-text>
@@ -344,20 +622,28 @@ onMounted(async () => {
 
       <v-row class="mb-4">
         <v-col v-for="card in statCards" :key="card.title" cols="12" sm="6" lg="3">
-          <v-card :class="['stats-card', card.cardClass]" elevation="0">
+          <v-card :class="['metric-card', card.className]" elevation="0">
             <v-card-text>
-              <div class="text-uppercase text-caption font-weight-bold">{{ card.title }}</div>
-              <div class="stats-value">{{ card.value }}</div>
-              <div class="stats-subtitle">{{ card.subtitle }}</div>
+              <div class="text-caption text-uppercase font-weight-bold">{{ card.title }}</div>
+              <div class="metric-value">{{ card.value }}</div>
+              <div class="metric-subtitle">{{ card.subtitle }}</div>
             </v-card-text>
           </v-card>
         </v-col>
       </v-row>
 
-      <v-card variant="outlined">
+      <v-card variant="outlined" class="table-card">
         <v-card-item>
-          <v-card-title class="text-h4">Patient Records</v-card-title>
+          <v-card-title class="text-h5">Patient Records</v-card-title>
+          <template #append>
+            <div class="d-flex ga-2">
+              <v-btn size="small" variant="outlined" prepend-icon="mdi-calendar-clock-outline" @click="router.push('/appointments')">Appointments</v-btn>
+              <v-btn size="small" variant="outlined" prepend-icon="mdi-run-fast" @click="router.push('/modules/walk-in')">Walk-In Queue</v-btn>
+              <v-btn size="small" variant="outlined" prepend-icon="mdi-flask-outline" @click="router.push('/modules/laboratory')">Laboratory</v-btn>
+            </div>
+          </template>
         </v-card-item>
+
         <v-card-text>
           <v-row class="mb-3">
             <v-col cols="12" md="6">
@@ -367,77 +653,99 @@ onMounted(async () => {
                 variant="outlined"
                 hide-details
                 prepend-inner-icon="mdi-magnify"
-                placeholder="Search by patient name; email, registration number, or booked staff..."
+                placeholder="Search patient name, case ID, concern, or assigned staff"
               />
             </v-col>
             <v-col cols="12" sm="6" md="3">
-              <v-select :items="statusFilters" v-model="selectedStatus" density="comfortable" variant="outlined" hide-details prepend-inner-icon="mdi-filter-outline" />
+              <v-select v-model="selectedStatus" :items="statusFilters" density="comfortable" hide-details variant="outlined" prepend-inner-icon="mdi-filter-outline" />
             </v-col>
             <v-col cols="12" sm="6" md="3">
-              <v-select :items="sortFilters" v-model="selectedSort" density="comfortable" variant="outlined" hide-details prepend-inner-icon="mdi-sort" />
+              <v-select v-model="selectedSort" :items="sortFilters" density="comfortable" hide-details variant="outlined" prepend-inner-icon="mdi-sort" />
             </v-col>
           </v-row>
 
-          <div class="mb-3 d-flex flex-wrap ga-2 align-center">
-            <v-chip color="secondary" variant="tonal" size="small">Online Registration</v-chip>
-            <v-chip color="primary" variant="tonal" size="small">Register Marion</v-chip>
-            <v-chip color="warning" variant="tonal" size="small">Active: {{ activeCount }}</v-chip>
-            <v-chip color="info" variant="tonal" size="small">Pending: {{ pendingCount }}</v-chip>
-            <v-spacer />
-            <v-btn size="small" variant="outlined" color="primary" rounded="pill" prepend-icon="mdi-filter-off-outline" class="saas-outline-btn" @click="openActionModal('clear')">Clear Filters</v-btn>
+          <div class="table-wrap position-relative">
+            <v-progress-linear v-if="tableLoading" indeterminate color="primary" class="mb-2" />
+            <v-table density="comfortable" fixed-header>
+              <thead>
+                <tr>
+                  <th>PATIENT</th>
+                  <th>CONCERN</th>
+                  <th>INTAKE</th>
+                  <th>STATUS</th>
+                  <th>ASSIGNED</th>
+                  <th>ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="record in records" :key="record.id">
+                  <td class="row-primary-trigger" @click="openPreview(record)">
+                    <div class="d-flex align-center ga-3">
+                      <v-avatar size="34" color="primary" variant="tonal">{{ initials(record.patient_name) }}</v-avatar>
+                      <div>
+                        <div class="font-weight-medium">{{ record.patient_name }} <span class="text-medium-emphasis">{{ record.age || '--' }}</span></div>
+                        <div class="text-caption text-medium-emphasis">{{ record.patient_email || record.case_id }}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td class="max-concern">{{ record.concern || '--' }}</td>
+                  <td>{{ formatDateTime(record.intake_time) }}</td>
+                  <td>
+                    <v-chip size="small" :color="statusColor(record.status)" variant="tonal">{{ record.status }}</v-chip>
+                  </td>
+                  <td>{{ record.assigned_to || 'Unassigned' }}</td>
+                  <td>
+                    <div class="d-flex flex-wrap ga-2">
+                      <v-btn
+                        v-if="canDecision(record)"
+                        class="row-action-btn"
+                        icon
+                        size="small"
+                        color="success"
+                        variant="tonal"
+                        @click="decisionType = 'approve'; openModal('decision', record)"
+                      >
+                        <CheckIcon class="row-action-tabler-icon" size="16" stroke-width="2.2" />
+                      </v-btn>
+                      <v-btn v-if="canEdit(record)" class="row-action-btn" icon size="small" color="indigo" variant="tonal" @click="openModal('edit', record)">
+                        <EditIcon class="row-action-tabler-icon" size="16" stroke-width="2.1" />
+                      </v-btn>
+
+                      <v-menu location="bottom end">
+                        <template #activator="{ props }">
+                          <v-btn class="row-action-btn" icon size="small" color="secondary" variant="tonal" v-bind="props">
+                            <DotsIcon size="18" class="row-action-overflow-icon" />
+                          </v-btn>
+                        </template>
+                        <v-list density="compact">
+                          <v-list-item @click="runOverflowAction('history', record)">
+                            <v-list-item-title>View History</v-list-item-title>
+                          </v-list-item>
+                          <v-list-item v-if="canAssign(record)" @click="runOverflowAction('assign', record)">
+                            <v-list-item-title>Assign Staff</v-list-item-title>
+                          </v-list-item>
+                          <v-list-item v-if="canEdit(record)" @click="runOverflowAction('triage', record)">
+                            <v-list-item-title>Review Concern</v-list-item-title>
+                          </v-list-item>
+                          <v-list-item v-if="canArchive(record)" @click="runOverflowAction('archive', record)">
+                            <template #prepend>
+                              <ArchiveIcon size="18" class="mr-2 text-secondary" />
+                            </template>
+                            <v-list-item-title>Archive</v-list-item-title>
+                          </v-list-item>
+                        </v-list>
+                      </v-menu>
+                    </div>
+                  </td>
+                </tr>
+                <tr v-if="!tableLoading && records.length === 0">
+                  <td colspan="6" class="text-center text-medium-emphasis py-5">No records match the current filters.</td>
+                </tr>
+              </tbody>
+            </v-table>
           </div>
 
-          <v-table density="comfortable">
-            <thead>
-              <tr>
-                <th>PATIENT</th>
-                <th>CONCERN</th>
-                <th>INTAKE TIME</th>
-                <th>BOOKED TIME</th>
-                <th>STATUS</th>
-                <th>ASSIGNED</th>
-                <th>ACTIONS</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="record in pagedRecords" :key="record.id">
-                <td>
-                  <div class="d-flex align-center ga-3">
-                    <v-avatar size="34" color="primary" variant="tonal">{{ toInitials(record.patient_name) }}</v-avatar>
-                    <div>
-                      <div class="font-weight-medium">{{ record.patient_name }} <span class="text-medium-emphasis">{{ record.age || '--' }}</span></div>
-                      <div class="text-caption text-medium-emphasis">{{ record.patient_email || record.case_id }}</div>
-                    </div>
-                  </div>
-                </td>
-                <td>{{ record.concern || '--' }}</td>
-                <td>{{ formatDateTime(record.intake_time) }}</td>
-                <td>{{ formatDateTime(record.booked_time) }}</td>
-                <td>
-                  <v-chip size="small" :color="statusColor(record.status)" variant="tonal">{{ record.status }}</v-chip>
-                </td>
-                <td>{{ record.assigned_to }}</td>
-                <td>
-                  <div class="d-flex ga-2 flex-wrap align-center">
-                    <v-btn icon size="small" class="saas-icon-btn" color="primary" variant="tonal" @click="openActionModal('view', record)">
-                      <EyeIcon size="16" stroke-width="2.2" />
-                    </v-btn>
-                    <v-btn icon size="small" class="saas-icon-btn" color="indigo" variant="tonal" @click="openActionModal('edit', record)">
-                      <EditIcon size="16" stroke-width="2.2" />
-                    </v-btn>
-                    <v-btn icon size="small" class="saas-icon-btn saas-approve-btn" color="success" variant="tonal" @click="openActionModal('approve', record)">
-                      <CheckIcon size="16" stroke-width="2.4" />
-                    </v-btn>
-                  </div>
-                </td>
-              </tr>
-              <tr v-if="pagedRecords.length === 0">
-                <td colspan="7" class="text-center text-medium-emphasis py-5">No patient records match your filters.</td>
-              </tr>
-            </tbody>
-          </v-table>
-
-          <div class="d-flex align-center mt-3 text-medium-emphasis text-caption">
+          <div class="d-flex align-center mt-3 text-caption text-medium-emphasis">
             <span>{{ totalCountText }}</span>
             <v-spacer />
             <v-pagination v-model="listPage" :length="pageCount" density="comfortable" total-visible="7" />
@@ -446,198 +754,290 @@ onMounted(async () => {
       </v-card>
     </div>
 
-    <v-dialog v-model="actionDialog" max-width="620" class="action-dialog" transition="dialog-bottom-transition">
-      <v-card class="action-modal-card">
-        <v-card-title class="text-h4">{{ modalTitle }}</v-card-title>
-        <v-card-subtitle>{{ modalSubtitle }}</v-card-subtitle>
-        <v-card-text class="pt-4">
-          <template v-if="actionType === 'view' && actionRecord">
-            <v-list lines="one" density="compact">
-              <v-list-item title="Case ID" :subtitle="actionRecord.case_id" />
-              <v-list-item title="Patient" :subtitle="actionRecord.patient_name" />
-              <v-list-item title="Age" :subtitle="String(actionRecord.age || '--')" />
-              <v-list-item title="Concern" :subtitle="actionRecord.concern || '--'" />
-              <v-list-item title="Assigned" :subtitle="actionRecord.assigned_to" />
-              <v-list-item title="Status" :subtitle="actionRecord.status" />
-              <v-list-item title="Intake Time" :subtitle="formatDateTime(actionRecord.intake_time)" />
-              <v-list-item title="Booked Time" :subtitle="formatDateTime(actionRecord.booked_time)" />
-            </v-list>
-          </template>
+    <v-navigation-drawer v-model="previewOpen" temporary location="right" width="420" class="preview-drawer">
+      <div class="pa-4" v-if="previewRecord">
+        <div class="d-flex align-center justify-space-between mb-4">
+          <h3 class="text-h6 mb-0">Patient Profile</h3>
+          <v-btn icon variant="text" @click="previewOpen = false"><v-icon>mdi-close</v-icon></v-btn>
+        </div>
 
-          <template v-else-if="actionType === 'add' || actionType === 'edit'">
+        <v-card variant="tonal" class="mb-3">
+          <v-card-text>
+            <div class="text-overline">Case ID</div>
+            <div class="font-weight-bold mb-1">{{ previewRecord.case_id }}</div>
+            <div class="text-h6">{{ previewRecord.patient_name }}</div>
+            <div class="text-caption text-medium-emphasis">{{ previewRecord.patient_email || 'No email on file' }}</div>
+            <div class="mt-3 d-flex ga-2 flex-wrap">
+              <v-chip size="small" :color="statusColor(previewRecord.status)" variant="tonal">{{ previewRecord.status }}</v-chip>
+              <v-chip size="small" color="info" variant="tonal">Assigned: {{ previewRecord.assigned_to }}</v-chip>
+            </div>
+          </v-card-text>
+        </v-card>
+
+        <v-card variant="outlined" class="mb-3">
+          <v-card-title class="text-subtitle-1">Timeline</v-card-title>
+          <v-list density="compact">
+            <v-list-item v-for="(event, idx) in timeline" :key="`${event.title}-${idx}`">
+              <v-list-item-title>{{ event.title }}</v-list-item-title>
+              <v-list-item-subtitle>{{ event.detail }}</v-list-item-subtitle>
+              <template #append>
+                <span class="text-caption text-medium-emphasis">{{ formatDateTime(event.at) }}</span>
+              </template>
+            </v-list-item>
+          </v-list>
+        </v-card>
+
+        <div class="d-grid ga-2">
+          <v-btn color="primary" variant="flat" prepend-icon="mdi-calendar-plus" :loading="previewActionLoading" @click="createAppointmentFromPreview">
+            Create Appointment Draft
+          </v-btn>
+          <v-btn variant="outlined" prepend-icon="mdi-run-fast" @click="router.push('/modules/walk-in')">Send to Walk-In Queue</v-btn>
+          <v-btn variant="outlined" prepend-icon="mdi-hospital-box-outline" @click="router.push('/modules/check-up')">Open Check-Up Module</v-btn>
+        </div>
+      </div>
+    </v-navigation-drawer>
+
+    <v-dialog v-model="actionDialog" max-width="880" transition="dialog-bottom-transition" :persistent="modalLoading">
+      <v-card class="modal-card">
+        <v-card-title class="text-h5 d-flex align-center justify-space-between">
+          <span>{{ modalTitle }}</span>
+          <v-btn icon variant="text" :disabled="modalLoading" @click="closeModal"><v-icon>mdi-close</v-icon></v-btn>
+        </v-card-title>
+        <v-card-text>
+          <template v-if="actionType === 'add' || actionType === 'edit' || actionType === 'triage'">
+            <v-alert v-if="duplicateWarning" type="warning" variant="tonal" class="mb-3">{{ duplicateWarning }}</v-alert>
+
             <v-row>
-              <v-col cols="12" md="7">
-                <v-text-field v-model="patientForm.name" label="Patient Name" variant="outlined" density="comfortable" />
+              <v-col cols="12" md="6">
+                <v-text-field v-model="form.name" label="Full name" variant="outlined" density="comfortable" :error-messages="formErrors.name" />
               </v-col>
-              <v-col cols="12" md="5">
-                <v-text-field v-model.number="patientForm.age" type="number" label="Age" variant="outlined" density="comfortable" />
+              <v-col cols="12" md="3">
+                <v-text-field v-model.number="form.age" label="Age" type="number" variant="outlined" density="comfortable" :error-messages="formErrors.age" />
+              </v-col>
+              <v-col cols="12" md="3">
+                <v-select v-model="form.sex" :items="['Male', 'Female', 'Other']" label="Sex" variant="outlined" density="comfortable" />
+              </v-col>
+
+              <v-col cols="12" md="6">
+                <v-text-field v-model="form.email" label="Email" variant="outlined" density="comfortable" :error-messages="formErrors.email" />
               </v-col>
               <v-col cols="12" md="6">
-                <v-text-field v-model="patientForm.email" label="Email" variant="outlined" density="comfortable" />
+                <v-text-field v-model="form.phone" label="Phone" variant="outlined" density="comfortable" />
               </v-col>
-              <v-col cols="12" md="6">
-                <v-text-field v-model="patientForm.assigned" label="Assigned Staff/Doctor" variant="outlined" density="comfortable" />
-              </v-col>
+
               <v-col cols="12">
-                <v-text-field v-model="patientForm.concern" label="Concern" variant="outlined" density="comfortable" />
+                <v-text-field v-model="form.address" label="Address" variant="outlined" density="comfortable" />
+              </v-col>
+
+              <v-col cols="12" md="6">
+                <v-text-field v-model="form.emergencyName" label="Emergency contact name" variant="outlined" density="comfortable" />
               </v-col>
               <v-col cols="12" md="6">
-                <v-select v-model="patientForm.status" :items="statusItems" label="Status" variant="outlined" density="comfortable" />
+                <v-text-field v-model="form.emergencyPhone" label="Emergency contact phone" variant="outlined" density="comfortable" />
+              </v-col>
+
+              <v-col cols="12" md="6">
+                <v-text-field v-model="form.insuranceProvider" label="Insurance provider" variant="outlined" density="comfortable" />
               </v-col>
               <v-col cols="12" md="6">
-                <v-text-field v-model="patientForm.intakeTime" type="datetime-local" label="Intake Time" variant="outlined" density="comfortable" />
+                <v-text-field v-model="form.insuranceNumber" label="Insurance member ID" variant="outlined" density="comfortable" />
+              </v-col>
+
+              <v-col cols="12">
+                <v-textarea v-model="form.concern" label="Chief concern" rows="2" auto-grow variant="outlined" density="comfortable" :error-messages="formErrors.concern" />
+              </v-col>
+
+              <v-col cols="12">
+                <v-textarea v-model="form.medicalNotes" label="Medical notes" rows="2" auto-grow variant="outlined" density="comfortable" />
+              </v-col>
+
+              <v-col cols="12" md="4">
+                <v-select v-model="form.priority" :items="['Low', 'Moderate', 'High', 'Critical']" label="Priority" variant="outlined" density="comfortable">
+                  <template #selection>
+                    <v-chip size="small" :color="priorityColor(form.priority)" variant="tonal">{{ form.priority }}</v-chip>
+                  </template>
+                </v-select>
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-select v-model="form.status" :items="statuses" label="Lifecycle status" variant="outlined" density="comfortable" />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-text-field v-model="form.assignedTo" label="Assigned doctor / staff" variant="outlined" density="comfortable" :error-messages="formErrors.assignedTo" />
+              </v-col>
+
+              <v-col cols="12" md="6">
+                <SaasDateTimePickerField v-model="form.intakeTime" mode="datetime" label="Intake time" :error-messages="formErrors.intakeTime" />
               </v-col>
               <v-col cols="12" md="6">
-                <v-text-field v-model="patientForm.bookedTime" type="datetime-local" label="Booked Time" variant="outlined" density="comfortable" />
+                <SaasDateTimePickerField v-model="form.bookedTime" mode="datetime" label="Booked time" :error-messages="formErrors.bookedTime" />
               </v-col>
             </v-row>
           </template>
 
-          <template v-else-if="actionType === 'approve' && actionRecord">
-            <v-alert type="warning" variant="tonal" class="mb-3" icon="mdi-check-circle-outline">
-              You are about to approve <strong>{{ actionRecord.patient_name }}</strong>.
+          <template v-else-if="actionType === 'decision' && actionRecord">
+            <v-radio-group v-model="decisionType" inline>
+              <v-radio label="Approve" value="approve" color="success" />
+              <v-radio label="Reject" value="reject" color="error" />
+            </v-radio-group>
+            <v-alert :type="decisionType === 'approve' ? 'success' : 'warning'" variant="tonal" class="mb-3">
+              {{ decisionType === 'approve' ? 'This registration will move to Active and notify downstream workflows.' : 'This registration will be moved to Archived with a reason.' }}
             </v-alert>
-            <div class="text-medium-emphasis">Current status: <strong>{{ actionRecord.status }}</strong></div>
-            <div class="text-medium-emphasis">New status after approval: <strong>Active</strong></div>
+            <v-textarea
+              v-if="decisionType === 'reject'"
+              v-model="decisionReason"
+              label="Rejection reason"
+              variant="outlined"
+              rows="3"
+              auto-grow
+              placeholder="Capture why this registration is rejected"
+            />
           </template>
 
-          <template v-else-if="actionType === 'clear'">
-            <v-alert type="info" variant="tonal" icon="mdi-filter-off-outline">Reset search, status, and sort filters to defaults?</v-alert>
+          <template v-else-if="actionType === 'assign' && actionRecord">
+            <v-alert type="info" variant="tonal" class="mb-3">Assign this patient to the appropriate staff or doctor.</v-alert>
+            <v-text-field
+              v-model="form.assignedTo"
+              label="Assigned staff / doctor"
+              variant="outlined"
+              density="comfortable"
+              :error-messages="formErrors.assignedTo"
+            />
+          </template>
+
+          <template v-else-if="actionType === 'archive' && actionRecord">
+            <v-alert type="info" variant="tonal" class="mb-3">Archived records stay searchable for reporting and audits.</v-alert>
+            <v-textarea
+              v-model="archiveReason"
+              label="Archive reason"
+              variant="outlined"
+              rows="3"
+              auto-grow
+              placeholder="Reason for archive"
+            />
           </template>
         </v-card-text>
+
         <v-card-actions class="px-6 pb-5">
           <v-spacer />
-          <v-btn variant="text" prepend-icon="mdi-close" @click="closeActionModal">Cancel</v-btn>
-          <v-btn color="primary" variant="flat" rounded="pill" prepend-icon="mdi-check-circle-outline" :append-icon="modalActionIcon" :loading="actionLoading" class="saas-primary-btn" @click="handleModalAction">
-            {{ modalActionText }}
-          </v-btn>
+          <v-btn variant="text" prepend-icon="mdi-close" @click="closeModal">Cancel</v-btn>
+          <v-btn color="primary" variant="flat" rounded="pill" :loading="modalLoading" @click="submitModal">{{ modalActionLabel }}</v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
 
-    <v-snackbar v-model="snackbar" :timeout="2400" :color="snackbarColor">
-      {{ snackbarText }}
-    </v-snackbar>
+    <v-snackbar v-model="snackbar" :timeout="2600" :color="snackbarColor">{{ snackbarText }}</v-snackbar>
   </div>
 </template>
 
 <style scoped>
-.hero-banner {
-  border-radius: 16px;
+.registration-refactor-content {
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 220ms ease, transform 220ms ease;
+}
+
+.registration-refactor-content.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.hero {
+  border-radius: 18px;
   color: #fff;
-  background: linear-gradient(120deg, #162d84 0%, #2f63cc 54%, #3ea8f0 100%);
-  box-shadow: 0 14px 30px rgba(19, 45, 126, 0.22);
+  background: linear-gradient(125deg, #124170 0%, #156ba6 55%, #2aa18a 100%);
+  box-shadow: 0 16px 30px rgba(14, 45, 84, 0.24);
 }
 
 .hero-kicker {
   display: inline-flex;
-  align-items: center;
-  padding: 4px 12px;
-  margin-bottom: 10px;
+  padding: 5px 12px;
   border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.34);
   background: rgba(255, 255, 255, 0.14);
-  border: 1px solid rgba(255, 255, 255, 0.32);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.55px;
   text-transform: uppercase;
 }
 
-.hero-subtitle {
-  color: rgba(255, 255, 255, 0.95);
-  text-shadow: 0 1px 2px rgba(8, 20, 52, 0.35);
+.hero-text {
+  max-width: 680px;
+  color: rgba(255, 255, 255, 0.92);
 }
 
-.hero-side-card {
-  min-width: 250px;
-  padding: 14px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.9);
-  color: #14316e;
-}
-
-.hero-side-label {
-  font-size: 11px;
+.capsule-btn {
+  text-transform: none;
   font-weight: 700;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
 }
 
-.hero-side-text {
-  margin-top: 4px;
-  font-size: 13px;
-}
-
-.registration-content {
-  opacity: 0;
-  transform: translateY(12px);
-  transition: opacity 320ms ease, transform 320ms ease;
-}
-
-.registration-content.is-visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-.stats-card {
+.metric-card {
   color: #fff;
-  border-radius: 12px;
-  box-shadow: 0 10px 24px rgba(12, 31, 60, 0.18);
-  transition: transform 220ms ease, box-shadow 220ms ease;
+  border-radius: 14px;
+  box-shadow: 0 8px 20px rgba(11, 35, 69, 0.18);
 }
 
-.stats-card:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 14px 26px rgba(12, 31, 60, 0.2);
+.stat-pending {
+  background: linear-gradient(130deg, #f59e0b 0%, #d97706 100%);
 }
 
-.stat-green { background: linear-gradient(135deg, #23ba63 0%, #129a51 100%); }
-.stat-blue { background: linear-gradient(135deg, #40a9f2 0%, #357adf 100%); }
-.stat-orange { background: linear-gradient(135deg, #ff9800 0%, #ff6f00 100%); }
-.stat-purple { background: linear-gradient(135deg, #a82cf0 0%, #7a1fca 100%); }
+.stat-active {
+  background: linear-gradient(130deg, #15803d 0%, #16a34a 100%);
+}
 
-.stats-value {
-  margin-top: 4px;
-  font-size: 42px;
-  line-height: 1.1;
+.stat-concern {
+  background: linear-gradient(130deg, #2563eb 0%, #1d4ed8 100%);
+}
+
+.stat-rate {
+  background: linear-gradient(130deg, #0f766e 0%, #0d9488 100%);
+}
+
+.metric-value {
+  margin-top: 6px;
+  font-size: 40px;
+  line-height: 1.05;
   font-weight: 800;
 }
 
-.stats-subtitle {
-  margin-top: 2px;
+.metric-subtitle {
   opacity: 0.95;
 }
 
-.saas-primary-btn {
-  box-shadow: 0 8px 18px rgba(24, 104, 208, 0.3);
-  font-weight: 700;
-  letter-spacing: 0.2px;
-  text-transform: none;
+.table-card {
+  border-radius: 14px;
 }
 
-.saas-outline-btn {
-  border-width: 1px !important;
-  text-transform: none;
-  font-weight: 600;
+.max-concern {
+  max-width: 270px;
 }
 
-.saas-icon-btn {
-  border-radius: 10px;
-  border: 1px solid rgba(69, 98, 175, 0.22) !important;
-  box-shadow: 0 4px 12px rgba(23, 50, 103, 0.14);
+.row-primary-trigger {
+  cursor: pointer;
 }
 
-.saas-approve-btn {
-  border-color: rgba(0, 167, 93, 0.24) !important;
-  box-shadow: 0 4px 12px rgba(0, 167, 93, 0.16);
+.row-action-btn {
+  border: 1px solid rgba(60, 74, 98, 0.12);
 }
 
-.action-dialog :deep(.v-overlay__content) {
-  transition: transform 220ms ease, opacity 220ms ease;
+.row-action-tabler-icon {
+  color: rgba(35, 43, 56, 0.9);
 }
 
-.action-modal-card {
+.row-action-overflow-icon {
+  color: #4a5568;
+}
+
+.preview-drawer {
+  border-left: 1px solid rgba(18, 65, 112, 0.16);
+}
+
+.modal-card {
   border-radius: 16px;
-  overflow: hidden;
+}
+
+@media (max-width: 960px) {
+  .metric-value {
+    font-size: 32px;
+  }
 }
 </style>

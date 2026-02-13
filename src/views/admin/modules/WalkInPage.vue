@@ -1,7 +1,10 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { CheckIcon } from 'vue-tabler-icons';
+import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import { createWalkIn, fetchWalkIns, runWalkInAction, type Severity, type WalkInCase, type WalkInStatus, type WalkInAnalytics } from '@/services/walkInAdmin';
+import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
+import { REALTIME_POLICY } from '@/config/realtimePolicy';
 
 type ActionType = 'new' | 'identify' | 'queue_triage' | 'start_triage' | 'triage' | 'assign' | 'complete' | 'emergency' | 'view';
 type UserRole = 'Nurse' | 'Doctor' | 'Admin';
@@ -9,7 +12,20 @@ type UserRole = 'Nurse' | 'Doctor' | 'Admin';
 type WalkInForm = {
   patientName: string;
   age: number;
+  sex: 'Male' | 'Female' | 'Other' | '';
+  dateOfBirth: string;
   contact: string;
+  address: string;
+  emergencyContact: string;
+  existingPatient: boolean;
+  patientRef: string;
+  visitDepartment: 'General OPD' | 'ER' | 'Pediatrics' | 'Orthopedic' | 'Dental';
+  checkinTime: string;
+  painScale: number;
+  temperatureC: number | null;
+  bloodPressure: string;
+  pulseBpm: number | null;
+  weightKg: number | null;
   complaint: string;
   severity: Severity;
   assignedDoctor: string;
@@ -46,19 +62,61 @@ const walkInCases = ref<WalkInCase[]>([]);
 const totals = ref<WalkInAnalytics>({ all: 0, triage: 0, doctor: 0, emergency: 0, completed: 0 });
 const totalItems = ref(0);
 const totalPages = ref(1);
+const realtime = useRealtimeListSync();
 
 const caseForm = ref<WalkInForm>({
   patientName: '',
   age: 18,
+  sex: '',
+  dateOfBirth: '',
   contact: '',
+  address: '',
+  emergencyContact: '',
+  existingPatient: false,
+  patientRef: '',
+  visitDepartment: 'General OPD',
+  checkinTime: new Date().toISOString().slice(0, 16),
+  painScale: 0,
+  temperatureC: null,
+  bloodPressure: '',
+  pulseBpm: null,
+  weightKg: null,
   complaint: '',
   severity: 'Low',
   assignedDoctor: '',
   notes: ''
 });
+const formErrors = ref<Partial<Record<keyof WalkInForm, string>>>({});
+const assignedDoctorManuallyChanged = ref(false);
 
 const queueLength = computed(() => totalPages.value || 1);
 const pagedCases = computed(() => walkInCases.value);
+const doctorOptions = computed(() => {
+  const base = ['Dr. Humour', 'Dr. Jenni', 'Dr. Rivera', 'Dr. Martinez', 'Nurse Triage', 'ER Team'];
+  const dynamic = walkInCases.value
+    .map((item) => item.assigned_doctor.trim())
+    .filter((name) => Boolean(name) && name.toLowerCase() !== 'unassigned');
+  const merged = Array.from(new Set([sessionDoctor.value, ...base, ...dynamic].filter(Boolean)));
+  return merged;
+});
+const isNewWalkInEmergency = computed(() => dialogAction.value === 'new' && caseForm.value.severity === 'Emergency');
+const estimatedWaitMinutes = computed(() => {
+  const queueLoad = Math.max(1, totals.value.doctor || 1);
+  return queueLoad * 12;
+});
+const queuePreview = computed(() => {
+  return `W-${String(totalItems.value + 1).padStart(3, '0')}`;
+});
+const existingPatientHits = computed(() => {
+  const targetName = caseForm.value.patientName.trim().toLowerCase();
+  const targetContact = caseForm.value.contact.trim().toLowerCase();
+  if (!targetName && !targetContact) return [];
+  return walkInCases.value.filter((item) => {
+    const nameMatch = targetName && item.patient_name.trim().toLowerCase() === targetName;
+    const contactMatch = targetContact && item.contact.trim().toLowerCase() === targetContact;
+    return Boolean(nameMatch || contactMatch);
+  });
+});
 
 const dialogTitle = computed(() => {
   if (dialogAction.value === 'new') return 'New Walk-In';
@@ -189,22 +247,51 @@ function rowPriorityClass(item: WalkInCase): string {
 }
 
 function resetForm(): void {
+  const defaultDoctor = currentRole.value === 'Doctor' ? sessionDoctor.value : 'Nurse Triage';
   caseForm.value = {
     patientName: '',
     age: 18,
+    sex: '',
+    dateOfBirth: '',
     contact: '',
+    address: '',
+    emergencyContact: '',
+    existingPatient: false,
+    patientRef: '',
+    visitDepartment: 'General OPD',
+    checkinTime: new Date().toISOString().slice(0, 16),
+    painScale: 0,
+    temperatureC: null,
+    bloodPressure: '',
+    pulseBpm: null,
+    weightKg: null,
     complaint: '',
     severity: 'Low',
-    assignedDoctor: '',
+    assignedDoctor: defaultDoctor || 'Nurse Triage',
     notes: ''
   };
+  formErrors.value = {};
+  assignedDoctorManuallyChanged.value = false;
 }
 
 function applyCaseToForm(item: WalkInCase): void {
   caseForm.value = {
     patientName: item.patient_name,
     age: item.age,
+    sex: item.sex || '',
+    dateOfBirth: item.date_of_birth || '',
     contact: item.contact,
+    address: item.address || '',
+    emergencyContact: item.emergency_contact || '',
+    existingPatient: Boolean(item.patient_ref),
+    patientRef: item.patient_ref || '',
+    visitDepartment: (item.visit_department as WalkInForm['visitDepartment']) || 'General OPD',
+    checkinTime: item.checkin_time ? new Date(item.checkin_time).toISOString().slice(0, 16) : new Date(item.intake_time).toISOString().slice(0, 16),
+    painScale: item.pain_scale ?? 0,
+    temperatureC: item.temperature_c ?? null,
+    bloodPressure: item.blood_pressure || '',
+    pulseBpm: item.pulse_bpm ?? null,
+    weightKg: item.weight_kg ?? null,
     complaint: item.chief_complaint,
     severity: item.severity,
     assignedDoctor: item.assigned_doctor,
@@ -225,23 +312,30 @@ function showSuccess(title: string, message: string): void {
 }
 
 async function loadWalkIns(): Promise<void> {
-  try {
-    const payload = await fetchWalkIns({
-      search: searchQuery.value.trim(),
-      status: statusFilter.value,
-      severity: severityFilter.value,
-      page: queuePage.value,
-      perPage: pageSize
-    });
+  const payload = await realtime.runLatest(
+    async () =>
+      fetchWalkIns({
+        search: searchQuery.value.trim(),
+        status: statusFilter.value,
+        severity: severityFilter.value,
+        page: queuePage.value,
+        perPage: pageSize
+      }),
+    {
+      onError: (error) => {
+        showToast(error instanceof Error ? error.message : String(error), 'error');
+      }
+    }
+  );
+  if (!payload) return;
 
-    walkInCases.value = payload.items;
-    totals.value = payload.analytics;
-    totalItems.value = payload.meta.total;
-    totalPages.value = payload.meta.totalPages;
-  } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error), 'error');
-  }
+  walkInCases.value = payload.items;
+  totals.value = payload.analytics;
+  totalItems.value = payload.meta.total;
+  totalPages.value = payload.meta.totalPages;
 }
+
+let nowTickTimer: ReturnType<typeof setInterval> | null = null;
 
 function openAction(action: ActionType, item?: WalkInCase): void {
   if (action === 'view' && item) {
@@ -257,9 +351,87 @@ function openAction(action: ActionType, item?: WalkInCase): void {
     resetForm();
   } else if (item) {
     applyCaseToForm(item);
+    if (action === 'assign' && (!caseForm.value.assignedDoctor.trim() || caseForm.value.assignedDoctor === 'Unassigned')) {
+      caseForm.value.assignedDoctor = sessionDoctor.value || 'Dr. Humour';
+    }
   }
 
   dialogOpen.value = true;
+}
+
+watch(sessionDoctor, (value) => {
+  if (!dialogOpen.value || dialogAction.value !== 'new') return;
+  if (assignedDoctorManuallyChanged.value) return;
+  if (caseForm.value.severity === 'Emergency') return;
+  caseForm.value.assignedDoctor = value || 'Nurse Triage';
+});
+
+watch(
+  () => caseForm.value.severity,
+  (severity) => {
+    if (dialogAction.value !== 'new') return;
+    if (severity === 'Emergency') {
+      caseForm.value.assignedDoctor = 'ER Team';
+      return;
+    }
+    if (assignedDoctorManuallyChanged.value) return;
+    const defaultDoctor = currentRole.value === 'Doctor' ? sessionDoctor.value : 'Nurse Triage';
+    caseForm.value.assignedDoctor = defaultDoctor || 'Nurse Triage';
+  }
+);
+
+function computeAgeFromDob(value: string): number {
+  if (!value) return caseForm.value.age;
+  const dob = new Date(value);
+  if (Number.isNaN(dob.getTime())) return caseForm.value.age;
+  const now = new Date();
+  let age = now.getFullYear() - dob.getFullYear();
+  const monthDiff = now.getMonth() - dob.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < dob.getDate())) age -= 1;
+  return Math.max(0, age);
+}
+
+watch(
+  () => caseForm.value.dateOfBirth,
+  (value) => {
+    if (dialogAction.value !== 'new') return;
+    caseForm.value.age = computeAgeFromDob(value);
+  }
+);
+
+function validateNewWalkInForm(): boolean {
+  const errors: Partial<Record<keyof WalkInForm, string>> = {};
+  const name = caseForm.value.patientName.trim();
+  const contact = caseForm.value.contact.trim();
+  const complaint = caseForm.value.complaint.trim();
+  const assigned = caseForm.value.assignedDoctor.trim();
+
+  if (!name) errors.patientName = 'Patient name is required.';
+  if (!contact) errors.contact = 'Contact number is required.';
+  if (!complaint) errors.complaint = 'Chief complaint is required.';
+  if (!assigned) errors.assignedDoctor = 'Assigned doctor/staff is required.';
+  if (!caseForm.value.sex) errors.sex = 'Sex is required.';
+  if (!caseForm.value.dateOfBirth) errors.dateOfBirth = 'Date of birth is required.';
+  if (!caseForm.value.visitDepartment) errors.visitDepartment = 'Visit department is required.';
+  if (!caseForm.value.checkinTime) errors.checkinTime = 'Check-in time is required.';
+  if (caseForm.value.existingPatient && !caseForm.value.patientRef.trim()) {
+    errors.patientRef = 'Patient ID/MRN is required for existing patients.';
+  }
+  if (caseForm.value.painScale < 0 || caseForm.value.painScale > 10) {
+    errors.painScale = 'Pain scale must be between 0 and 10.';
+  }
+  if (caseForm.value.temperatureC !== null && (caseForm.value.temperatureC < 30 || caseForm.value.temperatureC > 45)) {
+    errors.temperatureC = 'Temperature must be 30C to 45C.';
+  }
+  if (caseForm.value.pulseBpm !== null && (caseForm.value.pulseBpm < 20 || caseForm.value.pulseBpm > 240)) {
+    errors.pulseBpm = 'Pulse must be 20 to 240 bpm.';
+  }
+  if (!Number.isFinite(caseForm.value.age) || caseForm.value.age < 0 || caseForm.value.age > 120) {
+    errors.age = 'Age must be between 0 and 120.';
+  }
+
+  formErrors.value = errors;
+  return Object.keys(errors).length === 0;
 }
 
 function closeAction(): void {
@@ -273,10 +445,7 @@ async function executeAction(): Promise<void> {
     return;
   }
   if (dialogAction.value === 'new') {
-    if (!caseForm.value.patientName.trim() || !caseForm.value.contact.trim() || !caseForm.value.complaint.trim()) {
-      showToast('Patient name, contact, and chief complaint are required.', 'warning');
-      return;
-    }
+    if (!validateNewWalkInForm()) return;
   }
   if (dialogAction.value === 'triage' && !caseForm.value.complaint.trim()) {
     showToast('Chief complaint is required before saving triage.', 'warning');
@@ -289,15 +458,33 @@ async function executeAction(): Promise<void> {
   dialogLoading.value = true;
   try {
     if (dialogAction.value === 'new') {
-      await createWalkIn({
-        patient_name: caseForm.value.patientName,
+      const created = await createWalkIn({
+        patient_name: caseForm.value.patientName.trim(),
         age: caseForm.value.age,
-        contact: caseForm.value.contact,
-        chief_complaint: caseForm.value.complaint,
+        sex: caseForm.value.sex,
+        date_of_birth: caseForm.value.dateOfBirth || undefined,
+        contact: caseForm.value.contact.trim(),
+        address: caseForm.value.address.trim() || undefined,
+        emergency_contact: caseForm.value.emergencyContact.trim() || undefined,
+        patient_ref: caseForm.value.existingPatient ? caseForm.value.patientRef.trim() : undefined,
+        visit_department: caseForm.value.visitDepartment,
+        checkin_time: caseForm.value.checkinTime || undefined,
+        pain_scale: caseForm.value.painScale,
+        temperature_c: caseForm.value.temperatureC ?? undefined,
+        blood_pressure: caseForm.value.bloodPressure.trim() || undefined,
+        pulse_bpm: caseForm.value.pulseBpm ?? undefined,
+        weight_kg: caseForm.value.weightKg ?? undefined,
+        chief_complaint: caseForm.value.complaint.trim(),
         severity: caseForm.value.severity,
         assigned_doctor: caseForm.value.assignedDoctor
       });
-      showSuccess('Walk-In Created', 'New walk-in case has been queued for triage.');
+
+      if (caseForm.value.severity === 'Emergency') {
+        await runWalkInAction({ action: 'emergency', id: created.id });
+        showSuccess('Emergency Case Created', 'Walk-in has been created and escalated to emergency routing.');
+      } else {
+        showSuccess('Walk-In Created', 'New walk-in case has been queued for triage.');
+      }
       } else if (dialogCase.value) {
       await runWalkInAction({
         action: dialogAction.value,
@@ -336,10 +523,12 @@ watch(queuePage, () => {
 
 onMounted(async () => {
   await loadWalkIns();
-  const timer = window.setInterval(() => {
+  nowTickTimer = setInterval(() => {
     nowTick.value = Date.now();
-  }, 30000);
-  (window as any).__walkinTimer = timer;
+  }, REALTIME_POLICY.uiTick.walkInClockMs);
+  realtime.startPolling(() => {
+    void loadWalkIns();
+  }, REALTIME_POLICY.polling.walkInMs);
   loadingPage.value = false;
   requestAnimationFrame(() => {
     pageVisible.value = true;
@@ -347,10 +536,9 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
-  const timer = (window as any).__walkinTimer;
-  if (typeof timer === 'number') {
-    clearInterval(timer);
-  }
+  realtime.stopPolling();
+  realtime.invalidatePending();
+  if (nowTickTimer) clearInterval(nowTickTimer);
 });
 </script>
 
@@ -525,13 +713,111 @@ onBeforeUnmount(() => {
         <v-card-subtitle class="pt-2">Action confirmation for real walk-in queue records.</v-card-subtitle>
         <v-card-text class="pt-4">
           <template v-if="dialogAction === 'new'">
-            <v-row>
-              <v-col cols="12" md="7"><v-text-field v-model="caseForm.patientName" label="Patient Name" variant="outlined" density="comfortable" /></v-col>
-              <v-col cols="12" md="5"><v-text-field v-model.number="caseForm.age" type="number" label="Age" variant="outlined" density="comfortable" /></v-col>
-              <v-col cols="12" md="6"><v-text-field v-model="caseForm.contact" label="Contact Number" variant="outlined" density="comfortable" /></v-col>
-              <v-col cols="12" md="6"><v-select :items="['Low', 'Moderate', 'Emergency']" v-model="caseForm.severity" label="Severity" variant="outlined" density="comfortable" /></v-col>
-              <v-col cols="12"><v-text-field v-model="caseForm.complaint" label="Chief Complaint" variant="outlined" density="comfortable" /></v-col>
-              <v-col cols="12"><v-text-field v-model="caseForm.assignedDoctor" label="Assigned Doctor/Staff" variant="outlined" density="comfortable" /></v-col>
+            <v-row class="ga-2">
+              <v-col cols="12">
+                <v-alert type="info" variant="tonal" density="comfortable" class="mb-2">
+                  Queue # <strong>{{ queuePreview }}</strong> • Estimated wait: <strong>{{ estimatedWaitMinutes }} min</strong>
+                </v-alert>
+              </v-col>
+
+              <v-col cols="12">
+                <div class="intake-section-title">Patient Identity</div>
+              </v-col>
+              <v-col cols="12" md="7">
+                <v-text-field v-model="caseForm.patientName" label="Patient Name *" variant="outlined" density="comfortable" :error-messages="formErrors.patientName" />
+              </v-col>
+              <v-col cols="12" md="5">
+                <v-select :items="['Male', 'Female', 'Other']" v-model="caseForm.sex" label="Gender / Sex *" variant="outlined" density="comfortable" :error-messages="formErrors.sex" />
+              </v-col>
+              <v-col cols="12" md="4">
+                <SaasDateTimePickerField v-model="caseForm.dateOfBirth" mode="date" label="Date of Birth *" :error-messages="formErrors.dateOfBirth" />
+              </v-col>
+              <v-col cols="12" md="2">
+                <v-text-field v-model.number="caseForm.age" type="number" min="0" max="120" label="Age" variant="outlined" density="comfortable" readonly :error-messages="formErrors.age" />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-text-field v-model="caseForm.contact" label="Contact Number *" variant="outlined" density="comfortable" :error-messages="formErrors.contact" />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-text-field v-model="caseForm.emergencyContact" label="Emergency Contact" variant="outlined" density="comfortable" />
+              </v-col>
+              <v-col cols="12">
+                <v-text-field v-model="caseForm.address" label="Address" variant="outlined" density="comfortable" />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-switch v-model="caseForm.existingPatient" inset label="Existing Patient?" color="primary" hide-details />
+              </v-col>
+              <v-col cols="12" md="8" v-if="caseForm.existingPatient">
+                <v-text-field v-model="caseForm.patientRef" label="Patient ID / MRN *" variant="outlined" density="comfortable" :error-messages="formErrors.patientRef" />
+              </v-col>
+
+              <v-col cols="12">
+                <div class="intake-section-title">Visit Routing</div>
+              </v-col>
+              <v-col cols="12" md="4">
+                <SaasDateTimePickerField v-model="caseForm.checkinTime" mode="datetime" label="Check-in Time *" :error-messages="formErrors.checkinTime" />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-select :items="['General OPD', 'ER', 'Pediatrics', 'Orthopedic', 'Dental']" v-model="caseForm.visitDepartment" label="Visit Department *" variant="outlined" density="comfortable" :error-messages="formErrors.visitDepartment" />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-select :items="['Low', 'Moderate', 'Emergency']" v-model="caseForm.severity" label="Triage Priority" variant="outlined" density="comfortable" />
+              </v-col>
+              <v-col cols="12">
+                <v-text-field v-model="caseForm.complaint" label="Chief Complaint *" variant="outlined" density="comfortable" :error-messages="formErrors.complaint" />
+              </v-col>
+
+              <v-col cols="12">
+                <div class="intake-section-title">Triage Vitals</div>
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-text-field
+                  v-model.number="caseForm.painScale"
+                  type="number"
+                  min="0"
+                  max="10"
+                  label="Pain Scale (0-10)"
+                  variant="outlined"
+                  density="comfortable"
+                  :error-messages="formErrors.painScale"
+                />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-text-field v-model.number="caseForm.temperatureC" type="number" step="0.1" label="Temperature (C)" variant="outlined" density="comfortable" :error-messages="formErrors.temperatureC" />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-text-field v-model.number="caseForm.pulseBpm" type="number" label="Pulse (bpm)" variant="outlined" density="comfortable" :error-messages="formErrors.pulseBpm" />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-text-field v-model="caseForm.bloodPressure" label="Blood Pressure (e.g. 120/80)" variant="outlined" density="comfortable" />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-text-field v-model.number="caseForm.weightKg" type="number" step="0.1" label="Weight (kg)" variant="outlined" density="comfortable" />
+              </v-col>
+
+              <v-col cols="12">
+                <div class="intake-section-title">Assignment</div>
+              </v-col>
+              <v-col cols="12">
+                <v-select
+                  v-model="caseForm.assignedDoctor"
+                  :items="doctorOptions"
+                  label="Assigned Doctor/Staff *"
+                  variant="outlined"
+                  density="comfortable"
+                  @update:model-value="assignedDoctorManuallyChanged = true"
+                  :error-messages="formErrors.assignedDoctor"
+                  :disabled="isNewWalkInEmergency"
+                  :hint="isNewWalkInEmergency ? 'Emergency cases are auto-routed to ER Team.' : 'Default assignment follows current session role.'"
+                  persistent-hint
+                />
+              </v-col>
+
+              <v-col cols="12" v-if="existingPatientHits.length > 0">
+                <v-alert type="warning" variant="tonal" density="comfortable">
+                  Possible duplicate record(s): {{ existingPatientHits.map((item) => `${item.patient_name} (${item.case_id})`).join(', ') }}
+                </v-alert>
+              </v-col>
             </v-row>
           </template>
 
@@ -563,7 +849,15 @@ onBeforeUnmount(() => {
 
           <template v-else-if="dialogAction === 'assign'">
             <v-row>
-              <v-col cols="12"><v-text-field v-model="caseForm.assignedDoctor" label="Assign Doctor" variant="outlined" density="comfortable" placeholder="e.g. Dr. Rivera" /></v-col>
+              <v-col cols="12">
+                <v-select
+                  v-model="caseForm.assignedDoctor"
+                  :items="doctorOptions"
+                  label="Assign Doctor"
+                  variant="outlined"
+                  density="comfortable"
+                />
+              </v-col>
             </v-row>
           </template>
 
@@ -664,6 +958,7 @@ onBeforeUnmount(() => {
 
 .walkin-dialog-card { border-radius: 16px; overflow: hidden; border: 1px solid rgba(76, 104, 168, 0.16); }
 .walkin-modal-title { padding: 16px 24px !important; color: #1b2e67 !important; background: linear-gradient(180deg, rgba(35, 101, 226, 0.08) 0%, rgba(35, 101, 226, 0) 100%); border-bottom: 1px solid rgba(76, 104, 168, 0.14); }
+.intake-section-title { font-size: 12px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase; color: #26417f; padding-top: 4px; }
 
 .success-modal-card {
   border-radius: 18px;

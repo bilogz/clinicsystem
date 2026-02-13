@@ -1,23 +1,41 @@
 ﻿<script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { dispatchPharmacyAction, fetchPharmacySnapshot } from '@/services/pharmacyInventory';
+import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
+import { REALTIME_POLICY } from '@/config/realtimePolicy';
 
 type StockState = 'Healthy' | 'Low' | 'Out of Stock';
 type QuickFilter = 'all' | 'out' | 'low' | 'healthy' | 'expiring';
 type SortKey = 'name' | 'stock' | 'type' | 'expiry';
 type SortDirection = 'asc' | 'desc';
-type ActionType = 'add' | 'edit' | 'archive' | 'restock' | 'dispense' | 'fulfill';
+type ActionType = 'add' | 'edit' | 'archive' | 'restock' | 'dispense' | 'adjust' | 'fulfill';
 type DispenseStatus = 'Pending' | 'Fulfilled';
+type InventoryRole = 'Admin' | 'Pharmacist' | 'Pharmacy Staff' | 'Nurse' | 'Doctor';
 
 type Medicine = {
   id: number;
+  sku: string;
   name: string;
+  brandName: string;
+  genericName: string;
+  dosageStrength: string;
   category: string;
   type: string;
+  supplier: string;
+  purchaseCost: number;
+  sellingPrice: number;
+  batchNo: string;
+  mfgDate: string;
   stock: number;
   capacity: number;
   lowThreshold: number;
+  reorderLevel: number;
   expiryDate: string;
   unit: string;
+  stockLocation: string;
+  storageRequirements: string;
+  barcode: string;
+  lastAdjustmentReason?: string;
 };
 
 type DispenseRequest = {
@@ -26,6 +44,8 @@ type DispenseRequest = {
   medicineName: string;
   quantity: number;
   notes: string;
+  prescriptionRef: string;
+  dispenseReason: string;
   requestedAt: string;
   status: DispenseStatus;
 };
@@ -67,8 +87,11 @@ const selectedMedicineDialog = ref(false);
 const actionDialog = ref(false);
 const actionType = ref<ActionType>('restock');
 const actionLoading = ref(false);
+const actionDraftLoading = ref(false);
 const actionMedicineId = ref<number | null>(null);
 const actionRequest = ref<DispenseRequest | null>(null);
+const sessionRole = ref<InventoryRole>('Pharmacist');
+const formErrors = reactive<Record<string, string>>({});
 
 const snackbar = ref(false);
 const snackbarText = ref('');
@@ -77,69 +100,147 @@ const snackbarColor = ref<'success' | 'info' | 'warning' | 'error'>('success');
 const medicines = ref<Medicine[]>([
   {
     id: 43,
+    sku: 'MED-OMP-043',
     name: 'Omeprazole',
+    brandName: 'Losec',
+    genericName: 'Omeprazole',
+    dosageStrength: '20mg',
     category: 'Capsule',
     type: 'Antacid',
+    supplier: 'MediCore Supply',
+    purchaseCost: 4.8,
+    sellingPrice: 8.5,
+    batchNo: 'OMP-52',
+    mfgDate: '2025-01-05',
     stock: 23,
     capacity: 200,
     lowThreshold: 30,
+    reorderLevel: 35,
     expiryDate: 'May 1, 2026',
-    unit: 'caps'
+    unit: 'caps',
+    stockLocation: 'Warehouse A / Shelf C2',
+    storageRequirements: 'Store below 25C, dry area',
+    barcode: '4800010000432'
   },
   {
     id: 36,
+    sku: 'MED-MTF-036',
     name: 'Metformin',
+    brandName: 'Glucophage',
+    genericName: 'Metformin',
+    dosageStrength: '500mg',
     category: 'Tablet',
     type: 'Diabetes',
+    supplier: 'Healix Pharma',
+    purchaseCost: 2.2,
+    sellingPrice: 4.7,
+    batchNo: 'MTF-11',
+    mfgDate: '2025-02-18',
     stock: 0,
     capacity: 150,
     lowThreshold: 35,
+    reorderLevel: 40,
     expiryDate: 'Nov 22, 2026',
-    unit: 'tabs'
+    unit: 'tabs',
+    stockLocation: 'Warehouse A / Shelf A1',
+    storageRequirements: 'Room temperature',
+    barcode: '4800010000364'
   },
   {
     id: 31,
+    sku: 'MED-CLP-031',
     name: 'Clopidogrel',
+    brandName: 'Plavix',
+    genericName: 'Clopidogrel',
+    dosageStrength: '75mg',
     category: 'Tablet',
     type: 'Cardio',
+    supplier: 'MediCore Supply',
+    purchaseCost: 6.1,
+    sellingPrice: 11.2,
+    batchNo: 'CLP-22',
+    mfgDate: '2025-03-01',
     stock: 20,
     capacity: 100,
     lowThreshold: 25,
+    reorderLevel: 30,
     expiryDate: 'Mar 5, 2026',
-    unit: 'tabs'
+    unit: 'tabs',
+    stockLocation: 'Warehouse B / Shelf D3',
+    storageRequirements: 'Keep dry, away from heat',
+    barcode: '4800010000319'
   },
   {
     id: 28,
+    sku: 'MED-APX-028',
     name: 'Apixaban',
+    brandName: 'Eliquis',
+    genericName: 'Apixaban',
+    dosageStrength: '5mg',
     category: 'Tablet',
     type: 'Cardio',
+    supplier: 'AxisMed Trading',
+    purchaseCost: 12.5,
+    sellingPrice: 18.9,
+    batchNo: 'APX-09',
+    mfgDate: '2024-12-11',
     stock: 0,
     capacity: 75,
     lowThreshold: 20,
+    reorderLevel: 24,
     expiryDate: 'Jun 18, 2026',
-    unit: 'tabs'
+    unit: 'tabs',
+    stockLocation: 'Warehouse B / Shelf D1',
+    storageRequirements: 'Room temperature',
+    barcode: '4800010000281'
   },
   {
     id: 24,
+    sku: 'MED-ALV-024',
     name: 'Aleve',
+    brandName: 'Aleve',
+    genericName: 'Naproxen',
+    dosageStrength: '220mg',
     category: 'Tablet',
     type: 'Painkiller',
+    supplier: 'Healix Pharma',
+    purchaseCost: 1.3,
+    sellingPrice: 3.9,
+    batchNo: 'ALV-27',
+    mfgDate: '2025-04-04',
     stock: 180,
     capacity: 300,
     lowThreshold: 50,
+    reorderLevel: 65,
     expiryDate: 'May 20, 2026',
-    unit: 'tabs'
+    unit: 'tabs',
+    stockLocation: 'Warehouse C / Shelf B4',
+    storageRequirements: 'Room temperature',
+    barcode: '4800010000243'
   },
   {
     id: 17,
+    sku: 'MED-AML-017',
     name: 'Amlodipine',
+    brandName: 'Norvasc',
+    genericName: 'Amlodipine',
+    dosageStrength: '5mg',
     category: 'Tablet',
     type: 'Antihypertensive',
+    supplier: 'AxisMed Trading',
+    purchaseCost: 1.8,
+    sellingPrice: 4.1,
+    batchNo: 'AML-44',
+    mfgDate: '2025-01-22',
     stock: 150,
     capacity: 300,
     lowThreshold: 60,
+    reorderLevel: 70,
     expiryDate: 'Feb 7, 2027',
-    unit: 'tabs'
+    unit: 'tabs',
+    stockLocation: 'Warehouse B / Shelf A3',
+    storageRequirements: 'Store below 30C',
+    barcode: '4800010000175'
   }
 ]);
 
@@ -150,6 +251,8 @@ const dispenseRequests = ref<DispenseRequest[]>([
     medicineName: 'Omeprazole',
     quantity: 5,
     notes: 'Before breakfast',
+    prescriptionRef: 'RX-2026-12311',
+    dispenseReason: 'Acid reflux management',
     requestedAt: '10:43 AM',
     status: 'Pending'
   },
@@ -159,6 +262,8 @@ const dispenseRequests = ref<DispenseRequest[]>([
     medicineName: 'Metformin',
     quantity: 10,
     notes: 'After meals',
+    prescriptionRef: 'RX-2026-12349',
+    dispenseReason: 'Type 2 diabetes maintenance',
     requestedAt: '9:18 AM',
     status: 'Pending'
   },
@@ -168,6 +273,8 @@ const dispenseRequests = ref<DispenseRequest[]>([
     medicineName: 'Aleve',
     quantity: 3,
     notes: 'Pain management',
+    prescriptionRef: 'RX-2026-12002',
+    dispenseReason: 'Post-procedure pain',
     requestedAt: '8:51 AM',
     status: 'Fulfilled'
   }
@@ -195,46 +302,132 @@ const stockHistory = ref<Record<number, StockHistoryEntry[]>>({
 });
 
 const addForm = reactive({
+  sku: '',
   name: '',
+  brandName: '',
+  genericName: '',
+  dosageStrength: '',
   category: 'Tablet',
   type: '',
+  supplier: '',
+  purchaseCost: 0,
+  sellingPrice: 0,
+  batchNo: '',
+  mfgDate: '',
   capacity: 100,
   stock: 100,
   lowThreshold: 25,
+  reorderLevel: 30,
   expiryDate: '',
-  unit: 'tabs'
+  unit: 'tabs',
+  stockLocation: '',
+  storageRequirements: '',
+  barcode: ''
 });
 
 const restockForm = reactive({
   quantity: 20,
+  supplier: '',
   batchNo: '',
-  batchExpiry: ''
+  batchExpiry: '',
+  purchaseCost: 0,
+  stockLocation: '',
+  reason: ''
 });
 
 const dispenseForm = reactive({
   patientName: '',
   quantity: 1,
-  notes: ''
+  notes: '',
+  prescriptionRef: '',
+  dispenseReason: ''
+});
+
+const adjustForm = reactive({
+  mode: 'increase' as 'increase' | 'decrease' | 'set',
+  quantity: 1,
+  reason: ''
 });
 
 const editForm = reactive({
+  supplier: '',
+  dosageStrength: '',
+  unit: 'tabs',
   type: '',
   category: 'Tablet',
   lowThreshold: 20,
+  reorderLevel: 25,
   capacity: 100,
-  expiryDate: ''
+  expiryDate: '',
+  stockLocation: '',
+  storageRequirements: ''
 });
 
-const categoryItems = computed(() => ['All Categories', ...new Set(medicines.value.map((item) => item.category))]);
+const supplierItems = ['MediCore Supply', 'Healix Pharma', 'AxisMed Trading', 'PrimeRx Dist'];
+const categoryTypeMap: Record<string, string[]> = {
+  Tablet: ['Cardio', 'Diabetes', 'Painkiller', 'Antihypertensive'],
+  Capsule: ['Antacid', 'Antibiotic'],
+  Syrup: ['Pediatric', 'Cough Suppressant'],
+  Inhaler: ['Pulmonary'],
+  Injection: ['Emergency', 'Antibiotic'],
+  Ointment: ['Dermatology']
+};
+const supplierBatchHints: Record<string, { prefix: string; location: string }> = {
+  'MediCore Supply': { prefix: 'MDC', location: 'Warehouse A / Shelf C2' },
+  'Healix Pharma': { prefix: 'HLX', location: 'Warehouse C / Shelf B4' },
+  'AxisMed Trading': { prefix: 'AXM', location: 'Warehouse B / Shelf A1' },
+  'PrimeRx Dist': { prefix: 'PRX', location: 'Warehouse D / Shelf A2' }
+};
+const rolePermissions: Record<InventoryRole, ActionType[]> = {
+  Admin: ['add', 'edit', 'archive', 'restock', 'dispense', 'adjust', 'fulfill'],
+  Pharmacist: ['add', 'edit', 'restock', 'dispense', 'adjust', 'fulfill'],
+  'Pharmacy Staff': ['restock', 'dispense', 'fulfill'],
+  Nurse: ['dispense', 'fulfill'],
+  Doctor: []
+};
+const categoryItems = computed(() => {
+  const dynamic = Array.from(new Set(medicines.value.map((item) => item.category)));
+  const all = Array.from(new Set([...Object.keys(categoryTypeMap), ...dynamic]));
+  return ['All Categories', ...all];
+});
+const typeItemsForAdd = computed(() => categoryTypeMap[addForm.category] || ['General']);
+const actionAllowed = (type: ActionType): boolean => rolePermissions[sessionRole.value]?.includes(type) || false;
+const realtime = useRealtimeListSync();
 
-onMounted(() => {
-  setTimeout(() => {
-    pageLoading.value = false;
-    requestAnimationFrame(() => {
-      pageReady.value = true;
-      selectedMedicineId.value = medicines.value[0]?.id ?? null;
-    });
-  }, 700);
+async function loadPharmacyData(): Promise<void> {
+  const snapshot = await realtime.runLatest(
+    async () => fetchPharmacySnapshot(),
+    {
+      onError: (error) => {
+        showToast(error instanceof Error ? error.message : String(error), 'error');
+      }
+    }
+  );
+  if (!snapshot) return;
+  medicines.value = snapshot.medicines as Medicine[];
+  dispenseRequests.value = snapshot.requests as DispenseRequest[];
+  inventoryLogs.value = snapshot.logs as InventoryLog[];
+  stockHistory.value = snapshot.history as Record<number, StockHistoryEntry[]>;
+  const stillExists = medicines.value.some((item) => item.id === selectedMedicineId.value);
+  if (!stillExists) {
+    selectedMedicineId.value = medicines.value[0]?.id ?? null;
+  }
+}
+
+onMounted(async () => {
+  await loadPharmacyData();
+  realtime.startPolling(() => {
+    void loadPharmacyData();
+  }, REALTIME_POLICY.polling.pharmacyMs);
+  pageLoading.value = false;
+  requestAnimationFrame(() => {
+    pageReady.value = true;
+  });
+});
+
+onUnmounted(() => {
+  realtime.stopPolling();
+  realtime.invalidatePending();
 });
 
 function stockState(item: Medicine): StockState {
@@ -394,21 +587,48 @@ watch(filteredMedicines, (rows) => {
   if (!exists) selectedMedicineId.value = rows[0].id;
 });
 
+watch(
+  () => addForm.category,
+  (category) => {
+    const types = categoryTypeMap[category] || [];
+    if (types.length && !types.includes(addForm.type)) {
+      addForm.type = types[0];
+    }
+  },
+  { immediate: true }
+);
+
+watch(
+  () => addForm.supplier,
+  (supplier) => {
+    const hint = supplierBatchHints[supplier];
+    if (!hint) return;
+    if (!addForm.batchNo.trim()) {
+      addForm.batchNo = `${hint.prefix}-${String(Date.now()).slice(-4)}`;
+    }
+    if (!addForm.stockLocation.trim()) {
+      addForm.stockLocation = hint.location;
+    }
+  }
+);
+
 const dialogTitle = computed(() => {
   if (actionType.value === 'add') return 'Add New Medicine';
   if (actionType.value === 'edit') return 'Edit Medicine';
   if (actionType.value === 'archive') return 'Archive Medicine';
   if (actionType.value === 'restock') return 'Restock Medicine';
   if (actionType.value === 'dispense') return 'Dispense Medicine';
+  if (actionType.value === 'adjust') return 'Adjust Stock';
   return 'Fulfill Dispense Request';
 });
 
 const dialogActionText = computed(() => {
-  if (actionType.value === 'add') return 'Add Medicine';
+  if (actionType.value === 'add') return 'Add Stock';
   if (actionType.value === 'edit') return 'Save Changes';
   if (actionType.value === 'archive') return 'Archive';
   if (actionType.value === 'restock') return 'Restock';
   if (actionType.value === 'dispense') return 'Dispense';
+  if (actionType.value === 'adjust') return 'Adjust Stock';
   return 'Fulfill';
 });
 
@@ -467,8 +687,15 @@ function openSelectedMedicineModal(medicine?: Medicine): void {
 }
 
 function openAction(type: ActionType, medicine?: Medicine, request?: DispenseRequest): void {
+  if (!actionAllowed(type)) {
+    showToast(`Your role (${sessionRole.value}) is not allowed to run this action.`, 'warning');
+    return;
+  }
   actionType.value = type;
   actionRequest.value = null;
+  Object.keys(formErrors).forEach((key) => {
+    delete formErrors[key];
+  });
 
   if (type === 'add') {
     resetForms();
@@ -499,35 +726,69 @@ function openAction(type: ActionType, medicine?: Medicine, request?: DispenseReq
   if (type === 'edit') {
     editForm.type = targetMedicine.type;
     editForm.category = targetMedicine.category;
+    editForm.supplier = targetMedicine.supplier;
+    editForm.dosageStrength = targetMedicine.dosageStrength;
+    editForm.unit = targetMedicine.unit;
     editForm.capacity = targetMedicine.capacity;
     editForm.lowThreshold = targetMedicine.lowThreshold;
+    editForm.reorderLevel = targetMedicine.reorderLevel;
     editForm.expiryDate = targetMedicine.expiryDate;
+    editForm.stockLocation = targetMedicine.stockLocation;
+    editForm.storageRequirements = targetMedicine.storageRequirements;
   }
   if (type === 'restock') {
     restockForm.quantity = Math.max(10, targetMedicine.lowThreshold);
+    restockForm.supplier = targetMedicine.supplier;
     restockForm.batchNo = '';
     restockForm.batchExpiry = targetMedicine.expiryDate;
+    restockForm.purchaseCost = targetMedicine.purchaseCost;
+    restockForm.stockLocation = targetMedicine.stockLocation;
+    restockForm.reason = '';
   }
   if (type === 'dispense') {
     dispenseForm.patientName = '';
     dispenseForm.quantity = 1;
     dispenseForm.notes = '';
+    dispenseForm.prescriptionRef = '';
+    dispenseForm.dispenseReason = '';
+  }
+  if (type === 'adjust') {
+    adjustForm.mode = 'increase';
+    adjustForm.quantity = 1;
+    adjustForm.reason = '';
   }
   actionDialog.value = true;
 }
 
 function resetForms(): void {
+  addForm.sku = '';
   addForm.name = '';
+  addForm.brandName = '';
+  addForm.genericName = '';
+  addForm.dosageStrength = '';
   addForm.category = 'Tablet';
-  addForm.type = '';
+  addForm.type = categoryTypeMap.Tablet?.[0] || '';
+  addForm.supplier = supplierItems[0];
+  addForm.purchaseCost = 0;
+  addForm.sellingPrice = 0;
+  addForm.batchNo = '';
+  addForm.mfgDate = '';
   addForm.capacity = 100;
   addForm.stock = 100;
   addForm.lowThreshold = 25;
+  addForm.reorderLevel = 30;
   addForm.expiryDate = '';
   addForm.unit = 'tabs';
+  addForm.stockLocation = '';
+  addForm.storageRequirements = '';
+  addForm.barcode = '';
   restockForm.quantity = 20;
+  restockForm.supplier = supplierItems[0];
   restockForm.batchNo = '';
   restockForm.batchExpiry = '';
+  restockForm.purchaseCost = 0;
+  restockForm.stockLocation = '';
+  restockForm.reason = '';
 }
 
 function pushLog(detail: string, actor: string, tone: 'success' | 'warning' | 'info'): void {
@@ -541,190 +802,168 @@ function pushLog(detail: string, actor: string, tone: 'success' | 'warning' | 'i
   });
 }
 
+async function saveDraftAction(): Promise<void> {
+  actionDraftLoading.value = true;
+  try {
+    await dispatchPharmacyAction({
+      action: 'save_draft',
+      role: sessionRole.value,
+      draft_type: actionType.value,
+      medicine_id: actionMedicine.value?.id || null,
+      notes:
+        actionType.value === 'add'
+          ? `Draft add: ${addForm.name || '(unnamed)'}`
+          : actionType.value === 'restock'
+            ? `Draft restock: ${actionMedicine.value?.name || ''}`
+            : `Draft dispense: ${actionMedicine.value?.name || ''}`
+    });
+    await loadPharmacyData();
+    showToast('Draft saved.', 'info');
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    actionDraftLoading.value = false;
+  }
+}
+
+function appendHistory(item: Medicine, event: string, detail: string, actor: string = sessionRole.value): void {
+  const existingHistory = stockHistory.value[item.id] || [];
+  existingHistory.unshift({
+    id: existingHistory.length + 1,
+    event,
+    by: actor,
+    at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    detail
+  });
+  stockHistory.value[item.id] = existingHistory;
+}
+
+function runAutoAlerts(item: Medicine): void {
+  if (item.stock <= 0) {
+    pushLog(`${item.name} out-of-stock alert triggered`, 'System', 'warning');
+    appendHistory(item, 'Alert', 'Out-of-stock threshold reached', 'System');
+    return;
+  }
+  if (item.stock <= item.reorderLevel) {
+    pushLog(`${item.name} low-stock alert triggered`, 'System', 'warning');
+    appendHistory(item, 'Alert', `Low stock reached (${item.stock}/${item.reorderLevel})`, 'System');
+  }
+  if (expiryState(item) === 'Expiring Soon') {
+    pushLog(`${item.name} expiry warning raised`, 'System', 'warning');
+    appendHistory(item, 'Alert', 'Medicine is expiring within 30 days', 'System');
+  }
+}
+
 async function submitAction(): Promise<void> {
   actionLoading.value = true;
-  await new Promise((resolve) => setTimeout(resolve, 420));
-
-  if (actionType.value === 'add') {
-    if (!addForm.name.trim() || !addForm.type.trim()) {
-      actionLoading.value = false;
-      showToast('Medicine name and type are required.', 'error');
-      return;
+  await new Promise((resolve) => setTimeout(resolve, 240));
+  try {
+    if (actionType.value === 'add') {
+      await dispatchPharmacyAction({
+        action: 'create_medicine',
+        role: sessionRole.value,
+        sku: addForm.sku,
+        medicine_name: addForm.name,
+        brand_name: addForm.brandName,
+        generic_name: addForm.genericName,
+        dosage_strength: addForm.dosageStrength,
+        category: addForm.category,
+        medicine_type: addForm.type,
+        supplier_name: addForm.supplier,
+        purchase_cost: addForm.purchaseCost,
+        selling_price: addForm.sellingPrice,
+        batch_lot_no: addForm.batchNo,
+        manufacturing_date: addForm.mfgDate || null,
+        expiry_date: addForm.expiryDate,
+        unit_of_measure: addForm.unit,
+        stock_capacity: addForm.capacity,
+        stock_on_hand: addForm.stock,
+        low_stock_threshold: addForm.lowThreshold,
+        reorder_level: addForm.reorderLevel,
+        stock_location: addForm.stockLocation,
+        storage_requirements: addForm.storageRequirements,
+        barcode: addForm.barcode
+      });
+      showToast('Medicine added successfully.', 'success');
+    } else if (actionType.value === 'edit') {
+      if (!actionMedicine.value) throw 'No medicine selected.';
+      await dispatchPharmacyAction({
+        action: 'update_medicine',
+        role: sessionRole.value,
+        medicine_id: actionMedicine.value.id,
+        medicine_type: editForm.type,
+        category: editForm.category,
+        supplier_name: editForm.supplier,
+        dosage_strength: editForm.dosageStrength,
+        unit_of_measure: editForm.unit,
+        stock_capacity: editForm.capacity,
+        low_stock_threshold: editForm.lowThreshold,
+        reorder_level: editForm.reorderLevel,
+        expiry_date: editForm.expiryDate,
+        stock_location: editForm.stockLocation,
+        storage_requirements: editForm.storageRequirements
+      });
+      showToast('Medicine updated.', 'success');
+    } else if (actionType.value === 'archive') {
+      if (!actionMedicine.value) throw 'No medicine selected.';
+      await dispatchPharmacyAction({ action: 'archive_medicine', role: sessionRole.value, medicine_id: actionMedicine.value.id });
+      showToast('Medicine archived.', 'info');
+    } else if (actionType.value === 'restock') {
+      if (!actionMedicine.value) throw 'No medicine selected.';
+      await dispatchPharmacyAction({
+        action: 'restock',
+        role: sessionRole.value,
+        medicine_id: actionMedicine.value.id,
+        quantity: restockForm.quantity,
+        supplier_name: restockForm.supplier,
+        batch_lot_no: restockForm.batchNo,
+        expiry_date: restockForm.batchExpiry || null,
+        purchase_cost: restockForm.purchaseCost,
+        stock_location: restockForm.stockLocation,
+        reason: restockForm.reason
+      });
+      showToast('Medicine restocked.', 'success');
+    } else if (actionType.value === 'dispense') {
+      if (!actionMedicine.value) throw 'No medicine selected.';
+      await dispatchPharmacyAction({
+        action: 'dispense',
+        role: sessionRole.value,
+        medicine_id: actionMedicine.value.id,
+        patient_name: dispenseForm.patientName,
+        quantity: dispenseForm.quantity,
+        notes: dispenseForm.notes,
+        prescription_reference: dispenseForm.prescriptionRef,
+        dispense_reason: dispenseForm.dispenseReason
+      });
+      showToast('Medicine dispensed successfully.', 'success');
+    } else if (actionType.value === 'adjust') {
+      if (!actionMedicine.value) throw 'No medicine selected.';
+      await dispatchPharmacyAction({
+        action: 'adjust_stock',
+        role: sessionRole.value,
+        medicine_id: actionMedicine.value.id,
+        mode: adjustForm.mode,
+        quantity: adjustForm.quantity,
+        reason: adjustForm.reason
+      });
+      showToast('Stock adjusted successfully.', 'success');
+    } else if (actionType.value === 'fulfill') {
+      if (!actionRequest.value) throw 'No request selected.';
+      await dispatchPharmacyAction({
+        action: 'fulfill_request',
+        role: sessionRole.value,
+        request_id: actionRequest.value.id
+      });
+      showToast(`Request #${actionRequest.value.id} fulfilled.`, 'success');
     }
 
-    const newId = Math.max(...medicines.value.map((item) => item.id)) + 1;
-    const newItem: Medicine = {
-      id: newId,
-      name: addForm.name.trim(),
-      category: addForm.category,
-      type: addForm.type.trim(),
-      stock: addForm.stock,
-      capacity: addForm.capacity,
-      lowThreshold: addForm.lowThreshold,
-      expiryDate: addForm.expiryDate || 'Dec 31, 2027',
-      unit: addForm.unit.trim() || 'units'
-    };
-    medicines.value.unshift(newItem);
-    selectedMedicineId.value = newItem.id;
-    pushLog(`${newItem.name} added to inventory`, 'Pharmacy Admin', 'success');
-    showToast(`${newItem.name} added successfully.`);
+    await loadPharmacyData();
+    actionDialog.value = false;
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    actionLoading.value = false;
   }
-
-  if (actionType.value === 'edit') {
-    const item = actionMedicine.value;
-    if (!item) {
-      actionLoading.value = false;
-      showToast('No medicine selected.', 'warning');
-      return;
-    }
-
-    item.type = editForm.type.trim() || item.type;
-    item.category = editForm.category;
-    item.capacity = Math.max(1, editForm.capacity);
-    item.lowThreshold = Math.max(0, editForm.lowThreshold);
-    item.expiryDate = editForm.expiryDate || item.expiryDate;
-    if (item.stock > item.capacity) {
-      item.stock = item.capacity;
-    }
-    pushLog(`${item.name} profile updated`, 'Pharmacy Admin', 'info');
-    showToast(`${item.name} updated.`);
-  }
-
-  if (actionType.value === 'archive') {
-    const item = actionMedicine.value;
-    if (!item) {
-      actionLoading.value = false;
-      showToast('No medicine selected.', 'warning');
-      return;
-    }
-
-    medicines.value = medicines.value.filter((row) => row.id !== item.id);
-    if (selectedMedicineId.value === item.id) {
-      selectedMedicineId.value = medicines.value[0]?.id ?? null;
-    }
-    delete stockHistory.value[item.id];
-    pushLog(`${item.name} archived`, 'Pharmacy Admin', 'warning');
-    showToast(`${item.name} archived.`, 'info');
-  }
-
-  if (actionType.value === 'restock') {
-    const item = actionMedicine.value;
-    if (!item) {
-      actionLoading.value = false;
-      showToast('No medicine selected.', 'warning');
-      return;
-    }
-
-    if (restockForm.quantity <= 0) {
-      actionLoading.value = false;
-      showToast('Restock quantity must be greater than zero.', 'error');
-      return;
-    }
-
-    const before = item.stock;
-    item.stock = Math.min(item.capacity, item.stock + restockForm.quantity);
-    const added = item.stock - before;
-    if (restockForm.batchExpiry) {
-      item.expiryDate = restockForm.batchExpiry;
-    }
-    const batchText = restockForm.batchNo ? ` (Batch ${restockForm.batchNo})` : '';
-    pushLog(`${item.name} restocked +${added}${batchText}`, 'Nurse Carla', 'success');
-    const existingHistory = stockHistory.value[item.id] || [];
-    existingHistory.unshift({
-      id: existingHistory.length + 1,
-      event: 'Restock',
-      by: 'Nurse Carla',
-      at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      detail: `+${added} ${item.unit}${batchText || ''}`
-    });
-    stockHistory.value[item.id] = existingHistory;
-    showToast(`${item.name} restocked.`);
-  }
-
-  if (actionType.value === 'dispense') {
-    const item = actionMedicine.value;
-    if (!item) {
-      actionLoading.value = false;
-      showToast('No medicine selected.', 'warning');
-      return;
-    }
-
-    if (!dispenseForm.patientName.trim()) {
-      actionLoading.value = false;
-      showToast('Patient name is required.', 'error');
-      return;
-    }
-
-    if (dispenseForm.quantity <= 0) {
-      actionLoading.value = false;
-      showToast('Invalid dispense quantity.', 'error');
-      return;
-    }
-
-    if (dispenseForm.quantity > item.stock) {
-      actionLoading.value = false;
-      showToast('Insufficient stock for this dispense request.', 'error');
-      return;
-    }
-
-    item.stock -= dispenseForm.quantity;
-    pushLog(`${item.name} dispensed -${dispenseForm.quantity}`, 'Nurse Carla', 'info');
-    const existingHistory = stockHistory.value[item.id] || [];
-    existingHistory.unshift({
-      id: existingHistory.length + 1,
-      event: 'Dispense',
-      by: 'Nurse Carla',
-      at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      detail: `-${dispenseForm.quantity} ${item.unit} for ${dispenseForm.patientName}`
-    });
-    stockHistory.value[item.id] = existingHistory;
-    showToast('Medicine dispensed successfully.', 'success');
-  }
-
-  if (actionType.value === 'fulfill') {
-    const request = actionRequest.value;
-    if (!request) {
-      actionLoading.value = false;
-      showToast('No request selected.', 'warning');
-      return;
-    }
-
-    const item = medicines.value.find((row) => row.name === request.medicineName);
-    if (!item) {
-      actionLoading.value = false;
-      showToast('Mapped medicine not found in inventory.', 'error');
-      return;
-    }
-
-    if (request.status === 'Fulfilled') {
-      actionLoading.value = false;
-      showToast('Request is already fulfilled.', 'warning');
-      return;
-    }
-
-    if (request.quantity > item.stock) {
-      actionLoading.value = false;
-      showToast('Cannot fulfill request due to insufficient stock.', 'error');
-      return;
-    }
-
-    request.status = 'Fulfilled';
-    item.stock -= request.quantity;
-    pushLog(`${item.name} dispense request #${request.id} fulfilled`, 'Pharmacy Staff', 'success');
-    const existingHistory = stockHistory.value[item.id] || [];
-    existingHistory.unshift({
-      id: existingHistory.length + 1,
-      event: 'Fulfill',
-      by: 'Pharmacy Staff',
-      at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      detail: `Request #${request.id} fulfilled (-${request.quantity} ${item.unit})`
-    });
-    stockHistory.value[item.id] = existingHistory;
-    showToast(`Request #${request.id} fulfilled.`);
-  }
-
-  actionLoading.value = false;
-  actionDialog.value = false;
 }
 </script>
 
@@ -755,9 +994,12 @@ async function submitAction(): Promise<void> {
               </p>
             </v-col>
             <v-col cols="12" md="4" class="d-flex justify-md-end mt-3 mt-md-0">
-              <v-btn class="saas-btn saas-btn-light" size="large" prepend-icon="mdi-plus" @click="openAction('add')">
-                Add New Medicine
-              </v-btn>
+              <div class="d-flex ga-2 flex-wrap justify-md-end">
+                <v-select v-model="sessionRole" :items="['Admin', 'Pharmacist', 'Pharmacy Staff', 'Nurse', 'Doctor']" label="Role" density="compact" variant="solo-filled" hide-details class="role-select" />
+                <v-btn class="saas-btn saas-btn-light" size="large" prepend-icon="mdi-plus" :disabled="!actionAllowed('add')" @click="openAction('add')">
+                  Add New Medicine
+                </v-btn>
+              </div>
             </v-col>
           </v-row>
         </v-card-text>
@@ -941,7 +1183,7 @@ async function submitAction(): Promise<void> {
                       </td>
                       <td class="text-right action-col">
                         <div class="action-cell">
-                          <v-btn size="small" class="saas-btn saas-btn-primary action-primary-btn" @click.stop="openAction('restock', item)">Restock</v-btn>
+                          <v-btn size="small" class="saas-btn saas-btn-primary action-primary-btn" :disabled="!actionAllowed('restock')" @click.stop="openAction('restock', item)">Restock</v-btn>
                           <v-menu location="bottom end">
                             <template #activator="{ props }">
                               <v-btn
@@ -956,10 +1198,11 @@ async function submitAction(): Promise<void> {
                               </v-btn>
                             </template>
                             <v-list density="compact" min-width="180">
-                              <v-list-item prepend-icon="mdi-pencil-outline" title="Edit" @click="openAction('edit', item)" />
+                              <v-list-item prepend-icon="mdi-pencil-outline" title="Edit" :disabled="!actionAllowed('edit')" @click="openAction('edit', item)" />
                               <v-list-item prepend-icon="mdi-eye-outline" title="View Details" @click="openSelectedMedicineModal(item)" />
-                              <v-list-item prepend-icon="mdi-pill" title="Dispense" @click="openAction('dispense', item)" />
-                              <v-list-item prepend-icon="mdi-archive-outline" title="Archive" @click="openAction('archive', item)" />
+                              <v-list-item prepend-icon="mdi-pill" title="Dispense" :disabled="!actionAllowed('dispense')" @click="openAction('dispense', item)" />
+                              <v-list-item prepend-icon="mdi-tune-variant" title="Adjust Stock" :disabled="!actionAllowed('adjust')" @click="openAction('adjust', item)" />
+                              <v-list-item prepend-icon="mdi-archive-outline" title="Archive" :disabled="!actionAllowed('archive')" @click="openAction('archive', item)" />
                             </v-list>
                           </v-menu>
                         </div>
@@ -993,6 +1236,7 @@ async function submitAction(): Promise<void> {
                 <th>PATIENT</th>
                 <th>MEDICINE</th>
                 <th>QTY</th>
+                <th>PRESCRIPTION</th>
                 <th>NOTES</th>
                 <th>STATUS</th>
                 <th></th>
@@ -1004,14 +1248,15 @@ async function submitAction(): Promise<void> {
                 <td>{{ request.patientName }}</td>
                 <td>{{ request.medicineName }}</td>
                 <td>{{ request.quantity }}</td>
+                <td>{{ request.prescriptionRef }}</td>
                 <td>{{ request.notes }}</td>
                 <td><v-chip size="small" color="warning" variant="tonal">{{ request.status }}</v-chip></td>
                 <td class="text-right">
-                  <v-btn class="saas-btn saas-btn-success" size="small" @click="openAction('fulfill', undefined, request)">Fulfill</v-btn>
+                  <v-btn class="saas-btn saas-btn-success" size="small" :disabled="!actionAllowed('fulfill')" @click="openAction('fulfill', undefined, request)">Fulfill</v-btn>
                 </td>
               </tr>
               <tr v-if="pendingRequests.length === 0">
-                <td colspan="7" class="text-center text-medium-emphasis py-4">No pending dispense requests.</td>
+                <td colspan="8" class="text-center text-medium-emphasis py-4">No pending dispense requests.</td>
               </tr>
             </tbody>
           </v-table>
@@ -1087,7 +1332,9 @@ async function submitAction(): Promise<void> {
         <v-divider />
         <v-card-text class="pt-5">
           <div class="text-h5 font-weight-bold">{{ selectedMedicine.name }}</div>
-          <div class="text-body-2 text-medium-emphasis mb-3">#{{ selectedMedicine.id }} • {{ selectedMedicine.type }}</div>
+          <div class="text-body-2 text-medium-emphasis mb-3">#{{ selectedMedicine.id }} • {{ selectedMedicine.type }} • {{ selectedMedicine.dosageStrength }}</div>
+          <div class="text-body-2 mb-2">SKU: <strong>{{ selectedMedicine.sku }}</strong> • Batch: <strong>{{ selectedMedicine.batchNo }}</strong></div>
+          <div class="text-body-2 mb-3">Supplier: <strong>{{ selectedMedicine.supplier }}</strong> • Location: <strong>{{ selectedMedicine.stockLocation }}</strong></div>
 
           <div class="d-flex align-center justify-space-between mb-2">
             <span>Stock State</span>
@@ -1116,12 +1363,24 @@ async function submitAction(): Promise<void> {
             <v-btn
               class="saas-btn saas-btn-info"
               prepend-icon="mdi-pill"
+              :disabled="!actionAllowed('dispense')"
               @click="
                 selectedMedicineDialog = false;
                 openAction('dispense', selectedMedicine);
               "
             >
               Dispense
+            </v-btn>
+            <v-btn
+              class="saas-btn saas-btn-ghost"
+              prepend-icon="mdi-tune-variant"
+              :disabled="!actionAllowed('adjust')"
+              @click="
+                selectedMedicineDialog = false;
+                openAction('adjust', selectedMedicine);
+              "
+            >
+              Adjust Stock
             </v-btn>
           </div>
           <div class="d-flex align-center ga-2">
@@ -1196,17 +1455,53 @@ async function submitAction(): Promise<void> {
         <v-card-text class="pt-5">
           <template v-if="actionType === 'add'">
             <v-row>
-              <v-col cols="12" md="6">
-                <v-text-field v-model="addForm.name" label="Medicine Name" variant="outlined" density="comfortable" />
+              <v-col cols="12" md="4">
+                <v-text-field v-model="addForm.sku" label="Medicine SKU/Code *" variant="outlined" density="comfortable" :error-messages="formErrors.sku" />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-text-field v-model="addForm.brandName" label="Brand Name *" variant="outlined" density="comfortable" :error-messages="formErrors.brandName" />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-text-field v-model="addForm.genericName" label="Generic Name *" variant="outlined" density="comfortable" :error-messages="formErrors.genericName" />
               </v-col>
               <v-col cols="12" md="6">
-                <v-text-field v-model="addForm.type" label="Medicine Type" variant="outlined" density="comfortable" />
+                <v-text-field v-model="addForm.name" label="Display Medicine Name *" variant="outlined" density="comfortable" :error-messages="formErrors.name" />
               </v-col>
               <v-col cols="12" md="6">
-                <v-select v-model="addForm.category" :items="['Tablet', 'Capsule', 'Syrup', 'Inhaler', 'Injection']" label="Category" variant="outlined" density="comfortable" />
+                <v-text-field v-model="addForm.dosageStrength" label="Dosage/Strength (mg/ml) *" variant="outlined" density="comfortable" :error-messages="formErrors.dosageStrength" />
               </v-col>
               <v-col cols="12" md="6">
-                <v-text-field v-model="addForm.expiryDate" label="Expiry Date" placeholder="e.g. Dec 31, 2027" variant="outlined" density="comfortable" />
+                <v-select v-model="addForm.category" :items="Object.keys(categoryTypeMap)" label="Category" variant="outlined" density="comfortable" />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-select v-model="addForm.type" :items="typeItemsForAdd" label="Medicine Type *" variant="outlined" density="comfortable" :error-messages="formErrors.type" />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-select v-model="addForm.supplier" :items="supplierItems" label="Supplier/Vendor *" variant="outlined" density="comfortable" :error-messages="formErrors.supplier" />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-text-field v-model="addForm.batchNo" label="Batch/Lot Number *" variant="outlined" density="comfortable" :error-messages="formErrors.batchNo" />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-text-field v-model="addForm.mfgDate" type="date" label="Manufacturing Date" variant="outlined" density="comfortable" />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-text-field v-model="addForm.expiryDate" type="date" label="Expiry Date *" variant="outlined" density="comfortable" :error-messages="formErrors.expiryDate" />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-text-field v-model="addForm.barcode" label="Barcode" variant="outlined" density="comfortable" hint="Use scanner input if available" persistent-hint />
+              </v-col>
+              <v-col cols="12" md="3">
+                <v-text-field v-model.number="addForm.purchaseCost" type="number" step="0.01" label="Purchase Cost" variant="outlined" density="comfortable" :error-messages="formErrors.purchaseCost" />
+              </v-col>
+              <v-col cols="12" md="3">
+                <v-text-field v-model.number="addForm.sellingPrice" type="number" step="0.01" label="Selling Price" variant="outlined" density="comfortable" :error-messages="formErrors.sellingPrice" />
+              </v-col>
+              <v-col cols="12" md="3">
+                <v-text-field v-model="addForm.unit" label="Unit of Measure (tab/ml/etc)" variant="outlined" density="comfortable" />
+              </v-col>
+              <v-col cols="12" md="3">
+                <v-text-field v-model="addForm.stockLocation" label="Stock Location (warehouse/shelf)" variant="outlined" density="comfortable" />
               </v-col>
               <v-col cols="12" md="4">
                 <v-text-field v-model.number="addForm.capacity" type="number" label="Capacity" variant="outlined" density="comfortable" />
@@ -1216,6 +1511,12 @@ async function submitAction(): Promise<void> {
               </v-col>
               <v-col cols="12" md="4">
                 <v-text-field v-model.number="addForm.lowThreshold" type="number" label="Low Stock Threshold" variant="outlined" density="comfortable" />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-text-field v-model.number="addForm.reorderLevel" type="number" label="Reorder Level Automation" variant="outlined" density="comfortable" :error-messages="formErrors.reorderLevel" />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-text-field v-model="addForm.storageRequirements" label="Storage Requirements" variant="outlined" density="comfortable" />
               </v-col>
             </v-row>
           </template>
@@ -1237,7 +1538,7 @@ async function submitAction(): Promise<void> {
                 <v-col cols="12" md="6">
                   <v-select
                     v-model="editForm.category"
-                    :items="['Tablet', 'Capsule', 'Syrup', 'Inhaler', 'Injection']"
+                    :items="Object.keys(categoryTypeMap)"
                     label="Category"
                     variant="outlined"
                     density="comfortable"
@@ -1251,6 +1552,24 @@ async function submitAction(): Promise<void> {
                 </v-col>
                 <v-col cols="12" md="4">
                   <v-text-field v-model="editForm.expiryDate" label="Expiry Date" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12" md="4">
+                  <v-text-field v-model.number="editForm.reorderLevel" type="number" label="Reorder Level" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12" md="4">
+                  <v-text-field v-model="editForm.supplier" label="Supplier" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12" md="4">
+                  <v-text-field v-model="editForm.dosageStrength" label="Dosage/Strength" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12" md="6">
+                  <v-text-field v-model="editForm.unit" label="Unit" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12" md="6">
+                  <v-text-field v-model="editForm.stockLocation" label="Stock Location" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12">
+                  <v-text-field v-model="editForm.storageRequirements" label="Storage Requirements" variant="outlined" density="comfortable" />
                 </v-col>
               </v-row>
             </template>
@@ -1290,10 +1609,22 @@ async function submitAction(): Promise<void> {
                   <v-text-field v-model.number="restockForm.quantity" type="number" label="Quantity" variant="outlined" density="comfortable" />
                 </v-col>
                 <v-col cols="12" md="4">
-                  <v-text-field v-model="restockForm.batchNo" label="Batch Number" variant="outlined" density="comfortable" />
+                  <v-text-field v-model="restockForm.batchNo" label="Batch/Lot Number *" variant="outlined" density="comfortable" />
                 </v-col>
                 <v-col cols="12" md="4">
-                  <v-text-field v-model="restockForm.batchExpiry" label="Batch Expiry" variant="outlined" density="comfortable" />
+                  <v-text-field v-model="restockForm.batchExpiry" type="date" label="Batch Expiry" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12" md="4">
+                  <v-select v-model="restockForm.supplier" :items="supplierItems" label="Supplier" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12" md="4">
+                  <v-text-field v-model.number="restockForm.purchaseCost" type="number" step="0.01" label="Purchase Cost" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12" md="4">
+                  <v-text-field v-model="restockForm.stockLocation" label="Stock Location" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12">
+                  <v-text-field v-model="restockForm.reason" label="Restock Reason" variant="outlined" density="comfortable" hint="Required for audit trail" persistent-hint />
                 </v-col>
               </v-row>
             </template>
@@ -1320,8 +1651,45 @@ async function submitAction(): Promise<void> {
                 <v-col cols="12" md="6">
                   <v-text-field v-model.number="dispenseForm.quantity" type="number" label="Quantity" variant="outlined" density="comfortable" />
                 </v-col>
+                <v-col cols="12" md="6">
+                  <v-text-field v-model="dispenseForm.prescriptionRef" label="Prescription Reference *" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12" md="6">
+                  <v-text-field v-model="dispenseForm.dispenseReason" label="Dispense Reason *" variant="outlined" density="comfortable" />
+                </v-col>
                 <v-col cols="12">
                   <v-textarea v-model="dispenseForm.notes" rows="3" label="Instruction Notes" variant="outlined" density="comfortable" />
+                </v-col>
+              </v-row>
+            </template>
+            <p v-else class="text-medium-emphasis mb-0">Select a medicine to continue.</p>
+          </template>
+
+          <template v-else-if="actionType === 'adjust'">
+            <v-select
+              v-model="actionMedicineId"
+              :items="actionMedicineOptions"
+              label="Select Medicine To Adjust"
+              variant="outlined"
+              density="comfortable"
+              class="mb-3"
+            />
+            <template v-if="actionMedicine">
+              <p class="text-body-1 mb-3">
+                Adjust <strong>{{ actionMedicine.name }}</strong> (Current: {{ actionMedicine.stock }} {{ actionMedicine.unit }})
+              </p>
+              <v-row>
+                <v-col cols="12" md="4">
+                  <v-select v-model="adjustForm.mode" :items="['increase', 'decrease', 'set']" label="Adjustment Type" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12" md="4">
+                  <v-text-field v-model.number="adjustForm.quantity" type="number" label="Quantity" variant="outlined" density="comfortable" />
+                </v-col>
+                <v-col cols="12" md="4">
+                  <v-text-field :model-value="actionMedicine.stock + ' ' + actionMedicine.unit" label="Current Stock" variant="outlined" density="comfortable" readonly />
+                </v-col>
+                <v-col cols="12">
+                  <v-textarea v-model="adjustForm.reason" rows="2" label="Stock Adjustment Reason *" variant="outlined" density="comfortable" hint="Required for audit logging." persistent-hint />
                 </v-col>
               </v-row>
             </template>
@@ -1333,7 +1701,7 @@ async function submitAction(): Promise<void> {
               Fulfill request <strong>#{{ actionRequest.id }}</strong> for <strong>{{ actionRequest.patientName }}</strong>.
             </p>
             <p class="text-medium-emphasis mb-0">
-              Medicine: {{ actionRequest.medicineName }} • Quantity: {{ actionRequest.quantity }} • Note: {{ actionRequest.notes }}
+              Medicine: {{ actionRequest.medicineName }} • Quantity: {{ actionRequest.quantity }} • RX: {{ actionRequest.prescriptionRef }} • Reason: {{ actionRequest.dispenseReason }}
             </p>
           </template>
         </v-card-text>
@@ -1341,6 +1709,15 @@ async function submitAction(): Promise<void> {
         <v-card-actions class="px-6 pb-5">
           <v-spacer />
           <v-btn class="saas-btn saas-btn-ghost" variant="text" @click="actionDialog = false">Cancel</v-btn>
+          <v-btn
+            v-if="actionType === 'add' || actionType === 'restock' || actionType === 'dispense'"
+            class="saas-btn saas-btn-ghost"
+            :loading="actionDraftLoading"
+            :disabled="actionLoading"
+            @click="saveDraftAction"
+          >
+            Save Draft
+          </v-btn>
           <v-btn class="saas-btn saas-btn-primary" :loading="actionLoading" @click="submitAction">{{ dialogActionText }}</v-btn>
         </v-card-actions>
       </v-card>
@@ -1389,6 +1766,10 @@ async function submitAction(): Promise<void> {
 
 .hero-subtitle {
   color: rgba(255, 255, 255, 0.9) !important;
+}
+
+.role-select {
+  min-width: 150px;
 }
 
 .surface-card {

@@ -7,12 +7,35 @@ const PublicRoutes = {
   children: [
     {
       name: 'Patient Home',
+      path: '/patient/',
+      component: () => import('@/views/patient/pages/PatientBookingPage.vue')
+    },
+    {
+      name: 'Patient Booking',
+      path: '/patient/booking',
+      component: () => import('@/views/patient/pages/PatientBookingPage.vue')
+    },
+    {
       path: '/',
-      component: () => import('@/views/patient/PatientLandingPage.vue')
+      redirect: '/patient/'
     },
     {
       path: '/patient',
-      redirect: '/'
+      redirect: '/patient/booking'
+    },
+    {
+      path: '/admin',
+      redirect: '/patient/'
+    },
+    {
+      path: '/admin/:pathMatch(.*)*',
+      redirect: (to: any) => {
+        const raw = Array.isArray(to.params.pathMatch) ? to.params.pathMatch.join('/') : String(to.params.pathMatch || '');
+        const normalized = raw.replace(/^\/+|\/+$/g, '');
+        if (!normalized) return '/admin/login';
+        if (normalized === 'login' || normalized === 'login1' || normalized === 'register') return `/admin/${normalized}`;
+        return `/${normalized}`;
+      }
     },
     {
       name: 'Admin Login',

@@ -1,4 +1,4 @@
-export type RegistrationStatus = 'Pending' | 'Active' | 'Archived';
+export type RegistrationStatus = 'Pending' | 'Review' | 'Active' | 'Archived';
 
 export type RegistrationRow = {
   id: number;
@@ -47,7 +47,7 @@ type RegistrationQuery = {
 
 export type RegistrationUpsertPayload = {
   id?: number;
-  patient_name: string;
+  patient_name?: string;
   patient_email?: string;
   age?: number;
   concern?: string;
@@ -56,6 +56,22 @@ export type RegistrationUpsertPayload = {
   status?: RegistrationStatus;
   assigned_to?: string;
 };
+
+export type RegistrationAction =
+  | 'create'
+  | 'update'
+  | 'approve'
+  | 'reject'
+  | 'archive'
+  | 'assign'
+  | 'set_status';
+
+type RegistrationActionPayload = {
+  id?: number;
+  reason?: string;
+  status?: RegistrationStatus;
+  assigned_to?: string;
+} & RegistrationUpsertPayload;
 
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '');
@@ -96,6 +112,21 @@ async function parseResponse<T>(response: Response): Promise<RegistrationApiResp
   return payload;
 }
 
+async function executeRegistrationAction(action: RegistrationAction, payload: RegistrationActionPayload): Promise<RegistrationRow> {
+  const response = await fetch(resolveApiUrl(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      action,
+      ...payload
+    })
+  });
+  const parsed = await parseResponse<RegistrationRow>(response);
+  if (!parsed.data) throw `No ${action} registration returned.`;
+  return parsed.data;
+}
+
 export async function fetchRegistrations(query: RegistrationQuery = {}): Promise<RegistrationListPayload> {
   const response = await fetch(buildUrl(query), { credentials: 'include' });
   const payload = await parseResponse<RegistrationListPayload>(response);
@@ -106,46 +137,30 @@ export async function fetchRegistrations(query: RegistrationQuery = {}): Promise
 }
 
 export async function createRegistration(payload: RegistrationUpsertPayload): Promise<RegistrationRow> {
-  const response = await fetch(resolveApiUrl(), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify({
-      action: 'create',
-      ...payload
-    })
-  });
-  const parsed = await parseResponse<RegistrationRow>(response);
-  if (!parsed.data) throw 'No created registration returned.';
-  return parsed.data;
+  if (!payload.patient_name?.trim()) throw 'patient_name is required.';
+  return await executeRegistrationAction('create', payload);
 }
 
 export async function updateRegistration(payload: RegistrationUpsertPayload): Promise<RegistrationRow> {
-  const response = await fetch(resolveApiUrl(), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify({
-      action: 'update',
-      ...payload
-    })
-  });
-  const parsed = await parseResponse<RegistrationRow>(response);
-  if (!parsed.data) throw 'No updated registration returned.';
-  return parsed.data;
+  return await executeRegistrationAction('update', payload);
 }
 
 export async function approveRegistration(id: number): Promise<RegistrationRow> {
-  const response = await fetch(resolveApiUrl(), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify({
-      action: 'approve',
-      id
-    })
-  });
-  const parsed = await parseResponse<RegistrationRow>(response);
-  if (!parsed.data) throw 'No approved registration returned.';
-  return parsed.data;
+  return await executeRegistrationAction('approve', { id });
+}
+
+export async function rejectRegistration(id: number, reason: string): Promise<RegistrationRow> {
+  return await executeRegistrationAction('reject', { id, reason });
+}
+
+export async function archiveRegistration(id: number, reason: string): Promise<RegistrationRow> {
+  return await executeRegistrationAction('archive', { id, reason });
+}
+
+export async function assignRegistration(id: number, assigned_to: string): Promise<RegistrationRow> {
+  return await executeRegistrationAction('assign', { id, assigned_to });
+}
+
+export async function setRegistrationStatus(id: number, status: RegistrationStatus): Promise<RegistrationRow> {
+  return await executeRegistrationAction('set_status', { id, status });
 }

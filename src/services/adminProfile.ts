@@ -42,6 +42,33 @@ type UpdateProfileRequest = {
 
 const STORAGE_KEY = 'nexora_admin_profile_payload';
 
+type ApiResponse<T> = {
+  ok: boolean;
+  message?: string;
+  data?: T;
+};
+
+function trimTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, '');
+}
+
+function resolveApiUrl(): string {
+  const directApi = import.meta.env.VITE_ADMIN_PROFILE_API_URL?.trim();
+  if (directApi) return trimTrailingSlashes(directApi);
+  const configured = import.meta.env.VITE_BACKEND_API_BASE_URL?.trim();
+  if (configured) return `${trimTrailingSlashes(configured)}/admin-profile`;
+  return '/api/admin-profile';
+}
+
+async function parseResponse<T>(response: Response): Promise<ApiResponse<T>> {
+  const text = await response.text();
+  const payload = text ? (JSON.parse(text) as ApiResponse<T>) : ({ ok: false } as ApiResponse<T>);
+  if (!response.ok || !payload.ok) {
+    throw payload.message || `Request failed (${response.status})`;
+  }
+  return payload;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -122,10 +149,35 @@ function prependLog(payload: AdminProfilePayload, log: AdminActivityLog): AdminP
 }
 
 export async function fetchAdminProfile(): Promise<AdminProfilePayload> {
+  try {
+    const response = await fetch(resolveApiUrl(), { credentials: 'include' });
+    const parsed = await parseResponse<AdminProfilePayload>(response);
+    if (parsed.data) return parsed.data;
+  } catch {
+    // fallback to local storage
+  }
   return readPayload();
 }
 
 export async function updateAdminProfile(payload: UpdateProfileRequest): Promise<AdminProfilePayload> {
+  try {
+    const response = await fetch(resolveApiUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        username: 'joecelgarcia1@gmail.com',
+        full_name: payload.fullName.trim(),
+        phone: payload.phone.trim(),
+        preferences: payload.preferences
+      })
+    });
+    await parseResponse<unknown>(response);
+    return await fetchAdminProfile();
+  } catch {
+    // fallback to local storage
+  }
+
   const existing = readPayload();
   const updated: AdminProfilePayload = {
     ...existing,

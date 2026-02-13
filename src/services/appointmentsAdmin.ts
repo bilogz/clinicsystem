@@ -1,17 +1,24 @@
-export type AppointmentStatus = 'Confirmed' | 'Pending' | 'Canceled' | 'Accepted' | 'Awaiting';
+export type AppointmentStatus = 'New' | 'Confirmed' | 'Pending' | 'Canceled' | 'Accepted' | 'Awaiting';
 
 export type AppointmentRow = {
   id: number;
   bookingId: string;
+  patientId: string;
   patientName: string;
   patientEmail: string;
   phoneNumber: string;
+  emergencyContact: string;
+  insuranceProvider: string;
+  paymentMethod: string;
+  appointmentPriority: 'Urgent' | 'Routine';
   service: string;
   department: string;
   doctor: string;
   scheduleDate: string;
   scheduleTime: string;
   status: AppointmentStatus;
+  symptomsSummary: string;
+  doctorNotes: string;
   visitReason: string;
   createdAt: string;
   updatedAt: string;
@@ -54,6 +61,13 @@ type AppointmentApiResponse<T> = {
 type UpdateAppointmentPayload = {
   booking_id: string;
   status?: string;
+  patient_id?: string;
+  emergency_contact?: string;
+  insurance_provider?: string;
+  payment_method?: string;
+  appointment_priority?: 'Urgent' | 'Routine';
+  symptoms_summary?: string;
+  doctor_notes?: string;
   doctor_name?: string;
   department_name?: string;
   visit_type?: string;
@@ -63,16 +77,25 @@ type UpdateAppointmentPayload = {
 };
 
 export type CreateAppointmentPayload = {
+  patient_id?: string;
   patient_name: string;
   patient_email?: string;
+  guardian_name?: string;
   phone_number: string;
+  emergency_contact?: string;
+  insurance_provider?: string;
+  payment_method?: string;
+  appointment_priority?: 'Urgent' | 'Routine';
   doctor_name: string;
   department_name: string;
   visit_type: string;
   appointment_date: string;
   preferred_time?: string;
+  symptoms_summary?: string;
+  doctor_notes?: string;
   visit_reason?: string;
   patient_age?: number | null;
+  patient_sex?: string;
   patient_gender?: string;
   status?: AppointmentStatus;
 };
@@ -110,6 +133,7 @@ function buildUrl(query: AppointmentQuery = {}): string {
 
 function toStatus(value: string): AppointmentStatus {
   const lowered = value.trim().toLowerCase();
+  if (lowered === 'new') return 'New';
   if (lowered === 'confirmed') return 'Confirmed';
   if (lowered === 'pending') return 'Pending';
   if (lowered === 'accepted') return 'Accepted';
@@ -121,15 +145,22 @@ function normalizeRow(item: Record<string, unknown>): AppointmentRow {
   return {
     id: Number(item.id || 0),
     bookingId: String(item.booking_id || ''),
+    patientId: String(item.patient_id || ''),
     patientName: String(item.patient_name || ''),
     patientEmail: String(item.patient_email || ''),
     phoneNumber: String(item.phone_number || ''),
+    emergencyContact: String(item.emergency_contact || ''),
+    insuranceProvider: String(item.insurance_provider || ''),
+    paymentMethod: String(item.payment_method || ''),
+    appointmentPriority: (String(item.appointment_priority || 'Routine') as 'Urgent' | 'Routine'),
     service: String(item.service_name || ''),
     department: String(item.department_name || ''),
     doctor: String(item.doctor_name || ''),
     scheduleDate: String(item.appointment_date || ''),
     scheduleTime: String(item.preferred_time || ''),
     status: toStatus(String(item.status || 'Pending')),
+    symptomsSummary: String(item.symptoms_summary || ''),
+    doctorNotes: String(item.doctor_notes || ''),
     visitReason: String(item.visit_reason || ''),
     createdAt: String(item.created_at || ''),
     updatedAt: String(item.updated_at || '')

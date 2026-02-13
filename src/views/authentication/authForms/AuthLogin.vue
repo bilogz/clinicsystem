@@ -18,7 +18,7 @@ function validate(_values: any, { setErrors }: any) {
 
 <template>
   <v-alert color="lightprimary" variant="tonal" class="mb-6">
-    Default Admin: <strong>joecelgarcia1@gmail.com</strong><br />
+    Default Super Admin: <strong>joecelgarcia1@gmail.com</strong><br />
     Password: <strong>Admin#123</strong>
   </v-alert>
   <Form @submit="validate" class="mt-7 loginForm" v-slot="{ errors, isSubmitting }">

@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import {
+  createLabRequest,
   fetchLabActivity,
   fetchLabQueue,
   fetchLabRequest,
+  rejectLabRequest,
   releaseLabReport,
   saveLabResults,
   startLabProcessing,
@@ -14,11 +17,14 @@ import {
   type LabRequestDetail,
   type LabStatus
 } from '@/services/laboratoryWorkflow';
+import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
+import { REALTIME_POLICY } from '@/config/realtimePolicy';
 
 type WorkflowStep = 'order' | 'processing' | 'encode' | 'release' | 'history';
 type RowAction = 'process' | 'encode' | 'release' | 'view';
 type SnackbarTone = 'success' | 'info' | 'warning' | 'error';
 type StatusTab = 'all' | 'pending' | 'in_progress' | 'completed';
+type LabRole = 'Admin' | 'Lab Manager' | 'Lab Technician' | 'Doctor';
 
 type WorkflowRecord = LabRequestDetail & {
   activityLogs: LabActivityLog[];
@@ -66,6 +72,26 @@ const FIELD_TEMPLATES: Record<string, TestFieldDefinition[]> = {
     { key: 'heart_rate', label: 'Heart Rate', type: 'number', required: true, min: 40, max: 200, unit: 'bpm' },
     { key: 'rhythm', label: 'Rhythm', type: 'text', required: true },
     { key: 'ecg_interpretation', label: 'Interpretation', type: 'text', required: true }
+  ],
+  Serology: [
+    { key: 'igm', label: 'IgM', type: 'select', required: true, options: ['Reactive', 'Non-reactive'] },
+    { key: 'igg', label: 'IgG', type: 'select', required: true, options: ['Reactive', 'Non-reactive'] },
+    { key: 'serology_impression', label: 'Impression', type: 'text', required: true }
+  ],
+  Microbiology: [
+    { key: 'organism', label: 'Organism Identified', type: 'text', required: true },
+    { key: 'colony_count', label: 'Colony Count', type: 'number', required: false, min: 0, max: 1000000 },
+    { key: 'susceptibility', label: 'Antibiotic Susceptibility', type: 'text', required: true }
+  ],
+  Histopathology: [
+    { key: 'specimen_description', label: 'Specimen Description', type: 'text', required: true },
+    { key: 'microscopic_findings', label: 'Microscopic Findings', type: 'text', required: true },
+    { key: 'pathology_diagnosis', label: 'Pathology Diagnosis', type: 'text', required: true }
+  ],
+  'Stool Test': [
+    { key: 'ova_parasite', label: 'Ova / Parasite', type: 'select', required: true, options: ['Negative', 'Positive'] },
+    { key: 'occult_blood', label: 'Occult Blood', type: 'select', required: true, options: ['Negative', 'Positive'] },
+    { key: 'stool_remarks', label: 'Remarks', type: 'text', required: false }
   ]
 };
 
@@ -106,27 +132,49 @@ const selectedRequestId = ref<number | null>(null);
 
 const createDialog = ref(false);
 const createBusy = ref(false);
+const createErrors = reactive<Record<string, string>>({});
+const currentRole = ref<LabRole>('Lab Technician');
 const createForm = reactive({
+  patientLookup: '',
   patientName: '',
   patientId: '',
   visitId: '',
   category: 'Blood Test',
   priority: 'Normal' as LabPriority,
   requestedByDoctor: 'Dr. Humour',
-  testsInput: 'Complete Blood Count (CBC)',
-  notes: ''
+  doctorDepartment: 'General Medicine',
+  specimenType: 'Whole Blood',
+  sampleSource: 'Blood',
+  collectionDateTime: new Date().toISOString().slice(0, 16),
+  clinicalDiagnosis: '',
+  tests: ['Complete Blood Count (CBC)'] as string[],
+  notes: '',
+  labInstructions: '',
+  insuranceReference: '',
+  billingReference: ''
 });
 
 const processingForm = reactive({
   sampleCollected: false,
   assignedLabStaff: 'Tech Anne',
-  rawAttachmentName: ''
+  rawAttachmentName: '',
+  specimenType: 'Whole Blood',
+  sampleSource: 'Blood',
+  collectionDateTime: new Date().toISOString().slice(0, 16)
 });
 
 const encodeForm = reactive<Record<string, string | number | null>>({});
 const encodeErrors = reactive<Record<string, string>>({});
+const rejectDialog = ref(false);
+const rejectForm = reactive({
+  reason: '',
+  resampleFlag: false
+});
 
 const pendingAction = ref<'none' | 'start' | 'save_processing' | 'save_draft' | 'finalize' | 'release'>('none');
+let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+let lastAutosaveSignature = '';
+const realtime = useRealtimeListSync();
 
 const snackbar = reactive({
   open: false,
@@ -135,6 +183,55 @@ const snackbar = reactive({
 });
 
 const labStaffOptions = ['Tech Anne', 'Tech Mark', 'Tech Liza', 'Tech Paolo', 'Tech Carla'];
+const roleOptions: LabRole[] = ['Admin', 'Lab Manager', 'Lab Technician', 'Doctor'];
+const baseCategoryItems = ['Blood Test', 'Urinalysis', 'X-Ray', 'COVID Test', 'ECG', 'Serology', 'Microbiology', 'Histopathology', 'Stool Test'];
+const doctorDepartmentMap: Record<string, string> = {
+  'Dr. Humour': 'General Medicine',
+  'Dr. Morco': 'Internal Medicine',
+  'Dr. Jenni': 'General Medicine',
+  'Dr. Molina': 'Radiology',
+  'Dr. Rivera': 'Pediatrics'
+};
+const categoryTestsMap: Record<string, string[]> = {
+  'Blood Test': ['Complete Blood Count (CBC)', 'Comprehensive Metabolic Panel (CMP)', 'Lipid Panel', 'Fasting Blood Sugar'],
+  Urinalysis: ['Urinalysis Routine', 'Microscopy', 'Urine Culture'],
+  'X-Ray': ['Chest X-Ray (PA View)', 'Skull X-Ray', 'Lumbar Spine X-Ray'],
+  'COVID Test': ['SARS-CoV-2 Antigen', 'RT-PCR'],
+  ECG: ['12-lead ECG', 'Rhythm Strip'],
+  Serology: ['Dengue IgM/IgG', 'HBsAg', 'HIV Screening'],
+  Microbiology: ['Urine Culture and Sensitivity', 'Blood Culture', 'Sputum Culture'],
+  Histopathology: ['Biopsy Histopathology', 'Cytology'],
+  'Stool Test': ['Fecalysis', 'Stool Ova and Parasite', 'Fecal Occult Blood']
+};
+const testSpecimenMap: Record<string, { specimenType: string; sampleSource: string }> = {
+  'Complete Blood Count (CBC)': { specimenType: 'Whole Blood', sampleSource: 'Blood' },
+  'Comprehensive Metabolic Panel (CMP)': { specimenType: 'Serum', sampleSource: 'Blood' },
+  'Lipid Panel': { specimenType: 'Serum', sampleSource: 'Blood' },
+  'Fasting Blood Sugar': { specimenType: 'Plasma', sampleSource: 'Blood' },
+  'Urinalysis Routine': { specimenType: 'Urine', sampleSource: 'Urine' },
+  Microscopy: { specimenType: 'Urine', sampleSource: 'Urine' },
+  'Urine Culture': { specimenType: 'Urine', sampleSource: 'Urine' },
+  'Chest X-Ray (PA View)': { specimenType: 'Imaging', sampleSource: 'Radiology' },
+  'Skull X-Ray': { specimenType: 'Imaging', sampleSource: 'Radiology' },
+  'Lumbar Spine X-Ray': { specimenType: 'Imaging', sampleSource: 'Radiology' },
+  'SARS-CoV-2 Antigen': { specimenType: 'Swab', sampleSource: 'Nasopharyngeal' },
+  'RT-PCR': { specimenType: 'Swab', sampleSource: 'Nasopharyngeal' },
+  '12-lead ECG': { specimenType: 'ECG Trace', sampleSource: 'Cardiac' },
+  'Rhythm Strip': { specimenType: 'ECG Trace', sampleSource: 'Cardiac' },
+  'Dengue IgM/IgG': { specimenType: 'Serum', sampleSource: 'Blood' },
+  HBsAg: { specimenType: 'Serum', sampleSource: 'Blood' },
+  'HIV Screening': { specimenType: 'Serum', sampleSource: 'Blood' },
+  'Urine Culture and Sensitivity': { specimenType: 'Urine', sampleSource: 'Urine' },
+  'Blood Culture': { specimenType: 'Whole Blood', sampleSource: 'Blood' },
+  'Sputum Culture': { specimenType: 'Sputum', sampleSource: 'Respiratory' },
+  'Biopsy Histopathology': { specimenType: 'Tissue', sampleSource: 'Biopsy' },
+  Cytology: { specimenType: 'Body Fluid', sampleSource: 'Cytology' },
+  Fecalysis: { specimenType: 'Stool', sampleSource: 'Stool' },
+  'Stool Ova and Parasite': { specimenType: 'Stool', sampleSource: 'Stool' },
+  'Fecal Occult Blood': { specimenType: 'Stool', sampleSource: 'Stool' }
+};
+const specimenTypeOptions = ['Whole Blood', 'Serum', 'Plasma', 'Urine', 'Swab', 'Imaging', 'ECG Trace', 'Sputum', 'Tissue', 'Body Fluid', 'Stool'];
+const sampleSourceOptions = ['Blood', 'Urine', 'Nasopharyngeal', 'Radiology', 'Cardiac', 'Respiratory', 'Biopsy', 'Cytology', 'Stool', 'Other'];
 
 const activeWorkflow = computed<WorkflowRecord | null>(() => {
   if (selectedRequestId.value == null) {
@@ -145,13 +242,26 @@ const activeWorkflow = computed<WorkflowRecord | null>(() => {
 
 const categoryItems = computed(() => {
   const dynamic = Array.from(new Set(queueRows.value.map((item) => item.category).filter(Boolean))).sort();
-  return ['All', ...dynamic];
+  const merged = Array.from(new Set([...baseCategoryItems, ...dynamic]));
+  return ['All', ...merged];
 });
 
 const doctorItems = computed(() => {
   const dynamic = Array.from(new Set(queueRows.value.map((item) => item.requestedByDoctor).filter(Boolean))).sort();
   return ['All', ...dynamic];
 });
+const doctorRequestItems = computed(() => doctorItems.value.filter((item) => item !== 'All'));
+const patientLookupItems = computed(() => {
+  return queueRows.value.map((row) => ({
+    title: `${row.patientName} (${row.patientId})`,
+    value: row.requestId,
+    row
+  }));
+});
+const availableTestsForCategory = computed(() => categoryTestsMap[createForm.category] || []);
+const canCreateRequest = computed(() => currentRole.value !== 'Doctor');
+const canProcessWorkflow = computed(() => ['Admin', 'Lab Manager', 'Lab Technician'].includes(currentRole.value));
+const canVerifyAndRelease = computed(() => ['Admin', 'Lab Manager'].includes(currentRole.value));
 
 const priorityItems: Array<'All' | LabPriority> = ['All', 'Normal', 'Urgent', 'STAT'];
 
@@ -248,7 +358,16 @@ const canExport = computed(() => activeWorkflow.value?.status === 'Completed');
 
 onMounted(async () => {
   await loadQueue();
+  realtime.startPolling(() => {
+    void loadQueue({ silent: true });
+  }, REALTIME_POLICY.polling.laboratoryMs);
   queueReady.value = true;
+});
+
+onBeforeUnmount(() => {
+  realtime.stopPolling();
+  realtime.invalidatePending();
+  if (autosaveTimer) clearTimeout(autosaveTimer);
 });
 
 watch(pageCount, (value) => {
@@ -285,6 +404,54 @@ watch(activeWorkflow, (record) => {
     hydrateFormsFromWorkflow(record);
   }
 });
+watch(
+  [encodeForm, workflowStep, activeWorkflow],
+  () => {
+    if (!activeWorkflow.value) return;
+    if (workflowStep.value !== 'encode') return;
+    if (workflowBusy.value) return;
+    if (activeWorkflow.value.status === 'Pending' || activeWorkflow.value.status === 'Completed' || activeWorkflow.value.status === 'Cancelled') return;
+    const signature = JSON.stringify({
+      requestId: activeWorkflow.value.requestId,
+      values: encodeForm,
+      attachment: processingForm.rawAttachmentName
+    });
+    if (signature === lastAutosaveSignature) return;
+    if (autosaveTimer) clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(() => {
+      lastAutosaveSignature = signature;
+      void onSaveDraft(true);
+    }, 1400);
+  },
+  { deep: true }
+);
+watch(
+  () => createForm.requestedByDoctor,
+  (doctor) => {
+    createForm.doctorDepartment = doctorDepartmentMap[doctor] || createForm.doctorDepartment || 'General Medicine';
+  }
+);
+watch(
+  () => createForm.category,
+  (category) => {
+    const defaults = categoryTestsMap[category] || [];
+    if (!defaults.length) return;
+    if (createForm.tests.length === 0 || !createForm.tests.every((test) => defaults.includes(test))) {
+      createForm.tests = [defaults[0]];
+    }
+  }
+);
+watch(
+  () => createForm.tests,
+  (tests) => {
+    if (!tests.length) return;
+    const specimen = testSpecimenMap[tests[0]];
+    if (!specimen) return;
+    createForm.specimenType = specimen.specimenType;
+    createForm.sampleSource = specimen.sampleSource;
+  },
+  { deep: true }
+);
 
 function showToast(text: string, color: SnackbarTone = 'success'): void {
   snackbar.text = text;
@@ -407,13 +574,26 @@ function createFallbackWorkflows(): WorkflowRecord[] {
       status: 'Pending',
       requestedAt: isoAgo(0, 10, 45),
       requestedByDoctor: 'Dr. Humour',
+      doctorDepartment: 'General Medicine',
       notes: 'Fatigue and dizziness for 3 days.',
       tests: ['Complete Blood Count (CBC)', 'Comprehensive Metabolic Panel (CMP)', 'Lipid Panel'],
+      specimenType: 'Whole Blood',
+      sampleSource: 'Blood',
+      collectionDateTime: null,
+      clinicalDiagnosis: 'Rule out anemia and metabolic imbalance',
+      labInstructions: 'Fasting sample preferred',
+      insuranceReference: 'HMO-MAXI-2026-1001',
+      billingReference: 'BILL-LAB-1208',
       assignedLabStaff: 'Tech Anne',
       sampleCollected: false,
       sampleCollectedAt: null,
       processingStartedAt: null,
       resultEncodedAt: null,
+      resultReferenceRange: '',
+      verifiedBy: '',
+      verifiedAt: null,
+      rejectionReason: '',
+      resampleFlag: false,
       releasedAt: null,
       rawAttachmentName: '',
       encodedValues: {},
@@ -433,13 +613,26 @@ function createFallbackWorkflows(): WorkflowRecord[] {
       status: 'Pending',
       requestedAt: isoAgo(1, 8, 15),
       requestedByDoctor: 'Dr. Jenni',
+      doctorDepartment: 'General Medicine',
       notes: 'Persistent chest pain, evaluate for pulmonary findings.',
       tests: ['Chest X-Ray (PA View)'],
+      specimenType: 'Imaging',
+      sampleSource: 'Radiology',
+      collectionDateTime: null,
+      clinicalDiagnosis: 'Chest pain, evaluate pulmonary condition',
+      labInstructions: '',
+      insuranceReference: '',
+      billingReference: 'BILL-LAB-1207',
       assignedLabStaff: 'Tech Mark',
       sampleCollected: false,
       sampleCollectedAt: null,
       processingStartedAt: null,
       resultEncodedAt: null,
+      resultReferenceRange: '',
+      verifiedBy: '',
+      verifiedAt: null,
+      rejectionReason: '',
+      resampleFlag: false,
       releasedAt: null,
       rawAttachmentName: '',
       encodedValues: {},
@@ -457,13 +650,26 @@ function createFallbackWorkflows(): WorkflowRecord[] {
       status: 'In Progress',
       requestedAt: isoAgo(2, 9, 20),
       requestedByDoctor: 'Dr. Morco',
+      doctorDepartment: 'Internal Medicine',
       notes: 'Dysuria and mild lower abdominal discomfort.',
       tests: ['Urinalysis Routine', 'Microscopy'],
+      specimenType: 'Urine',
+      sampleSource: 'Urine',
+      collectionDateTime: isoAgo(2, 9, 45),
+      clinicalDiagnosis: 'UTI, rule out hematuria',
+      labInstructions: 'Midstream clean catch',
+      insuranceReference: '',
+      billingReference: 'BILL-LAB-1196',
       assignedLabStaff: 'Tech Liza',
       sampleCollected: true,
       sampleCollectedAt: isoAgo(2, 9, 45),
       processingStartedAt: isoAgo(2, 10, 0),
       resultEncodedAt: null,
+      resultReferenceRange: '',
+      verifiedBy: '',
+      verifiedAt: null,
+      rejectionReason: '',
+      resampleFlag: false,
       releasedAt: null,
       rawAttachmentName: 'emma-tan-urinalysis-raw.pdf',
       encodedValues: {},
@@ -484,13 +690,26 @@ function createFallbackWorkflows(): WorkflowRecord[] {
       status: 'In Progress',
       requestedAt: isoAgo(3, 13, 40),
       requestedByDoctor: 'Dr. Humour',
+      doctorDepartment: 'General Medicine',
       notes: 'Fever and sore throat. Rapid screening requested.',
       tests: ['SARS-CoV-2 Antigen'],
+      specimenType: 'Swab',
+      sampleSource: 'Nasopharyngeal',
+      collectionDateTime: isoAgo(3, 14, 0),
+      clinicalDiagnosis: 'Acute upper respiratory infection',
+      labInstructions: '',
+      insuranceReference: '',
+      billingReference: 'BILL-LAB-1183',
       assignedLabStaff: 'Tech Paolo',
       sampleCollected: true,
       sampleCollectedAt: isoAgo(3, 14, 0),
       processingStartedAt: isoAgo(3, 14, 5),
       resultEncodedAt: null,
+      resultReferenceRange: '',
+      verifiedBy: '',
+      verifiedAt: null,
+      rejectionReason: '',
+      resampleFlag: false,
       releasedAt: null,
       rawAttachmentName: '',
       encodedValues: { test_method: 'Antigen', result: 'Negative', ct_value: null },
@@ -511,13 +730,26 @@ function createFallbackWorkflows(): WorkflowRecord[] {
       status: 'Result Ready',
       requestedAt: isoAgo(4, 11, 30),
       requestedByDoctor: 'Dr. Jenni',
+      doctorDepartment: 'General Medicine',
       notes: 'Routine follow-up panel before physician review.',
       tests: ['CBC', 'Fasting Blood Sugar'],
+      specimenType: 'Whole Blood',
+      sampleSource: 'Blood',
+      collectionDateTime: isoAgo(4, 11, 40),
+      clinicalDiagnosis: 'Follow-up diabetes monitoring',
+      labInstructions: '',
+      insuranceReference: 'HMO-INTEL-5522',
+      billingReference: 'BILL-LAB-1172',
       assignedLabStaff: 'Tech Mark',
       sampleCollected: true,
       sampleCollectedAt: isoAgo(4, 11, 40),
       processingStartedAt: isoAgo(4, 11, 45),
       resultEncodedAt: isoAgo(4, 12, 10),
+      resultReferenceRange: 'WBC 3.5-11, Hemoglobin 11.5-17.5',
+      verifiedBy: 'Tech Mark',
+      verifiedAt: isoAgo(4, 12, 15),
+      rejectionReason: '',
+      resampleFlag: false,
       releasedAt: null,
       rawAttachmentName: 'alex-chua-blood-raw.pdf',
       encodedValues: { wbc: 6.4, rbc: 4.8, hemoglobin: 14.2, platelets: 288 },
@@ -539,13 +771,26 @@ function createFallbackWorkflows(): WorkflowRecord[] {
       status: 'Completed',
       requestedAt: isoAgo(5, 9, 50),
       requestedByDoctor: 'Dr. Morco',
+      doctorDepartment: 'Internal Medicine',
       notes: 'Baseline ECG prior to medication adjustment.',
       tests: ['12-lead ECG'],
+      specimenType: 'ECG Trace',
+      sampleSource: 'Cardiac',
+      collectionDateTime: isoAgo(5, 10, 0),
+      clinicalDiagnosis: 'Baseline cardiac monitoring',
+      labInstructions: '',
+      insuranceReference: '',
+      billingReference: 'BILL-LAB-1168',
       assignedLabStaff: 'Tech Anne',
       sampleCollected: true,
       sampleCollectedAt: isoAgo(5, 10, 0),
       processingStartedAt: isoAgo(5, 10, 5),
       resultEncodedAt: isoAgo(5, 10, 30),
+      resultReferenceRange: 'Heart rate 60-100 bpm',
+      verifiedBy: 'Tech Anne',
+      verifiedAt: isoAgo(5, 10, 35),
+      rejectionReason: '',
+      resampleFlag: false,
       releasedAt: isoAgo(5, 10, 40),
       rawAttachmentName: 'lara-gomez-ecg.pdf',
       encodedValues: { heart_rate: 76, rhythm: 'Sinus Rhythm', ecg_interpretation: 'No acute ischemic changes.' },
@@ -586,13 +831,26 @@ function createWorkflowFromQueue(row: LabQueueRequest): WorkflowRecord {
     status: row.status,
     requestedAt: row.requestedAt,
     requestedByDoctor: row.requestedByDoctor,
+    doctorDepartment: doctorDepartmentMap[row.requestedByDoctor] || 'General Medicine',
     notes: '',
     tests: [row.category],
+    specimenType: testSpecimenMap[row.category]?.specimenType || 'Whole Blood',
+    sampleSource: testSpecimenMap[row.category]?.sampleSource || 'Blood',
+    collectionDateTime: null,
+    clinicalDiagnosis: '',
+    labInstructions: '',
+    insuranceReference: '',
+    billingReference: '',
     assignedLabStaff: 'Tech Anne',
     sampleCollected: false,
     sampleCollectedAt: null,
     processingStartedAt: null,
     resultEncodedAt: null,
+    resultReferenceRange: '',
+    verifiedBy: '',
+    verifiedAt: null,
+    rejectionReason: '',
+    resampleFlag: false,
     releasedAt: null,
     rawAttachmentName: '',
     encodedValues: {},
@@ -665,35 +923,43 @@ function upsertWorkflowFromBackend(detail: LabRequestDetail, logs: LabActivityLo
   return merged;
 }
 
-async function loadQueue(): Promise<void> {
-  queueLoading.value = true;
-
-  try {
-    const remoteQueue = await fetchLabQueue({
-      search: searchQuery.value || undefined,
-      status: parseStatusFromTab(statusTab.value),
-      category: filterCategory.value !== 'All' ? filterCategory.value : undefined,
-      priority: filterPriority.value !== 'All' ? filterPriority.value : undefined,
-      doctor: filterDoctor.value !== 'All' ? filterDoctor.value : undefined,
-      fromDate: filterFromDate.value || undefined,
-      toDate: filterToDate.value || undefined
-    });
-
-    queueRows.value = remoteQueue;
-    remoteQueue.forEach((row) => ensureWorkflowForQueueRow(row));
-    backendMode.value = 'connected';
-
-    if (remoteQueue.length > 0) {
-      selectedRequestId.value = remoteQueue[0].requestId;
+async function loadQueue(options: { silent?: boolean } = {}): Promise<void> {
+  const remoteQueue = await realtime.runLatest(
+    async () =>
+      fetchLabQueue({
+        search: searchQuery.value || undefined,
+        status: parseStatusFromTab(statusTab.value),
+        category: filterCategory.value !== 'All' ? filterCategory.value : undefined,
+        priority: filterPriority.value !== 'All' ? filterPriority.value : undefined,
+        doctor: filterDoctor.value !== 'All' ? filterDoctor.value : undefined,
+        fromDate: filterFromDate.value || undefined,
+        toDate: filterToDate.value || undefined
+      }),
+    {
+      silent: options.silent,
+      onStart: () => {
+        queueLoading.value = true;
+      },
+      onFinish: () => {
+        queueLoading.value = false;
+      },
+      onError: (error) => {
+        activateLocalMode(error);
+        seedFallbackData();
+        if (queueRows.value.length > 0) {
+          selectedRequestId.value = queueRows.value[0].requestId;
+        }
+      }
     }
-  } catch (error) {
-    activateLocalMode(error);
-    seedFallbackData();
-    if (queueRows.value.length > 0) {
-      selectedRequestId.value = queueRows.value[0].requestId;
-    }
-  } finally {
-    queueLoading.value = false;
+  );
+
+  if (!remoteQueue) return;
+  queueRows.value = remoteQueue;
+  remoteQueue.forEach((row) => ensureWorkflowForQueueRow(row));
+  backendMode.value = 'connected';
+
+  if (remoteQueue.length > 0) {
+    selectedRequestId.value = remoteQueue[0].requestId;
   }
 }
 
@@ -707,6 +973,9 @@ function hydrateFormsFromWorkflow(record: WorkflowRecord): void {
   processingForm.sampleCollected = record.sampleCollected;
   processingForm.assignedLabStaff = record.assignedLabStaff || 'Tech Anne';
   processingForm.rawAttachmentName = record.rawAttachmentName || '';
+  processingForm.specimenType = record.specimenType || 'Whole Blood';
+  processingForm.sampleSource = record.sampleSource || 'Blood';
+  processingForm.collectionDateTime = (record.collectionDateTime || new Date().toISOString()).slice(0, 16);
 
   resetEncodeErrors();
   Object.keys(encodeForm).forEach((key) => {
@@ -761,6 +1030,19 @@ function rowPrimaryActionColor(row: LabQueueRequest): string {
   return 'secondary';
 }
 
+function rowPrimaryActionIcon(row: LabQueueRequest): string {
+  const action = rowPrimaryAction(row);
+  if (action === 'process') return 'mdi-flask-outline';
+  if (action === 'encode') return 'mdi-clipboard-text-outline';
+  if (action === 'release') return 'mdi-send-check-outline';
+  return 'mdi-folder-open-outline';
+}
+
+async function refreshQueueNow(): Promise<void> {
+  await loadQueue();
+  showToast('Laboratory queue refreshed.', 'info');
+}
+
 function statusChipColor(status: LabStatus): string {
   if (status === 'Pending') return 'warning';
   if (status === 'In Progress') return 'info';
@@ -774,6 +1056,16 @@ function priorityChipColor(priority: LabPriority): string {
   if (priority === 'Urgent') return 'warning';
   return 'primary';
 }
+function applyPatientLookup(requestId: string | number | null): void {
+  if (requestId == null || requestId === '') return;
+  const parsedId = typeof requestId === 'number' ? requestId : Number(requestId);
+  if (!Number.isFinite(parsedId)) return;
+  const match = queueRows.value.find((row) => row.requestId === parsedId);
+  if (!match) return;
+  createForm.patientName = match.patientName;
+  createForm.patientId = match.patientId;
+  createForm.visitId = match.visitId;
+}
 function openCreateRequestDialog(): void {
   createForm.patientName = '';
   createForm.patientId = '';
@@ -781,72 +1073,91 @@ function openCreateRequestDialog(): void {
   createForm.category = 'Blood Test';
   createForm.priority = 'Normal';
   createForm.requestedByDoctor = doctorItems.value[1] || 'Dr. Humour';
-  createForm.testsInput = 'Complete Blood Count (CBC)';
+  createForm.patientLookup = '';
+  createForm.doctorDepartment = doctorDepartmentMap[createForm.requestedByDoctor] || 'General Medicine';
+  createForm.specimenType = 'Whole Blood';
+  createForm.sampleSource = 'Blood';
+  createForm.collectionDateTime = new Date().toISOString().slice(0, 16);
+  createForm.tests = ['Complete Blood Count (CBC)'];
+  createForm.clinicalDiagnosis = '';
+  createForm.labInstructions = '';
+  createForm.insuranceReference = '';
+  createForm.billingReference = '';
   createForm.notes = '';
+  Object.keys(createErrors).forEach((key) => {
+    createErrors[key] = '';
+  });
   createDialog.value = true;
 }
 
 async function createRequest(): Promise<void> {
-  if (!createForm.patientName.trim()) {
-    showToast('Patient name is required.', 'error');
+  Object.keys(createErrors).forEach((key) => {
+    createErrors[key] = '';
+  });
+  if (!canCreateRequest.value) {
+    showToast('Your role cannot create laboratory requests.', 'warning');
+    return;
+  }
+  if (!createForm.patientName.trim()) createErrors.patientName = 'Patient name is required.';
+  if (!createForm.requestedByDoctor.trim()) createErrors.requestedByDoctor = 'Requested doctor is required.';
+  if (!createForm.doctorDepartment.trim()) createErrors.doctorDepartment = 'Doctor department is required.';
+  if (!createForm.category.trim()) createErrors.category = 'Category is required.';
+  if (!createForm.tests.length) createErrors.tests = 'At least one test panel is required.';
+  if (!createForm.specimenType.trim()) createErrors.specimenType = 'Specimen type is required.';
+  if (!createForm.sampleSource.trim()) createErrors.sampleSource = 'Sample source is required.';
+  if (!createForm.collectionDateTime) createErrors.collectionDateTime = 'Collection date/time is required.';
+  if (!createForm.clinicalDiagnosis.trim()) createErrors.clinicalDiagnosis = 'Clinical diagnosis is required.';
+  if (Object.values(createErrors).some(Boolean)) {
+    showToast('Please complete required fields for new request.', 'error');
     return;
   }
 
   createBusy.value = true;
-  await new Promise((resolve) => setTimeout(resolve, 260));
+  try {
+    const created = await createLabRequest({
+      patientName: createForm.patientName.trim(),
+      patientId: createForm.patientId.trim() || undefined,
+      visitId: createForm.visitId.trim() || undefined,
+      category: createForm.category,
+      priority: createForm.priority,
+      requestedByDoctor: createForm.requestedByDoctor.trim() || 'Doctor',
+      doctorDepartment: createForm.doctorDepartment.trim() || 'General Medicine',
+      notes: createForm.notes.trim(),
+      tests: createForm.tests.map((item) => item.trim()).filter(Boolean),
+      specimenType: createForm.specimenType,
+      sampleSource: createForm.sampleSource,
+      collectionDateTime: createForm.collectionDateTime ? new Date(createForm.collectionDateTime).toISOString() : null,
+      clinicalDiagnosis: createForm.clinicalDiagnosis.trim(),
+      labInstructions: createForm.labInstructions.trim(),
+      insuranceReference: createForm.insuranceReference.trim(),
+      billingReference: createForm.billingReference.trim(),
+      assignedLabStaff: 'Tech Anne'
+    });
 
-  const maxId = Math.max(1000, ...queueRows.value.map((row) => row.requestId));
-  const nextId = maxId + 1;
-  const nowIso = new Date().toISOString();
-
-  const workflow: WorkflowRecord = {
-    requestId: nextId,
-    visitId: createForm.visitId.trim() || `VISIT-${new Date().getFullYear()}-${nextId}`,
-    patientId: createForm.patientId.trim() || `PAT-${nextId}`,
-    patientName: createForm.patientName.trim(),
-    age: null,
-    sex: '',
-    category: createForm.category,
-    priority: createForm.priority,
-    status: 'Pending',
-    requestedAt: nowIso,
-    requestedByDoctor: createForm.requestedByDoctor.trim() || 'Doctor',
-    notes: createForm.notes.trim(),
-    tests: createForm.testsInput
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean),
-    assignedLabStaff: 'Tech Anne',
-    sampleCollected: false,
-    sampleCollectedAt: null,
-    processingStartedAt: null,
-    resultEncodedAt: null,
-    releasedAt: null,
-    rawAttachmentName: '',
-    encodedValues: {},
-    activityLogs: [
-      {
-        id: nextId * 1000,
-        requestId: nextId,
-        action: 'Request Created',
-        details: 'New lab request created from laboratory queue dashboard.',
-        actor: 'Lab Staff',
-        createdAt: nowIso
-      }
-    ]
-  };
-
-  if (workflow.tests.length === 0) {
-    workflow.tests = [`${workflow.category} request`];
+    const workflow: WorkflowRecord = {
+      ...created,
+      activityLogs: [
+        {
+          id: created.requestId * 1000,
+          requestId: created.requestId,
+          action: 'Request Created',
+          details: 'New lab request created from laboratory queue dashboard.',
+          actor: 'Lab Staff',
+          createdAt: created.requestedAt
+        }
+      ]
+    };
+    workflowCache[workflow.requestId] = workflow;
+    upsertQueueFromWorkflow(workflow);
+    selectedRequestId.value = workflow.requestId;
+    createDialog.value = false;
+    showToast(`New request #${workflow.requestId} created.`, 'success');
+    await loadQueue({ silent: true });
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    createBusy.value = false;
   }
-
-  workflowCache[workflow.requestId] = workflow;
-  upsertQueueFromWorkflow(workflow);
-
-  selectedRequestId.value = workflow.requestId;
-  createDialog.value = false;
-  createBusy.value = false;
-  showToast(`New request #${workflow.requestId} created.`, 'success');
 }
 
 async function openWorkflow(requestId: number, action: RowAction): Promise<void> {
@@ -877,6 +1188,7 @@ async function openWorkflow(requestId: number, action: RowAction): Promise<void>
   const record = workflowCache[requestId];
   if (record) {
     hydrateFormsFromWorkflow(record);
+    lastAutosaveSignature = '';
     workflowStep.value = resolveStepFromAction(record, action);
   }
 
@@ -930,6 +1242,15 @@ function buildResultSummary(values: Record<string, string | number | null>): str
 
 function validateEncodeForm(): boolean {
   resetEncodeErrors();
+  const record = activeWorkflow.value;
+  if (record) {
+    if (!record.resultReferenceRange.trim()) {
+      encodeErrors.resultReferenceRange = 'Result reference range is required.';
+    }
+    if (!record.verifiedBy.trim()) {
+      encodeErrors.verifiedBy = 'Verified by is required before finalization.';
+    }
+  }
 
   currentFieldDefinitions.value.forEach((field) => {
     const value = encodeForm[field.key];
@@ -983,6 +1304,10 @@ function updateWorkflowAndQueue(record: WorkflowRecord): void {
 async function onStartProcessing(): Promise<void> {
   const record = activeWorkflow.value;
   if (!record) return;
+  if (!canProcessWorkflow.value) {
+    showToast('Your role is not allowed to process samples.', 'warning');
+    return;
+  }
   if (record.status !== 'Pending') {
     showToast('Only pending requests can be started.', 'warning');
     return;
@@ -1001,7 +1326,10 @@ async function onStartProcessing(): Promise<void> {
         labStaff: processingForm.assignedLabStaff,
         sampleCollected: processingForm.sampleCollected,
         sampleCollectedAt,
-        processingStartedAt: nowIso
+        processingStartedAt: nowIso,
+        specimenType: processingForm.specimenType,
+        sampleSource: processingForm.sampleSource,
+        collectionDateTime: processingForm.collectionDateTime ? new Date(processingForm.collectionDateTime).toISOString() : null
       });
       if (response) upsertWorkflowFromBackend(response, record.activityLogs);
       backendMode.value = 'connected';
@@ -1016,6 +1344,9 @@ async function onStartProcessing(): Promise<void> {
   current.assignedLabStaff = processingForm.assignedLabStaff;
   current.sampleCollected = processingForm.sampleCollected;
   current.sampleCollectedAt = sampleCollectedAt;
+  current.specimenType = processingForm.specimenType;
+  current.sampleSource = processingForm.sampleSource;
+  current.collectionDateTime = processingForm.collectionDateTime ? new Date(processingForm.collectionDateTime).toISOString() : null;
   current.rawAttachmentName = processingForm.rawAttachmentName.trim();
 
   appendActivity(current, 'Processing Started', 'Status changed to In Progress and request is now in laboratory queue.');
@@ -1030,6 +1361,10 @@ async function onStartProcessing(): Promise<void> {
 async function onSaveProcessingProgress(): Promise<void> {
   const record = activeWorkflow.value;
   if (!record) return;
+  if (!canProcessWorkflow.value) {
+    showToast('Your role is not allowed to update processing progress.', 'warning');
+    return;
+  }
   if (record.status === 'Pending') {
     showToast('Start processing first before saving progress.', 'warning');
     return;
@@ -1045,6 +1380,9 @@ async function onSaveProcessingProgress(): Promise<void> {
   current.sampleCollected = processingForm.sampleCollected;
   current.sampleCollectedAt = processingForm.sampleCollected ? current.sampleCollectedAt || nowIso : null;
   current.assignedLabStaff = processingForm.assignedLabStaff;
+  current.specimenType = processingForm.specimenType;
+  current.sampleSource = processingForm.sampleSource;
+  current.collectionDateTime = processingForm.collectionDateTime ? new Date(processingForm.collectionDateTime).toISOString() : null;
   current.rawAttachmentName = processingForm.rawAttachmentName.trim();
 
   appendActivity(current, 'Processing Progress Saved', 'Sample checklist and assignment details were updated.');
@@ -1066,6 +1404,22 @@ function onProceedToEncode(): void {
     showToast('Sample must be marked collected before encoding.', 'warning');
     return;
   }
+  if (!processingForm.assignedLabStaff.trim()) {
+    showToast('Assigned lab staff is required.', 'warning');
+    return;
+  }
+  if (!processingForm.specimenType.trim()) {
+    showToast('Specimen type is required before encoding.', 'warning');
+    return;
+  }
+  if (!processingForm.sampleSource.trim()) {
+    showToast('Sample source is required before encoding.', 'warning');
+    return;
+  }
+  if (!processingForm.collectionDateTime) {
+    showToast('Collection date/time is required before encoding.', 'warning');
+    return;
+  }
 
   const current = workflowCache[record.requestId] || record;
   current.sampleCollected = true;
@@ -1075,9 +1429,13 @@ function onProceedToEncode(): void {
   updateWorkflowAndQueue(current);
   workflowStep.value = 'encode';
 }
-async function onSaveDraft(): Promise<void> {
+async function onSaveDraft(silent = false): Promise<void> {
   const record = activeWorkflow.value;
   if (!record) return;
+  if (!canProcessWorkflow.value) {
+    showToast('Your role is not allowed to encode results.', 'warning');
+    return;
+  }
   if (record.status === 'Pending') {
     showToast('Request must be In Progress before saving draft results.', 'warning');
     return;
@@ -1097,7 +1455,9 @@ async function onSaveDraft(): Promise<void> {
         encodedValues: values,
         attachmentName: processingForm.rawAttachmentName.trim(),
         finalize: false,
-        resultEncodedAt: record.resultEncodedAt
+        resultEncodedAt: record.resultEncodedAt,
+        resultReferenceRange: record.resultReferenceRange,
+        verifiedBy: record.verifiedBy
       });
       if (response) upsertWorkflowFromBackend(response, record.activityLogs);
       backendMode.value = 'connected';
@@ -1115,12 +1475,16 @@ async function onSaveDraft(): Promise<void> {
 
   pendingAction.value = 'none';
   workflowBusy.value = false;
-  showToast('Result draft saved.', 'success');
+  if (!silent) showToast('Result draft saved.', 'success');
 }
 
 async function onFinalizeResult(): Promise<void> {
   const record = activeWorkflow.value;
   if (!record) return;
+  if (!canProcessWorkflow.value) {
+    showToast('Your role is not allowed to finalize results.', 'warning');
+    return;
+  }
   if (!canFinalize.value) {
     showToast('Only in-progress requests can be finalized.', 'warning');
     return;
@@ -1145,7 +1509,9 @@ async function onFinalizeResult(): Promise<void> {
         encodedValues: values,
         attachmentName: processingForm.rawAttachmentName.trim(),
         finalize: true,
-        resultEncodedAt: nowIso
+        resultEncodedAt: nowIso,
+        resultReferenceRange: record.resultReferenceRange,
+        verifiedBy: record.verifiedBy || processingForm.assignedLabStaff
       });
       if (response) upsertWorkflowFromBackend(response, record.activityLogs);
       backendMode.value = 'connected';
@@ -1157,6 +1523,8 @@ async function onFinalizeResult(): Promise<void> {
   const current = workflowCache[record.requestId] || record;
   current.encodedValues = values;
   current.resultEncodedAt = nowIso;
+  current.verifiedBy = current.verifiedBy || processingForm.assignedLabStaff;
+  current.verifiedAt = current.verifiedAt || nowIso;
   current.status = 'Result Ready';
 
   appendActivity(current, 'Result Finalized', 'Result finalized and status moved to Result Ready.');
@@ -1171,12 +1539,20 @@ async function onFinalizeResult(): Promise<void> {
 async function onReleaseReport(): Promise<void> {
   const record = activeWorkflow.value;
   if (!record) return;
+  if (!canVerifyAndRelease.value) {
+    showToast('Only Admin or Lab Manager can release reports.', 'warning');
+    return;
+  }
   if (record.status !== 'Result Ready') {
     showToast('Only Result Ready requests can be released.', 'warning');
     return;
   }
   if (!record.resultEncodedAt) {
     showToast('Cannot release report. Encoded result timestamp is missing.', 'error');
+    return;
+  }
+  if (!record.verifiedBy) {
+    showToast('Verification by lab staff is required before release.', 'warning');
     return;
   }
 
@@ -1212,6 +1588,42 @@ async function onReleaseReport(): Promise<void> {
   showToast('Report released successfully.', 'success');
 }
 
+async function onRejectOrResample(): Promise<void> {
+  const record = activeWorkflow.value;
+  if (!record) return;
+  if (!canVerifyAndRelease.value) {
+    showToast('Only Admin or Lab Manager can reject/request resample.', 'warning');
+    return;
+  }
+  if (!rejectForm.reason.trim()) {
+    showToast('Rejection reason is required.', 'warning');
+    return;
+  }
+  workflowBusy.value = true;
+  pendingAction.value = 'release';
+  const updated = await rejectLabRequest({
+    requestId: record.requestId,
+    reason: rejectForm.reason.trim(),
+    resampleFlag: rejectForm.resampleFlag,
+    actor: currentRole.value
+  });
+  const current = updated ? upsertWorkflowFromBackend(updated, record.activityLogs) : (workflowCache[record.requestId] || record);
+  current.rejectionReason = rejectForm.reason.trim();
+  current.resampleFlag = rejectForm.resampleFlag;
+  current.status = 'Cancelled';
+  appendActivity(
+    current,
+    rejectForm.resampleFlag ? 'Resample Requested' : 'Request Rejected',
+    rejectForm.reason.trim(),
+    currentRole.value
+  );
+  updateWorkflowAndQueue(current);
+  rejectDialog.value = false;
+  pendingAction.value = 'none';
+  workflowBusy.value = false;
+  showToast(rejectForm.resampleFlag ? 'Resample requested.' : 'Request rejected.', 'success');
+}
+
 function onDownloadReport(): void {
   const record = activeWorkflow.value;
   if (!record) return;
@@ -1245,6 +1657,11 @@ function workflowStepLabel(step: WorkflowStep): string {
   if (step === 'release') return 'Release Report';
   return 'History';
 }
+
+function updateVerifiedAt(value: string | null): void {
+  if (!activeWorkflow.value) return;
+  activeWorkflow.value.verifiedAt = value ? new Date(value).toISOString() : null;
+}
 </script>
 
 <template>
@@ -1274,8 +1691,10 @@ function workflowStepLabel(step: WorkflowStep): string {
               </div>
             </div>
 
-            <div class="d-flex align-center ga-2">
-              <v-btn class="saas-btn saas-btn-light" prepend-icon="mdi-plus" @click="openCreateRequestDialog">New Lab Request</v-btn>
+            <div class="d-flex align-center ga-2 flex-wrap">
+              <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="queueLoading" @click="refreshQueueNow">Refresh</v-btn>
+              <v-select v-model="currentRole" :items="roleOptions" label="Session Role" variant="solo-filled" density="compact" hide-details class="role-inline-select" />
+              <v-btn class="saas-btn saas-btn-light" prepend-icon="mdi-plus" :disabled="!canCreateRequest" @click="openCreateRequestDialog">New Lab Request</v-btn>
             </div>
           </div>
         </v-card-text>
@@ -1335,7 +1754,11 @@ function workflowStepLabel(step: WorkflowStep): string {
                   <td><v-chip size="small" variant="tonal" :color="priorityChipColor(row.priority)">{{ row.priority }}</v-chip></td>
                   <td><v-chip size="small" variant="tonal" :color="statusChipColor(row.status)">{{ row.status }}</v-chip></td>
                   <td>{{ formatDateTime(row.requestedAt) }}</td>
-                  <td class="text-right"><v-btn size="small" class="saas-btn action-btn" :color="rowPrimaryActionColor(row)" variant="flat" @click.stop="openWorkflow(row.requestId, rowPrimaryAction(row))">{{ rowPrimaryActionLabel(row) }}</v-btn></td>
+                  <td class="text-right">
+                    <v-btn size="small" class="saas-btn action-btn saas-row-action-btn" :color="rowPrimaryActionColor(row)" :prepend-icon="rowPrimaryActionIcon(row)" variant="flat" @click.stop="openWorkflow(row.requestId, rowPrimaryAction(row))">
+                      {{ rowPrimaryActionLabel(row) }}
+                    </v-btn>
+                  </td>
                 </tr>
                 <tr v-if="pagedRows.length === 0"><td colspan="7" class="text-center py-8"><div class="text-h6 mb-1">{{ emptyStateTitle }}</div><div class="text-body-2 text-medium-emphasis">{{ emptyStateDescription }}</div></td></tr>
               </tbody>
@@ -1412,7 +1835,14 @@ function workflowStepLabel(step: WorkflowStep): string {
                         <v-alert color="primary" variant="tonal" class="mb-4">Requested by <strong>{{ activeWorkflow.requestedByDoctor || '--' }}</strong></v-alert>
                         <div class="text-subtitle-2 font-weight-bold mb-2">Requested Tests</div>
                         <ul class="order-list mb-4"><li v-for="(test, index) in activeWorkflow.tests" :key="`${activeWorkflow.requestId}-test-${index}`">{{ test }}</li></ul>
-                        <v-textarea :model-value="activeWorkflow.notes" label="Notes" variant="outlined" density="comfortable" rows="3" readonly />
+                        <v-row>
+                          <v-col cols="12" md="6"><v-text-field :model-value="activeWorkflow.doctorDepartment" label="Doctor Department" variant="outlined" density="comfortable" readonly /></v-col>
+                          <v-col cols="12" md="6"><v-text-field :model-value="activeWorkflow.specimenType" label="Required Specimen" variant="outlined" density="comfortable" readonly /></v-col>
+                          <v-col cols="12" md="6"><v-text-field :model-value="activeWorkflow.insuranceReference || '--'" label="Insurance Reference" variant="outlined" density="comfortable" readonly /></v-col>
+                          <v-col cols="12" md="6"><v-text-field :model-value="activeWorkflow.billingReference || '--'" label="Billing Reference" variant="outlined" density="comfortable" readonly /></v-col>
+                          <v-col cols="12"><v-textarea :model-value="activeWorkflow.clinicalDiagnosis || activeWorkflow.notes" label="Clinical Notes / Diagnosis" variant="outlined" density="comfortable" rows="3" readonly /></v-col>
+                          <v-col cols="12"><v-textarea :model-value="activeWorkflow.labInstructions" label="Lab Instructions" variant="outlined" density="comfortable" rows="2" readonly /></v-col>
+                        </v-row>
                         <div class="d-flex justify-end mt-4"><v-btn class="saas-btn saas-btn-primary" :loading="workflowBusy && pendingAction === 'start'" :disabled="!canStartProcessing || workflowBusy" @click="onStartProcessing">Start Processing</v-btn></div>
                       </v-window-item>
 
@@ -1424,6 +1854,9 @@ function workflowStepLabel(step: WorkflowStep): string {
                           <v-col cols="12" md="6"><v-text-field :model-value="formatDateTime(activeWorkflow.sampleCollectedAt)" label="Sample Collected At" variant="outlined" density="comfortable" readonly /></v-col>
                           <v-col cols="12" md="6"><v-text-field :model-value="formatDateTime(activeWorkflow.processingStartedAt)" label="Processing Started" variant="outlined" density="comfortable" readonly /></v-col>
                           <v-col cols="12" md="6"><v-select v-model="processingForm.assignedLabStaff" :items="labStaffOptions" label="Assigned Lab Staff" variant="outlined" density="comfortable" /></v-col>
+                          <v-col cols="12" md="4"><v-select v-model="processingForm.specimenType" :items="specimenTypeOptions" label="Specimen Type" variant="outlined" density="comfortable" /></v-col>
+                          <v-col cols="12" md="4"><v-select v-model="processingForm.sampleSource" :items="sampleSourceOptions" label="Sample Source" variant="outlined" density="comfortable" /></v-col>
+                          <v-col cols="12" md="4"><SaasDateTimePickerField v-model="processingForm.collectionDateTime" mode="datetime" label="Collection Date/Time" /></v-col>
                           <v-col cols="12"><v-text-field v-model="processingForm.rawAttachmentName" label="Attach Raw Result File (optional)" placeholder="example: request-1208-raw.pdf" variant="outlined" density="comfortable" /></v-col>
                         </v-row>
                         <div class="d-flex justify-space-between mt-4 flex-wrap ga-2">
@@ -1449,6 +1882,36 @@ function workflowStepLabel(step: WorkflowStep): string {
                             />
                             <v-text-field v-else v-model="encodeForm[field.key]" :label="`${field.label}${field.required ? ' *' : ''}${field.unit ? ` (${field.unit})` : ''}`" :type="field.type === 'number' ? 'number' : 'text'" variant="outlined" density="comfortable" :error-messages="encodeErrors[field.key] ? [encodeErrors[field.key]] : []" :hint="field.min != null || field.max != null ? `Range: ${field.min ?? '-'} to ${field.max ?? '-'}` : undefined" persistent-hint />
                           </v-col>
+                          <v-col cols="12">
+                            <v-textarea
+                              v-model="activeWorkflow.resultReferenceRange"
+                              label="Result Reference Range *"
+                              variant="outlined"
+                              density="comfortable"
+                              rows="2"
+                              hint="Include expected normal ranges and interpretation guidance."
+                              persistent-hint
+                              :error-messages="encodeErrors.resultReferenceRange ? [encodeErrors.resultReferenceRange] : []"
+                            />
+                          </v-col>
+                          <v-col cols="12" md="6">
+                            <v-select
+                              v-model="activeWorkflow.verifiedBy"
+                              :items="labStaffOptions"
+                              label="Verified By *"
+                              variant="outlined"
+                              density="comfortable"
+                              :error-messages="encodeErrors.verifiedBy ? [encodeErrors.verifiedBy] : []"
+                            />
+                          </v-col>
+                          <v-col cols="12" md="6">
+                            <SaasDateTimePickerField
+                              :model-value="activeWorkflow?.verifiedAt ? new Date(activeWorkflow.verifiedAt).toISOString().slice(0, 16) : ''"
+                              mode="datetime"
+                              label="Verified At"
+                              @update:model-value="(value) => updateVerifiedAt(value ? String(value) : null)"
+                            />
+                          </v-col>
                         </v-row>
                         <div class="d-flex justify-space-between mt-4 flex-wrap ga-2">
                           <v-btn class="saas-btn saas-btn-ghost" :loading="workflowBusy && pendingAction === 'save_draft'" :disabled="workflowBusy" @click="onSaveDraft">Save Draft</v-btn>
@@ -1460,6 +1923,7 @@ function workflowStepLabel(step: WorkflowStep): string {
                         <div class="text-subtitle-1 font-weight-bold mb-2">Release Report</div>
                         <div class="text-body-2 text-medium-emphasis mb-4">Preview encoded values and release report to doctor/check-up.</div>
                         <v-alert v-if="activeWorkflow.status !== 'Result Ready'" color="warning" variant="tonal" class="mb-4">Release is available only when status is <strong>Result Ready</strong>.</v-alert>
+                        <v-alert v-if="activeWorkflow.rejectionReason" color="error" variant="tonal" class="mb-4">Rejected: {{ activeWorkflow.rejectionReason }}</v-alert>
                         <v-card class="report-preview-card mb-4" variant="outlined">
                           <v-card-item><v-card-title>Report Preview</v-card-title></v-card-item>
                           <v-card-text>
@@ -1469,7 +1933,10 @@ function workflowStepLabel(step: WorkflowStep): string {
                         </v-card>
                         <div class="d-flex justify-space-between flex-wrap ga-2">
                           <div class="d-flex ga-2 flex-wrap"><v-btn class="saas-btn saas-btn-ghost" :disabled="!canExport" @click="onDownloadReport">Download PDF</v-btn><v-btn class="saas-btn saas-btn-ghost" :disabled="!canExport" @click="onPrintReport">Print</v-btn></div>
-                          <v-btn class="saas-btn saas-btn-primary" :loading="workflowBusy && pendingAction === 'release'" :disabled="workflowBusy || !canRelease" @click="onReleaseReport">Release to Doctor / Check-Up</v-btn>
+                          <div class="d-flex ga-2">
+                            <v-btn class="saas-btn saas-btn-danger" :disabled="workflowBusy || activeWorkflow.status === 'Completed'" @click="rejectDialog = true">Reject / Resample</v-btn>
+                            <v-btn class="saas-btn saas-btn-primary" :loading="workflowBusy && pendingAction === 'release'" :disabled="workflowBusy || !canRelease" @click="onReleaseReport">Release to Doctor / Check-Up</v-btn>
+                          </div>
                         </div>
                       </v-window-item>
 
@@ -1519,20 +1986,49 @@ function workflowStepLabel(step: WorkflowStep): string {
         <v-divider />
         <v-card-text class="pt-5">
           <v-row>
-            <v-col cols="12" md="6"><v-text-field v-model="createForm.patientName" label="Patient Name" variant="outlined" density="comfortable" /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="createForm.patientId" label="Patient ID (optional)" variant="outlined" density="comfortable" /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="createForm.visitId" label="Visit ID (optional)" variant="outlined" density="comfortable" /></v-col>
-            <v-col cols="12" md="6"><v-select v-model="createForm.category" :items="categoryItems.filter((item) => item !== 'All')" label="Category" variant="outlined" density="comfortable" /></v-col>
-            <v-col cols="12" md="6"><v-select v-model="createForm.priority" :items="['Normal', 'Urgent', 'STAT']" label="Priority" variant="outlined" density="comfortable" /></v-col>
-            <v-col cols="12" md="6"><v-select v-model="createForm.requestedByDoctor" :items="doctorItems.filter((item) => item !== 'All')" label="Requested By Doctor" variant="outlined" density="comfortable" /></v-col>
-            <v-col cols="12"><v-textarea v-model="createForm.testsInput" label="Tests (comma separated)" variant="outlined" density="comfortable" rows="3" /></v-col>
-            <v-col cols="12"><v-textarea v-model="createForm.notes" label="Notes" variant="outlined" density="comfortable" rows="2" /></v-col>
+            <v-col cols="12"><div class="text-caption font-weight-bold text-uppercase text-primary">Patient Info</div></v-col>
+            <v-col cols="12"><v-autocomplete :items="patientLookupItems" item-title="title" item-value="value" v-model="createForm.patientLookup" label="Existing Patient Lookup" variant="outlined" density="comfortable" clearable @update:model-value="(v) => applyPatientLookup(v)" /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="createForm.patientName" label="Patient Name *" variant="outlined" density="comfortable" :error-messages="createErrors.patientName" /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="createForm.patientId" label="Patient ID" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="createForm.visitId" label="Visit ID" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12" md="6"><v-select v-model="createForm.priority" :items="['Normal', 'Urgent', 'STAT']" label="Appointment Priority" variant="outlined" density="comfortable" /></v-col>
+
+            <v-col cols="12"><div class="text-caption font-weight-bold text-uppercase text-primary">Clinical Order</div></v-col>
+            <v-col cols="12" md="6"><v-select v-model="createForm.requestedByDoctor" :items="doctorRequestItems" label="Requested By Doctor *" variant="outlined" density="comfortable" :error-messages="createErrors.requestedByDoctor" hint="Department auto-fills from doctor" persistent-hint /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="createForm.doctorDepartment" label="Doctor Department *" variant="outlined" density="comfortable" :error-messages="createErrors.doctorDepartment" /></v-col>
+            <v-col cols="12" md="6"><v-select v-model="createForm.category" :items="categoryItems.filter((item) => item !== 'All')" label="Category *" variant="outlined" density="comfortable" :error-messages="createErrors.category" /></v-col>
+            <v-col cols="12" md="6"><v-select v-model="createForm.tests" :items="availableTestsForCategory" label="Test Panel Selector *" variant="outlined" density="comfortable" multiple chips :error-messages="createErrors.tests" hint="Structured test selection replaces comma input." persistent-hint /></v-col>
+            <v-col cols="12" md="4"><v-select v-model="createForm.specimenType" :items="specimenTypeOptions" label="Specimen Type *" variant="outlined" density="comfortable" :error-messages="createErrors.specimenType" /></v-col>
+            <v-col cols="12" md="4"><v-select v-model="createForm.sampleSource" :items="sampleSourceOptions" label="Sample Source *" variant="outlined" density="comfortable" :error-messages="createErrors.sampleSource" /></v-col>
+            <v-col cols="12" md="4"><SaasDateTimePickerField v-model="createForm.collectionDateTime" mode="datetime" label="Collection Date/Time *" :error-messages="createErrors.collectionDateTime" /></v-col>
+            <v-col cols="12"><v-textarea v-model="createForm.clinicalDiagnosis" label="Clinical Notes / Diagnosis *" variant="outlined" density="comfortable" rows="2" :error-messages="createErrors.clinicalDiagnosis" /></v-col>
+            <v-col cols="12"><v-textarea v-model="createForm.labInstructions" label="Lab Instructions" variant="outlined" density="comfortable" rows="2" /></v-col>
+
+            <v-col cols="12"><div class="text-caption font-weight-bold text-uppercase text-primary">Billing & Notes</div></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="createForm.insuranceReference" label="Insurance Reference" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="createForm.billingReference" label="Billing Reference" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12"><v-textarea v-model="createForm.notes" label="Additional Notes" variant="outlined" density="comfortable" rows="2" /></v-col>
           </v-row>
         </v-card-text>
         <v-card-actions class="px-6 pb-5">
           <v-spacer />
           <v-btn class="saas-btn saas-btn-ghost" @click="createDialog = false">Cancel</v-btn>
-          <v-btn class="saas-btn saas-btn-primary" :loading="createBusy" @click="createRequest">Create Request</v-btn>
+          <v-btn class="saas-btn saas-btn-primary" :loading="createBusy" @click="createRequest">Save Draft / Create Request</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="rejectDialog" max-width="520">
+      <v-card>
+        <v-card-title class="text-h6 font-weight-bold">Reject / Resample</v-card-title>
+        <v-card-text>
+          <v-textarea v-model="rejectForm.reason" label="Rejection Reason *" variant="outlined" density="comfortable" rows="3" />
+          <v-checkbox v-model="rejectForm.resampleFlag" label="Request resample instead of full rejection" color="warning" hide-details />
+        </v-card-text>
+        <v-card-actions class="px-6 pb-5">
+          <v-spacer />
+          <v-btn class="saas-btn saas-btn-ghost" @click="rejectDialog = false">Cancel</v-btn>
+          <v-btn class="saas-btn saas-btn-danger" :loading="workflowBusy" @click="onRejectOrResample">Confirm</v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -1549,6 +2045,7 @@ function workflowStepLabel(step: WorkflowStep): string {
 .lab-header-subtitle { color: rgba(255, 255, 255, 0.96); text-shadow: 0 1px 2px rgba(8, 20, 52, 0.35); }
 .lab-mode-chip { font-weight: 700; }
 .lab-flow-chip { color: rgba(255, 255, 255, 0.96) !important; background: rgba(255, 255, 255, 0.14) !important; border: 1px solid rgba(255, 255, 255, 0.32) !important; }
+.role-inline-select { min-width: 190px; }
 .metric-card { border-radius: 12px; color: #fff; min-height: 100px; box-shadow: 0 12px 26px rgba(22, 43, 111, 0.2); }
 .metric-total { background: linear-gradient(135deg, #365dd4 0%, #2f80ed 100%); }
 .metric-pending { background: linear-gradient(135deg, #d88c1b 0%, #f59e0b 100%); }
@@ -1593,7 +2090,10 @@ function workflowStepLabel(step: WorkflowStep): string {
 .saas-btn-primary { background: linear-gradient(120deg, #2a62d2 0%, #3e94ee 100%) !important; color: #fff !important; box-shadow: 0 8px 16px rgba(23, 50, 103, 0.18); }
 .saas-btn-ghost { background: #f5f8ff !important; color: #335792 !important; border: 1px solid rgba(52, 92, 168, 0.22) !important; box-shadow: none; }
 .saas-btn-ghost:hover { background: #edf3ff !important; box-shadow: 0 8px 16px rgba(42, 79, 151, 0.14); }
+.saas-btn-danger { background: linear-gradient(120deg, #dc2626 0%, #ef4444 100%) !important; color: #fff !important; box-shadow: 0 8px 16px rgba(220, 38, 38, 0.24); }
 .action-btn { min-width: 96px; }
+.saas-row-action-btn { box-shadow: 0 8px 16px rgba(24, 52, 117, 0.2); border-radius: 10px !important; }
+.saas-row-action-btn:hover { box-shadow: 0 10px 20px rgba(24, 52, 117, 0.28); }
 :deep(.v-theme--dark) .lab-surface-card,:deep(.v-theme--dark) .workflow-side-card,:deep(.v-theme--dark) .workflow-main-card,:deep(.v-theme--dark) .report-preview-card { background: linear-gradient(180deg, rgba(27, 41, 78, 0.94) 0%, rgba(20, 31, 59, 0.94) 100%); border-color: rgba(155, 184, 255, 0.2) !important; }
 :deep(.v-theme--dark) .queue-table-wrap { border-color: rgba(155, 184, 255, 0.2); }
 :deep(.v-theme--dark) .queue-row:hover { background: rgba(65, 118, 223, 0.2); }

@@ -22,6 +22,11 @@ const MainRoutes = {
       component: () => import('@/views/appointments/AppointmentsPage.vue')
     },
     {
+      name: 'Patients Database',
+      path: '/modules/patients-database',
+      component: () => import('@/views/admin/modules/PatientsDatabasePage.vue')
+    },
+    {
       name: 'Registration',
       path: '/modules/registration',
       component: () => import('@/views/admin/modules/RegistrationPage.vue')
@@ -54,7 +59,7 @@ const MainRoutes = {
     {
       name: 'Reports',
       path: '/modules/reports',
-      component: () => import('@/views/StarterPage.vue')
+      component: () => import('@/views/admin/modules/ReportsPage.vue')
     },
     {
       name: 'Starter',

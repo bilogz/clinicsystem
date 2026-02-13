@@ -41,6 +41,11 @@ const sidebarItem: menu[] = [
     to: '/appointments'
   },
   {
+    title: 'Patients Database',
+    icon: CircleIcon,
+    to: '/modules/patients-database'
+  },
+  {
     title: 'Registration (Patient Management)',
     icon: TypographyIcon,
     to: '/modules/registration'
