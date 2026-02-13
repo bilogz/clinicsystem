@@ -1728,7 +1728,7 @@ function updateVerifiedAt(value: string | null): void {
                 <v-col cols="12" md="3"><v-select v-model="filterCategory" :items="categoryItems" label="Category" variant="outlined" density="comfortable" hide-details /></v-col>
                 <v-col cols="12" md="3"><v-select v-model="filterPriority" :items="priorityItems" label="Priority" variant="outlined" density="comfortable" hide-details /></v-col>
                 <v-col cols="12" md="3"><v-select v-model="filterDoctor" :items="doctorItems" label="Requested By Doctor" variant="outlined" density="comfortable" hide-details /></v-col>
-                <v-col cols="12" md="3"><v-row><v-col cols="6" class="pr-1"><v-text-field v-model="filterFromDate" label="From" type="date" variant="outlined" density="comfortable" hide-details /></v-col><v-col cols="6" class="pl-1"><v-text-field v-model="filterToDate" label="To" type="date" variant="outlined" density="comfortable" hide-details /></v-col></v-row></v-col>
+                <v-col cols="12" md="3"><v-row><v-col cols="6" class="pr-1"><SaasDateTimePickerField v-model="filterFromDate" mode="date" label="From" hide-details /></v-col><v-col cols="6" class="pl-1"><SaasDateTimePickerField v-model="filterToDate" mode="date" label="To" hide-details /></v-col></v-row></v-col>
               </v-row>
             </div>
           </v-expand-transition>

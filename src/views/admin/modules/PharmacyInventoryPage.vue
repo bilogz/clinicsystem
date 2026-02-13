@@ -1,5 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import { dispatchPharmacyAction, fetchPharmacySnapshot } from '@/services/pharmacyInventory';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
@@ -394,10 +395,11 @@ const typeItemsForAdd = computed(() => categoryTypeMap[addForm.category] || ['Ge
 const actionAllowed = (type: ActionType): boolean => rolePermissions[sessionRole.value]?.includes(type) || false;
 const realtime = useRealtimeListSync();
 
-async function loadPharmacyData(): Promise<void> {
+async function loadPharmacyData(options: { silent?: boolean } = {}): Promise<void> {
   const snapshot = await realtime.runLatest(
     async () => fetchPharmacySnapshot(),
     {
+      silent: options.silent,
       onError: (error) => {
         showToast(error instanceof Error ? error.message : String(error), 'error');
       }
@@ -417,7 +419,7 @@ async function loadPharmacyData(): Promise<void> {
 onMounted(async () => {
   await loadPharmacyData();
   realtime.startPolling(() => {
-    void loadPharmacyData();
+    void loadPharmacyData({ silent: true });
   }, REALTIME_POLICY.polling.pharmacyMs);
   pageLoading.value = false;
   requestAnimationFrame(() => {
@@ -1483,10 +1485,10 @@ async function submitAction(): Promise<void> {
                 <v-text-field v-model="addForm.batchNo" label="Batch/Lot Number *" variant="outlined" density="comfortable" :error-messages="formErrors.batchNo" />
               </v-col>
               <v-col cols="12" md="4">
-                <v-text-field v-model="addForm.mfgDate" type="date" label="Manufacturing Date" variant="outlined" density="comfortable" />
+                <SaasDateTimePickerField v-model="addForm.mfgDate" mode="date" label="Manufacturing Date" clearable />
               </v-col>
               <v-col cols="12" md="4">
-                <v-text-field v-model="addForm.expiryDate" type="date" label="Expiry Date *" variant="outlined" density="comfortable" :error-messages="formErrors.expiryDate" />
+                <SaasDateTimePickerField v-model="addForm.expiryDate" mode="date" label="Expiry Date *" :error-messages="formErrors.expiryDate" />
               </v-col>
               <v-col cols="12" md="4">
                 <v-text-field v-model="addForm.barcode" label="Barcode" variant="outlined" density="comfortable" hint="Use scanner input if available" persistent-hint />
@@ -1551,7 +1553,7 @@ async function submitAction(): Promise<void> {
                   <v-text-field v-model.number="editForm.lowThreshold" type="number" label="Low Threshold" variant="outlined" density="comfortable" />
                 </v-col>
                 <v-col cols="12" md="4">
-                  <v-text-field v-model="editForm.expiryDate" label="Expiry Date" variant="outlined" density="comfortable" />
+                  <SaasDateTimePickerField v-model="editForm.expiryDate" mode="date" label="Expiry Date" clearable />
                 </v-col>
                 <v-col cols="12" md="4">
                   <v-text-field v-model.number="editForm.reorderLevel" type="number" label="Reorder Level" variant="outlined" density="comfortable" />
@@ -1612,7 +1614,7 @@ async function submitAction(): Promise<void> {
                   <v-text-field v-model="restockForm.batchNo" label="Batch/Lot Number *" variant="outlined" density="comfortable" />
                 </v-col>
                 <v-col cols="12" md="4">
-                  <v-text-field v-model="restockForm.batchExpiry" type="date" label="Batch Expiry" variant="outlined" density="comfortable" />
+                  <SaasDateTimePickerField v-model="restockForm.batchExpiry" mode="date" label="Batch Expiry" clearable />
                 </v-col>
                 <v-col cols="12" md="4">
                   <v-select v-model="restockForm.supplier" :items="supplierItems" label="Supplier" variant="outlined" density="comfortable" />

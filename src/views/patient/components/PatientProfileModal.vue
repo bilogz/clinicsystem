@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue';
+import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import { updatePatientProfile } from '@/services/patientPortal';
 import type { PatientAccount } from '@/services/patientAuth';
 
@@ -86,7 +87,7 @@ async function submitProfile(): Promise<void> {
           <v-text-field v-model="form.full_name" label="Full Name" variant="outlined" density="comfortable" hide-details />
           <v-text-field v-model="form.phone_number" label="Phone Number" variant="outlined" density="comfortable" hide-details />
           <v-select v-model="form.sex" :items="['Male', 'Female', 'Other']" label="Sex" variant="outlined" density="comfortable" hide-details />
-          <v-text-field v-model="form.date_of_birth" type="date" label="Date of Birth" variant="outlined" density="comfortable" hide-details />
+          <SaasDateTimePickerField v-model="form.date_of_birth" mode="date" label="Date of Birth" clearable />
           <v-text-field
             v-model="form.guardian_name"
             :label="isMinor ? 'Guardian Name *' : 'Guardian Name (optional)'"

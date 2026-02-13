@@ -1,5 +1,8 @@
 ﻿<script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
+import { REALTIME_POLICY } from '@/config/realtimePolicy';
 import { dispatchMentalHealthAction, fetchMentalHealthSnapshot, type MentalHealthActivity, type MentalHealthNote, type MentalHealthPatient, type MentalHealthSession, type MentalHealthStatus } from '@/services/mentalHealth';
 
 type SessionRole = 'Admin' | 'Counselor' | 'Nurse' | 'Doctor' | 'Receptionist';
@@ -19,6 +22,7 @@ const patients = ref<MentalHealthPatient[]>([]);
 const notes = ref<MentalHealthNote[]>([]);
 const activities = ref<MentalHealthActivity[]>([]);
 const analytics = ref({ active: 0, follow_up: 0, at_risk: 0, completed: 0, escalated: 0, archived: 0 });
+const realtime = useRealtimeListSync();
 
 const sessionDialog = ref(false);
 const detailsDialog = ref(false);
@@ -134,8 +138,17 @@ function applySessionToForm(session: MentalHealthSession): void {
   });
 }
 
-async function loadData(): Promise<void> {
-  const snapshot = await fetchMentalHealthSnapshot();
+async function loadData(options: { silent?: boolean } = {}): Promise<void> {
+  const snapshot = await realtime.runLatest(
+    async () => fetchMentalHealthSnapshot(),
+    {
+      silent: options.silent,
+      onError: (error) => {
+        showToast(error instanceof Error ? error.message : String(error), 'error');
+      }
+    }
+  );
+  if (!snapshot) return;
   sessions.value = snapshot.sessions;
   patients.value = snapshot.patients;
   notes.value = snapshot.notes;
@@ -277,11 +290,19 @@ async function activateOrArchive(session: MentalHealthSession): Promise<void> {
 onMounted(async () => {
   try {
     await loadData();
+    realtime.startPolling(() => {
+      void loadData({ silent: true });
+    }, REALTIME_POLICY.polling.patientsMs);
   } catch (error) {
     showToast(error instanceof Error ? error.message : String(error), 'error');
   } finally {
     pageLoading.value = false;
   }
+});
+
+onUnmounted(() => {
+  realtime.stopPolling();
+  realtime.invalidatePending();
 });
 </script>
 
@@ -429,7 +450,7 @@ onMounted(async () => {
             <v-col cols="12" md="6"><v-select v-model="sessionForm.session_type" :items="sessionTypeItems" label="Session Type *" variant="outlined" :error-messages="errors.session_type" /></v-col>
             <v-col cols="12" md="4"><v-select v-model="sessionForm.session_mode" :items="modeItems" label="Session Mode" variant="outlined" /></v-col>
             <v-col cols="12" md="4"><v-text-field v-model="sessionForm.location_room" label="Location/Room" variant="outlined" :error-messages="errors.location_room" /></v-col>
-            <v-col cols="12" md="4"><v-text-field v-model="sessionForm.appointment_at" type="datetime-local" label="Session Date/Time *" variant="outlined" :error-messages="errors.appointment_at" /></v-col>
+            <v-col cols="12" md="4"><SaasDateTimePickerField v-model="sessionForm.appointment_at" mode="datetime" label="Session Date/Time *" :error-messages="errors.appointment_at" /></v-col>
             <v-col cols="12" md="4"><v-select v-model="sessionForm.risk_level" :items="riskItems" label="Risk Level" variant="outlined" /></v-col>
             <v-col cols="12" md="4"><v-text-field v-model.number="sessionForm.session_duration_minutes" type="number" min="15" step="5" label="Duration (minutes)" variant="outlined" /></v-col>
             <v-col cols="12" md="4"><v-text-field v-model="sessionForm.follow_up_frequency" label="Follow-Up Frequency" variant="outlined" /></v-col>
@@ -495,7 +516,7 @@ onMounted(async () => {
         <v-card-item><v-card-title>Plan Follow-Up</v-card-title></v-card-item>
         <v-divider />
         <v-card-text>
-          <v-text-field v-model="followupForm.next_follow_up_at" type="datetime-local" label="Next Follow-Up *" variant="outlined" :error-messages="errors.next_follow_up_at" class="mb-3" />
+          <SaasDateTimePickerField v-model="followupForm.next_follow_up_at" mode="datetime" label="Next Follow-Up *" :error-messages="errors.next_follow_up_at" class="mb-3" />
           <v-text-field v-model="followupForm.follow_up_frequency" label="Follow-Up Frequency *" variant="outlined" :error-messages="errors.follow_up_frequency" />
         </v-card-text>
         <v-card-actions class="px-6 pb-5"><v-spacer /><v-btn variant="text" @click="followupDialog = false">Cancel</v-btn><v-btn color="primary" :loading="actionLoading" @click="submitFollowup">Schedule Follow-Up</v-btn></v-card-actions>

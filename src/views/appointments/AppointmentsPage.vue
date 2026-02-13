@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { EyeIcon, EditIcon } from 'vue-tabler-icons';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
+import { REALTIME_POLICY } from '@/config/realtimePolicy';
 import {
   createAppointment,
   fetchAppointments,
@@ -15,6 +17,7 @@ import {
 const loading = ref(false);
 const saving = ref(false);
 const addSaving = ref(false);
+const realtime = useRealtimeListSync();
 
 const statusFilter = ref('All Statuses');
 const serviceFilter = ref('All Services');
@@ -192,8 +195,10 @@ const doctorOptionsForDepartment = computed(() => {
   return Array.from(new Set([...staticList, ...dynamicList]));
 });
 
-async function loadAppointments(): Promise<void> {
-  loading.value = true;
+async function loadAppointments(options: { silent?: boolean } = {}): Promise<void> {
+  if (!options.silent) {
+    loading.value = true;
+  }
   try {
     const payload = await fetchAppointments({
       search: searchValue.value.trim(),
@@ -209,9 +214,13 @@ async function loadAppointments(): Promise<void> {
     totalItems.value = payload.meta.total;
     totalPages.value = payload.meta.totalPages;
   } catch (error) {
-    showFeedback('error', 'Loading failed', error instanceof Error ? error.message : String(error));
+    if (!options.silent) {
+      showFeedback('error', 'Loading failed', error instanceof Error ? error.message : String(error));
+    }
   } finally {
-    loading.value = false;
+    if (!options.silent) {
+      loading.value = false;
+    }
   }
 }
 
@@ -393,6 +402,14 @@ watch(page, () => {
 
 onMounted(() => {
   void loadAppointments();
+  realtime.startPolling(() => {
+    void loadAppointments({ silent: true });
+  }, REALTIME_POLICY.polling.registrationMs);
+});
+
+onBeforeUnmount(() => {
+  realtime.stopPolling();
+  realtime.invalidatePending();
 });
 </script>
 
@@ -569,8 +586,8 @@ onMounted(() => {
           <v-row>
             <v-col cols="12" md="6"><v-text-field v-model="editForm.doctorName" label="Doctor" variant="outlined" density="comfortable" hide-details /></v-col>
             <v-col cols="12" md="6"><v-text-field v-model="editForm.service" label="Service" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="editForm.date" type="date" label="Date" variant="outlined" density="comfortable" hide-details /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="editForm.time" label="Preferred Time" variant="outlined" density="comfortable" hide-details /></v-col>
+            <v-col cols="12" md="6"><SaasDateTimePickerField v-model="editForm.date" mode="date" label="Date" /></v-col>
+            <v-col cols="12" md="6"><SaasDateTimePickerField v-model="editForm.time" mode="time" label="Preferred Time" clearable /></v-col>
             <v-col cols="12" md="6"><v-select v-model="editForm.status" :items="appointmentStatusOptions" label="Status" variant="outlined" density="comfortable" /></v-col>
             <v-col cols="12"><v-textarea v-model="editForm.reason" label="Visit Reason" rows="3" variant="outlined" density="comfortable" /></v-col>
           </v-row>

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
+import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { fetchReportsSnapshot, type ReportsActivityRow, type ReportsModuleTotal, type ReportsSnapshot, type ReportsTrendRow } from '@/services/reports';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
 
@@ -11,8 +13,8 @@ const moduleTotals = ref<ReportsModuleTotal[]>([]);
 const trend = ref<ReportsTrendRow[]>([]);
 const activity = ref<ReportsActivityRow[]>([]);
 const toast = reactive({ open: false, text: '', color: 'info' as 'success' | 'info' | 'warning' | 'error' });
+const realtime = useRealtimeListSync();
 
-let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let lastRequestId = 0;
 
 const kpiCards = computed(() => {
@@ -60,7 +62,9 @@ async function load(options: { silent?: boolean } = {}): Promise<void> {
     if (!fromDate.value) fromDate.value = data.window.from;
     if (!toDate.value) toDate.value = data.window.to;
   } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error), 'error');
+    if (!options.silent) {
+      showToast(error instanceof Error ? error.message : String(error), 'error');
+    }
   } finally {
     if (requestId === lastRequestId && !options.silent) loading.value = false;
   }
@@ -68,13 +72,14 @@ async function load(options: { silent?: boolean } = {}): Promise<void> {
 
 onMounted(async () => {
   await load();
-  refreshTimer = setInterval(() => {
+  realtime.startPolling(() => {
     void load({ silent: true });
   }, REALTIME_POLICY.polling.reportsMs);
 });
 
 onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer);
+  realtime.stopPolling();
+  realtime.invalidatePending();
 });
 </script>
 
@@ -87,8 +92,8 @@ onUnmounted(() => {
           <p class="text-medium-emphasis mb-0">Dynamic, Neon-backed analytics across appointments, walk-in, check-up, mental health, and pharmacy.</p>
         </div>
         <div class="d-flex ga-2 align-center flex-wrap">
-          <v-text-field v-model="fromDate" type="date" label="From" density="comfortable" variant="outlined" hide-details />
-          <v-text-field v-model="toDate" type="date" label="To" density="comfortable" variant="outlined" hide-details />
+          <SaasDateTimePickerField v-model="fromDate" mode="date" label="From" hide-details />
+          <SaasDateTimePickerField v-model="toDate" mode="date" label="To" hide-details />
           <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-chart-line" :loading="loading" @click="load">Apply</v-btn>
         </div>
       </v-card-text>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import { useAuthStore } from '@/stores/auth';
 import { useCheckupWorkflowStore } from '@/stores/checkupWorkflow';
 import type { CheckupState, CheckupVisit } from '@/services/checkupWorkflow';
@@ -448,7 +449,7 @@ onBeforeUnmount(() => {
               <v-textarea v-model="form.clinicalNotes" label="Clinical Notes" variant="outlined" density="comfortable" rows="4" />
             </v-col>
             <v-col cols="12" md="6">
-              <v-text-field v-model="form.followUpDate" label="Follow-Up Date" type="date" variant="outlined" density="comfortable" />
+              <SaasDateTimePickerField v-model="form.followUpDate" mode="date" label="Follow-Up Date" clearable />
             </v-col>
           </v-row>
 

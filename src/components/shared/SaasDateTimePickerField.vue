@@ -14,6 +14,7 @@ const props = withDefaults(
     min?: string;
     max?: string;
     clearable?: boolean;
+    hideDetails?: boolean | 'auto';
   }>(),
   {
     mode: 'date',
@@ -21,7 +22,8 @@ const props = withDefaults(
     disabled: false,
     min: '',
     max: '',
-    clearable: false
+    clearable: false,
+    hideDetails: false
   }
 );
 
@@ -129,6 +131,7 @@ function applySelection(): void {
       :density="density"
       :error-messages="errorMessages"
       :disabled="disabled"
+      :hide-details="hideDetails"
       readonly
       :prepend-inner-icon="mode === 'time' ? 'mdi-clock-time-four-outline' : 'mdi-calendar-month-outline'"
       @click="dialog = true"

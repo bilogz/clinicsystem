@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { fetchPatientsSnapshot, syncPatientsProfiles, type PatientRecord } from '@/services/patientsDatabase';
+import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
 
 const loading = ref(true);
@@ -18,6 +19,7 @@ const analytics = ref({ total_patients: 0, high_risk: 0, active_profiles: 0, act
 const meta = ref({ page: 1, perPage: 10, total: 0, totalPages: 1 });
 
 const toast = reactive({ open: false, text: '', color: 'info' as 'success' | 'info' | 'warning' | 'error' });
+const realtime = useRealtimeListSync();
 
 const filters = [
   { title: 'All Modules', value: 'all' },
@@ -77,13 +79,16 @@ async function load(options: { silent?: boolean } = {}): Promise<void> {
     records.value = snapshot.items;
     analytics.value = snapshot.analytics;
     meta.value = snapshot.meta;
+  } catch (error) {
+    if (!options.silent) {
+      showToast(error instanceof Error ? error.message : String(error), 'error');
+    }
   } finally {
     if (requestId === lastRequestId && !options.silent) loading.value = false;
   }
 }
 
 let lastRequestId = 0;
-let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 let timer: ReturnType<typeof setTimeout> | null = null;
 watch(search, () => {
@@ -114,7 +119,7 @@ async function syncNow(): Promise<void> {
 onMounted(async () => {
   try {
     await load();
-    refreshTimer = setInterval(() => {
+    realtime.startPolling(() => {
       void load({ silent: true });
     }, REALTIME_POLICY.polling.patientsMs);
   } catch (error) {
@@ -123,7 +128,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer);
+  realtime.stopPolling();
+  realtime.invalidatePending();
 });
 </script>
 

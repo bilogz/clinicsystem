@@ -311,7 +311,7 @@ function showSuccess(title: string, message: string): void {
   successDialog.value = true;
 }
 
-async function loadWalkIns(): Promise<void> {
+async function loadWalkIns(options: { silent?: boolean } = {}): Promise<void> {
   const payload = await realtime.runLatest(
     async () =>
       fetchWalkIns({
@@ -322,6 +322,7 @@ async function loadWalkIns(): Promise<void> {
         perPage: pageSize
       }),
     {
+      silent: options.silent,
       onError: (error) => {
         showToast(error instanceof Error ? error.message : String(error), 'error');
       }
@@ -527,7 +528,7 @@ onMounted(async () => {
     nowTick.value = Date.now();
   }, REALTIME_POLICY.uiTick.walkInClockMs);
   realtime.startPolling(() => {
-    void loadWalkIns();
+    void loadWalkIns({ silent: true });
   }, REALTIME_POLICY.polling.walkInMs);
   loadingPage.value = false;
   requestAnimationFrame(() => {

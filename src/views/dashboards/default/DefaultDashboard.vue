@@ -201,10 +201,11 @@ function statusColor(status: string): string {
   return 'secondary';
 }
 
-async function loadDashboard(): Promise<void> {
+async function loadDashboard(options: { silent?: boolean } = {}): Promise<void> {
   const payload = await realtime.runLatest(
     async () => fetchClinicDashboard(),
     {
+      silent: options.silent,
       onStart: () => {
         loading.value = true;
         loadError.value = '';
@@ -226,7 +227,7 @@ async function loadDashboard(): Promise<void> {
 onMounted(() => {
   void loadDashboard();
   realtime.startPolling(() => {
-    void loadDashboard();
+    void loadDashboard({ silent: true });
   }, REALTIME_POLICY.polling.reportsMs);
 });
 

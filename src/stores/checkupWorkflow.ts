@@ -165,11 +165,15 @@ export const useCheckupWorkflowStore = defineStore('checkupWorkflow', {
       }
     },
     async syncQueue(options: { silent?: boolean } = {}) {
-      this.syncing = true;
+      if (!options.silent) {
+        this.syncing = true;
+      }
       try {
         await this.fetchQueue({ silent: options.silent ?? true });
       } finally {
-        this.syncing = false;
+        if (!options.silent) {
+          this.syncing = false;
+        }
       }
     },
     async executeAction(request: CheckupActionRequest) {
