@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useCustomizerStore } from '../../../stores/customizer';
+import { useAuthStore } from '@/stores/auth';
 // Icon Imports
 import { BellIcon, SettingsIcon, SearchIcon, Menu2Icon, ClockIcon, TemperatureIcon } from 'vue-tabler-icons';
 
@@ -10,6 +11,7 @@ import ProfileDD from './ProfileDD.vue';
 import Searchbar from './SearchBarPanel.vue';
 
 const customizer = useCustomizerStore();
+const authStore = useAuthStore();
 const showSearch = ref(false);
 const clockText = ref('');
 const temperatureText = ref('Temp --');
@@ -19,6 +21,15 @@ let weatherTimer: ReturnType<typeof setInterval> | null = null;
 function searchbox() {
   showSearch.value = !showSearch.value;
 }
+
+const displayName = computed(() => authStore.user?.fullName || authStore.user?.username || 'Admin');
+const userInitials = computed(() => {
+  const raw = displayName.value.trim();
+  if (!raw) return 'AD';
+  const parts = raw.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase();
+});
 
 function updateClock(): void {
   const now = new Date();
@@ -166,8 +177,10 @@ onBeforeUnmount(() => {
     <v-menu :close-on-content-click="false">
       <template v-slot:activator="{ props }">
         <v-btn class="profileBtn text-primary" color="lightprimary" variant="flat" rounded="pill" v-bind="props">
-          <v-avatar size="30" class="mr-2 py-2">
-            <img src="@/assets/images/profile/user-round.svg" alt="Julia" />
+          <v-avatar size="30" class="mr-2 profile-avatar">
+            <img v-if="authStore.user?.avatar" :src="authStore.user.avatar" alt="Profile" />
+            <span v-else class="profile-initials">{{ userInitials }}</span>
+            <span class="online-dot" />
           </v-avatar>
           <SettingsIcon stroke-width="1.5" />
         </v-btn>
@@ -178,3 +191,29 @@ onBeforeUnmount(() => {
     </v-menu>
   </v-app-bar>
 </template>
+
+<style scoped>
+.profile-avatar {
+  position: relative;
+  background: linear-gradient(135deg, #2f80ed 0%, #225ac8 100%);
+}
+
+.profile-initials {
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+}
+
+.online-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #16a34a;
+  border: 2px solid #ffffff;
+}
+
+</style>

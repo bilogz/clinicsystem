@@ -68,6 +68,11 @@ const PublicRoutes = {
       name: 'Error 404',
       path: '/error',
       component: () => import('@/views/pages/maintenance/error/Error404Page.vue')
+    },
+    {
+      name: 'Access Denied',
+      path: '/access-denied',
+      component: () => import('@/views/pages/maintenance/error/AccessDeniedPage.vue')
     }
   ]
 };

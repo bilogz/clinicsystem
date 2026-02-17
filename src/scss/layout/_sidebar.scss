@@ -36,6 +36,10 @@
     }
     .v-list-item-title {
       font-size: 0.875rem;
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      line-height: 1.25rem;
     }
   }
   .v-list-group__items .v-list-item {

@@ -1,19 +1,20 @@
 import {
-  CircleIcon,
   DashboardIcon,
-  BrandChromeIcon,
-  WindmillIcon,
-  TypographyIcon,
-  ShadowIcon,
-  PaletteIcon,
-  BugIcon,
-  HelpIcon
+  CircleIcon,
+  ClockIcon,
+  FileExportIcon,
+  SendIcon,
+  TemperatureIcon,
+  PhotoIcon,
+  BuildingStoreIcon,
+  HelpIcon,
+  ArchiveIcon
 } from 'vue-tabler-icons';
 
 export interface menu {
   header?: string;
   title?: string;
-  icon?: object;
+  icon?: object | string;
   to?: string;
   divider?: boolean;
   chip?: string;
@@ -37,7 +38,7 @@ const sidebarItem: menu[] = [
   { header: 'Clinic Modules' },
   {
     title: 'Appointments',
-    icon: BrandChromeIcon,
+    icon: ClockIcon,
     to: '/appointments'
   },
   {
@@ -47,27 +48,27 @@ const sidebarItem: menu[] = [
   },
   {
     title: 'Registration (Patient Management)',
-    icon: TypographyIcon,
+    icon: FileExportIcon,
     to: '/modules/registration'
   },
   {
     title: 'Walk-In',
-    icon: WindmillIcon,
+    icon: SendIcon,
     to: '/modules/walk-in'
   },
   {
     title: 'Check-Up',
-    icon: ShadowIcon,
+    icon: TemperatureIcon,
     to: '/modules/check-up'
   },
   {
     title: 'Laboratory',
-    icon: PaletteIcon,
+    icon: PhotoIcon,
     to: '/modules/laboratory'
   },
   {
     title: 'Pharmacy & Inventory',
-    icon: BugIcon,
+    icon: BuildingStoreIcon,
     to: '/modules/pharmacy-inventory'
   },
   {
@@ -77,7 +78,7 @@ const sidebarItem: menu[] = [
   },
   {
     title: 'Reports',
-    icon: CircleIcon,
+    icon: ArchiveIcon,
     to: '/modules/reports'
   }
 ];

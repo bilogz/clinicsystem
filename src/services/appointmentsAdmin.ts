@@ -1,3 +1,6 @@
+import { emitRealtimeRefresh } from '@/composables/useRealtimeListSync';
+import { fetchApiData, invalidateApiCache } from '@/services/apiClient';
+
 export type AppointmentStatus = 'New' | 'Confirmed' | 'Pending' | 'Canceled' | 'Accepted' | 'Awaiting';
 
 export type AppointmentRow = {
@@ -50,12 +53,6 @@ export type AppointmentListPayload = {
     total: number;
     totalPages: number;
   };
-};
-
-type AppointmentApiResponse<T> = {
-  ok: boolean;
-  message?: string;
-  data?: T;
 };
 
 type UpdateAppointmentPayload = {
@@ -167,27 +164,19 @@ function normalizeRow(item: Record<string, unknown>): AppointmentRow {
   };
 }
 
-async function parseResponse<T>(response: Response): Promise<AppointmentApiResponse<T>> {
-  const text = await response.text();
-  const payload = text ? (JSON.parse(text) as AppointmentApiResponse<T>) : ({ ok: false } as AppointmentApiResponse<T>);
-  if (!response.ok || !payload.ok) {
-    throw payload.message || `Request failed (${response.status})`;
-  }
-  return payload;
+function invalidateAppointmentCaches(): void {
+  invalidateApiCache(resolveApiUrl());
+  invalidateApiCache('/api/dashboard');
+  invalidateApiCache('/api/reports');
+  invalidateApiCache('/api/patients');
 }
 
 export async function fetchAppointments(query: AppointmentQuery = {}): Promise<AppointmentListPayload> {
-  const response = await fetch(buildUrl(query), { credentials: 'include' });
-  const payload = await parseResponse<{
+  const data = await fetchApiData<{
     analytics: AppointmentAnalytics;
     items: Record<string, unknown>[];
     meta: { page: number; perPage: number; total: number; totalPages: number };
-  }>(response);
-
-  const data = payload.data;
-  if (!data) {
-    throw 'No appointment data returned.';
-  }
+  }>(buildUrl(query), { ttlMs: 12_000 });
 
   return {
     analytics: data.analytics || { totalPatients: 0, totalAppointments: 0, todayAppointments: 0, pendingQueue: 0 },
@@ -197,43 +186,29 @@ export async function fetchAppointments(query: AppointmentQuery = {}): Promise<A
 }
 
 export async function updateAppointment(payload: UpdateAppointmentPayload): Promise<AppointmentRow> {
-  const response = await fetch(resolveApiUrl(), {
+  const parsed = await fetchApiData<Record<string, unknown>>(resolveApiUrl(), {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    credentials: 'include',
-    body: JSON.stringify({
+    body: {
       action: 'update',
       ...payload
-    })
+    }
   });
-
-  const parsed = await parseResponse<Record<string, unknown>>(response);
-  if (!parsed.data) {
-    throw 'No updated appointment returned.';
-  }
-
-  return normalizeRow(parsed.data);
+  const updated = normalizeRow(parsed);
+  invalidateAppointmentCaches();
+  emitRealtimeRefresh('appointment_updated');
+  return updated;
 }
 
 export async function createAppointment(payload: CreateAppointmentPayload): Promise<AppointmentRow> {
-  const response = await fetch(resolveApiUrl(), {
+  const parsed = await fetchApiData<Record<string, unknown>>(resolveApiUrl(), {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    credentials: 'include',
-    body: JSON.stringify({
+    body: {
       action: 'create',
       ...payload
-    })
+    }
   });
-
-  const parsed = await parseResponse<Record<string, unknown>>(response);
-  if (!parsed.data) {
-    throw 'No created appointment returned.';
-  }
-
-  return normalizeRow(parsed.data);
+  const created = normalizeRow(parsed);
+  invalidateAppointmentCaches();
+  emitRealtimeRefresh('appointment_created');
+  return created;
 }

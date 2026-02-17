@@ -1,3 +1,5 @@
+import { fetchApiData, invalidateApiCache } from '@/services/apiClient';
+
 export type PatientPortalAnalytics = {
   total: number;
   upcoming: number;
@@ -30,28 +32,8 @@ export type PatientPortalData = {
   appointments: PatientPortalAppointment[];
 };
 
-type ApiResponse<T> = {
-  ok: boolean;
-  message?: string;
-  data?: T;
-};
-
-async function parseResponse<T>(response: Response): Promise<ApiResponse<T>> {
-  const text = await response.text();
-  const payload = text ? (JSON.parse(text) as ApiResponse<T>) : ({ ok: false } as ApiResponse<T>);
-  if (!response.ok || !payload.ok) {
-    throw new Error(payload.message || `Request failed (${response.status})`);
-  }
-  return payload;
-}
-
 export async function fetchPatientPortal(): Promise<PatientPortalData> {
-  const response = await fetch('/api/patient-portal', { credentials: 'include' });
-  const payload = await parseResponse<PatientPortalData>(response);
-  if (!payload.data) {
-    throw new Error('No patient portal data returned.');
-  }
-  return payload.data;
+  return await fetchApiData<PatientPortalData>('/api/patient-portal', { ttlMs: 10_000 });
 }
 
 export async function updatePatientProfile(payload: {
@@ -73,16 +55,7 @@ export async function updatePatientProfile(payload: {
     emailVerified?: boolean;
   };
 }> {
-  const response = await fetch('/api/patient-portal', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify({
-      action: 'update_profile',
-      ...payload
-    })
-  });
-  const parsed = await parseResponse<{
+  const data = await fetchApiData<{
     authenticated: boolean;
     account: {
       patientCode: string;
@@ -94,9 +67,14 @@ export async function updatePatientProfile(payload: {
       guardianName?: string | null;
       emailVerified?: boolean;
     };
-  }>(response);
-  if (!parsed.data) {
-    throw new Error('Profile update returned no data.');
-  }
-  return parsed.data;
+  }>('/api/patient-portal', {
+    method: 'POST',
+    body: {
+      action: 'update_profile',
+      ...payload
+    }
+  });
+  invalidateApiCache('/api/patient-portal');
+  invalidateApiCache('/api/patient-auth');
+  return data;
 }

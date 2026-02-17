@@ -1,3 +1,5 @@
+import { fetchApiData, invalidateApiCache } from '@/services/apiClient';
+
 export type PharmacyMedicine = {
   id: number;
   sku: string;
@@ -58,12 +60,6 @@ export type PharmacySnapshot = {
   history: Record<number, PharmacyStockHistoryEntry[]>;
 };
 
-type ApiResponse<T> = {
-  ok: boolean;
-  message?: string;
-  data?: T;
-};
-
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '');
 }
@@ -76,15 +72,6 @@ function resolveApiUrl(): string {
   return '/api/pharmacy';
 }
 
-async function parseResponse<T>(response: Response): Promise<ApiResponse<T>> {
-  const text = await response.text();
-  const payload = text ? (JSON.parse(text) as ApiResponse<T>) : ({ ok: false } as ApiResponse<T>);
-  if (!response.ok || !payload.ok) {
-    throw payload.message || `Request failed (${response.status})`;
-  }
-  return payload;
-}
-
 function toTimeText(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value || '--';
@@ -92,15 +79,12 @@ function toTimeText(value: string): string {
 }
 
 export async function fetchPharmacySnapshot(): Promise<PharmacySnapshot> {
-  const response = await fetch(resolveApiUrl(), { credentials: 'include' });
-  const parsed = await parseResponse<{
+  const data = await fetchApiData<{
     medicines: any[];
     requests: any[];
     logs: any[];
     movements: any[];
-  }>(response);
-  const data = parsed.data;
-  if (!data) throw 'No pharmacy data returned.';
+  }>(resolveApiUrl(), { ttlMs: 8_000 });
 
   const medicines: PharmacyMedicine[] = (data.medicines || []).map((item) => ({
     id: Number(item.id || 0),
@@ -165,11 +149,12 @@ export async function fetchPharmacySnapshot(): Promise<PharmacySnapshot> {
 }
 
 export async function dispatchPharmacyAction(payload: Record<string, unknown>): Promise<void> {
-  const response = await fetch(resolveApiUrl(), {
+  await fetchApiData<unknown>(resolveApiUrl(), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify(payload)
+    body: payload
   });
-  await parseResponse<unknown>(response);
+  invalidateApiCache('/api/pharmacy');
+  invalidateApiCache('/api/dashboard');
+  invalidateApiCache('/api/reports');
+  invalidateApiCache('/api/patients');
 }

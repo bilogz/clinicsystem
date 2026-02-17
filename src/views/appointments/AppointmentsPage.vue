@@ -1,9 +1,19 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { EyeIcon, EditIcon } from 'vue-tabler-icons';
+import { EyeIcon, EditIcon, TrashIcon } from 'vue-tabler-icons';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
+import {
+  deleteDoctorAvailability,
+  fetchDoctorAvailability,
+  listDoctorAvailability,
+  upsertDoctorAvailability,
+  type DoctorAvailabilityScheduleRow,
+  type DoctorAvailabilitySnapshot
+} from '@/services/doctorAvailability';
+import { listDoctors, upsertDoctor, type DoctorRow } from '@/services/doctors';
 import {
   createAppointment,
   fetchAppointments,
@@ -35,16 +45,15 @@ const departmentOptions = ['General Medicine', 'Pediatrics', 'Orthopedic', 'Dent
 const paymentOptions = ['Cash', 'Card', 'HMO', 'Online'];
 const priorityOptions: Array<'Routine' | 'Urgent'> = ['Routine', 'Urgent'];
 const symptomTags = ['Fever', 'Cough', 'Headache', 'Chest Pain', 'Abdominal Pain', 'Dizziness', 'Back Pain', 'Nausea'];
-const departmentDoctorMap: Record<string, string[]> = {
-  'General Medicine': ['Dr. Humour', 'Dr. Jenni'],
-  Pediatrics: ['Dr. Rivera', 'Dr. Humour'],
-  Orthopedic: ['Dr. Morco', 'Dr. Martinez'],
-  Dental: ['Dr. Santos', 'Dr. Lim'],
-  Laboratory: ['Dr. A. Rivera', 'Dr. Jenni'],
-  'Mental Health': ['Dr. S. Villaraza', 'Dr. Jenni'],
-  'Check-Up': ['Dr. B. Martinez', 'Dr. Humour']
-};
-
+const dayOfWeekOptions = [
+  { title: 'Sunday', value: 0 },
+  { title: 'Monday', value: 1 },
+  { title: 'Tuesday', value: 2 },
+  { title: 'Wednesday', value: 3 },
+  { title: 'Thursday', value: 4 },
+  { title: 'Friday', value: 5 },
+  { title: 'Saturday', value: 6 }
+];
 const rows = ref<AppointmentRow[]>([]);
 const analytics = ref<AppointmentAnalytics>({
   totalPatients: 0,
@@ -58,6 +67,38 @@ const totalPages = ref(1);
 const viewDialog = ref(false);
 const editDialog = ref(false);
 const addDialog = ref(false);
+const addAvailabilityLoading = ref(false);
+const addDoctorAvailability = ref<DoctorAvailabilitySnapshot | null>(null);
+const availabilityRows = ref<DoctorAvailabilityScheduleRow[]>([]);
+const availabilityLoading = ref(false);
+const availabilitySaving = ref(false);
+const availabilityDialog = ref(false);
+const doctorDialog = ref(false);
+const doctorSaving = ref(false);
+const doctorsLoading = ref(false);
+const doctorsCatalog = ref<DoctorRow[]>([]);
+const availabilityDeleteDialog = ref(false);
+const availabilityDeleteTarget = ref<DoctorAvailabilityScheduleRow | null>(null);
+const availabilityFilterDoctor = ref('All Doctors');
+const availabilityFilterDepartment = ref('All Departments');
+const availabilityFormErrors = reactive<Record<string, string>>({});
+const availabilityForm = reactive({
+  id: 0,
+  doctor_name: '',
+  department_name: 'General Medicine',
+  day_of_week: 1,
+  start_time: '',
+  end_time: '',
+  max_appointments: 8,
+  is_active: true
+});
+const doctorFormErrors = reactive<Record<string, string>>({});
+const doctorForm = reactive({
+  doctor_name: '',
+  department_name: 'General Medicine',
+  specialization: '',
+  is_active: true
+});
 const feedbackDialog = ref(false);
 const feedbackTitle = ref('Success');
 const feedbackMessage = ref('');
@@ -104,7 +145,9 @@ const serviceOptions = computed(() => {
 });
 
 const doctorOptions = computed(() => {
-  const dynamic = Array.from(new Set(rows.value.map((row) => row.doctor).filter(Boolean))).sort();
+  const fromRows = rows.value.map((row) => row.doctor).filter(Boolean);
+  const fromCatalog = doctorsCatalog.value.filter((row) => row.isActive).map((row) => row.doctorName);
+  const dynamic = Array.from(new Set([...fromRows, ...fromCatalog])).sort();
   return ['Doctor: Any', ...dynamic];
 });
 
@@ -165,8 +208,8 @@ function initials(name: string): string {
     .join('');
 }
 
-function normalizeDoctor(value: string): string {
-  return value.replace(/^Doctor:\s*/i, '').trim();
+function dayOfWeekLabel(value: number): string {
+  return dayOfWeekOptions.find((item) => item.value === value)?.title || `Day ${value}`;
 }
 
 const existingPatientOptions = computed(() => {
@@ -186,14 +229,57 @@ const existingPatientOptions = computed(() => {
     .filter((item): item is { title: string; value: string; row: AppointmentRow } => Boolean(item));
 });
 
+function normalizeDepartment(value: unknown): string {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
 const doctorOptionsForDepartment = computed(() => {
-  const department = addForm.department_name || '';
-  const staticList = departmentDoctorMap[department] || [];
-  const dynamicList = rows.value
-    .filter((item) => item.department === addForm.department_name && item.doctor)
-    .map((item) => item.doctor);
-  return Array.from(new Set([...staticList, ...dynamicList]));
+  const departmentKey = normalizeDepartment(addForm.department_name || '');
+  const catalogList = doctorsCatalog.value
+    .filter((item) => item.isActive && normalizeDepartment(item.departmentName) === departmentKey)
+    .map((item) => item.doctorName);
+  return Array.from(new Set(catalogList)).sort();
 });
+const hasAddDepartmentDoctors = computed(() => doctorOptionsForDepartment.value.length > 0);
+const addDoctorSelectHint = computed(() =>
+  hasAddDepartmentDoctors.value
+    ? 'Only doctors assigned to selected department are listed.'
+    : `No doctor assigned yet for ${addForm.department_name || 'this department'}.`
+);
+
+const addAvailableTimeOptions = computed(() => {
+  if (!addDoctorAvailability.value) return [] as string[];
+  const recommended = addDoctorAvailability.value.recommendedTimes || [];
+  if (recommended.length) return recommended;
+  return (addDoctorAvailability.value.slots || [])
+    .filter((slot) => slot.isOpen)
+    .map((slot) => `${slot.startTime}`);
+});
+
+const doctorAvailabilityFilterOptions = computed(() => {
+  const doctorSet = new Set<string>();
+  doctorsCatalog.value.forEach((item) => {
+    if (item.isActive && item.doctorName) doctorSet.add(item.doctorName);
+  });
+  rows.value.forEach((row) => {
+    if (row.doctor) doctorSet.add(row.doctor);
+  });
+  availabilityRows.value.forEach((row) => {
+    if (row.doctorName) doctorSet.add(row.doctorName);
+  });
+  return ['All Doctors', ...Array.from(doctorSet).sort()];
+});
+
+const filteredAvailabilityRows = computed(() =>
+  availabilityRows.value.filter((row) => {
+    if (availabilityFilterDoctor.value !== 'All Doctors' && row.doctorName !== availabilityFilterDoctor.value) return false;
+    if (availabilityFilterDepartment.value !== 'All Departments' && row.departmentName !== availabilityFilterDepartment.value) return false;
+    return true;
+  })
+);
 
 async function loadAppointments(options: { silent?: boolean } = {}): Promise<void> {
   if (!options.silent) {
@@ -221,6 +307,218 @@ async function loadAppointments(options: { silent?: boolean } = {}): Promise<voi
     if (!options.silent) {
       loading.value = false;
     }
+  }
+}
+
+async function loadAddDoctorAvailability(): Promise<void> {
+  if (!addDialog.value) return;
+  const doctorName = String(addForm.doctor_name || '').trim();
+  const departmentName = String(addForm.department_name || '').trim();
+  const appointmentDate = String(addForm.appointment_date || '').trim();
+  if (!doctorName || !departmentName || !appointmentDate) {
+    addDoctorAvailability.value = null;
+    return;
+  }
+  addAvailabilityLoading.value = true;
+  try {
+    addDoctorAvailability.value = await fetchDoctorAvailability({
+      doctorName,
+      departmentName,
+      appointmentDate,
+      preferredTime: String(addForm.preferred_time || '').trim() || undefined
+    });
+  } catch (error) {
+    addDoctorAvailability.value = {
+      doctorName,
+      departmentName,
+      appointmentDate,
+      isDoctorAvailable: false,
+      reason: error instanceof Error ? error.message : String(error),
+      slots: [],
+      recommendedTimes: []
+    };
+  } finally {
+    addAvailabilityLoading.value = false;
+  }
+}
+
+function resetAvailabilityForm(): void {
+  Object.keys(availabilityFormErrors).forEach((key) => {
+    availabilityFormErrors[key] = '';
+  });
+  availabilityForm.id = 0;
+  availabilityForm.doctor_name = '';
+  availabilityForm.department_name = 'General Medicine';
+  availabilityForm.day_of_week = 1;
+  availabilityForm.start_time = '';
+  availabilityForm.end_time = '';
+  availabilityForm.max_appointments = 8;
+  availabilityForm.is_active = true;
+}
+
+function openAddAvailabilityDialog(): void {
+  resetAvailabilityForm();
+  availabilityForm.doctor_name = doctorAvailabilityFilterOptions.value.find((name) => name !== 'All Doctors') || '';
+  availabilityDialog.value = true;
+}
+
+function openEditAvailabilityDialog(row: DoctorAvailabilityScheduleRow): void {
+  resetAvailabilityForm();
+  availabilityForm.id = row.id;
+  availabilityForm.doctor_name = row.doctorName;
+  availabilityForm.department_name = row.departmentName;
+  availabilityForm.day_of_week = row.dayOfWeek;
+  availabilityForm.start_time = row.startTime;
+  availabilityForm.end_time = row.endTime;
+  availabilityForm.max_appointments = row.maxAppointments;
+  availabilityForm.is_active = row.isActive;
+  availabilityDialog.value = true;
+}
+
+async function loadAvailabilityRows(): Promise<void> {
+  availabilityLoading.value = true;
+  try {
+    availabilityRows.value = await listDoctorAvailability();
+  } catch (error) {
+    showFeedback('error', 'Doctor availability failed', error instanceof Error ? error.message : String(error));
+  } finally {
+    availabilityLoading.value = false;
+  }
+}
+
+async function loadDoctorsCatalog(): Promise<void> {
+  doctorsLoading.value = true;
+  try {
+    doctorsCatalog.value = await listDoctors({ includeInactive: true });
+  } catch (error) {
+    showFeedback('error', 'Doctors load failed', error instanceof Error ? error.message : String(error));
+  } finally {
+    doctorsLoading.value = false;
+  }
+}
+
+function resetDoctorForm(): void {
+  Object.keys(doctorFormErrors).forEach((key) => {
+    doctorFormErrors[key] = '';
+  });
+  doctorForm.doctor_name = '';
+  doctorForm.department_name = 'General Medicine';
+  doctorForm.specialization = '';
+  doctorForm.is_active = true;
+}
+
+function openDoctorDialog(): void {
+  resetDoctorForm();
+  doctorDialog.value = true;
+}
+
+async function saveDoctor(): Promise<void> {
+  Object.keys(doctorFormErrors).forEach((key) => {
+    doctorFormErrors[key] = '';
+  });
+  if (!String(doctorForm.doctor_name || '').trim()) doctorFormErrors.doctor_name = 'Doctor name is required.';
+  if (!String(doctorForm.department_name || '').trim()) doctorFormErrors.department_name = 'Department is required.';
+  if (Object.values(doctorFormErrors).some(Boolean)) return;
+
+  doctorSaving.value = true;
+  try {
+    const saved = await upsertDoctor({
+      doctorName: String(doctorForm.doctor_name || '').trim(),
+      departmentName: String(doctorForm.department_name || '').trim(),
+      specialization: String(doctorForm.specialization || '').trim(),
+      isActive: Boolean(doctorForm.is_active),
+      actor: 'Admin'
+    });
+    doctorDialog.value = false;
+    await loadDoctorsCatalog();
+    if (saved.isActive && !availabilityForm.doctor_name) {
+      availabilityForm.doctor_name = saved.doctorName;
+    }
+    showFeedback('success', 'Doctor saved', `${saved.doctorName} is now available in doctor lists.`);
+  } catch (error) {
+    showFeedback('error', 'Save doctor failed', error instanceof Error ? error.message : String(error));
+  } finally {
+    doctorSaving.value = false;
+  }
+}
+
+async function saveAvailabilityRow(): Promise<void> {
+  Object.keys(availabilityFormErrors).forEach((key) => {
+    availabilityFormErrors[key] = '';
+  });
+  if (!String(availabilityForm.doctor_name || '').trim()) availabilityFormErrors.doctor_name = 'Doctor name is required.';
+  if (!String(availabilityForm.department_name || '').trim()) availabilityFormErrors.department_name = 'Department is required.';
+  if (!String(availabilityForm.start_time || '').trim()) availabilityFormErrors.start_time = 'Start time is required.';
+  if (!String(availabilityForm.end_time || '').trim()) availabilityFormErrors.end_time = 'End time is required.';
+  if (Number(availabilityForm.max_appointments || 0) <= 0) availabilityFormErrors.max_appointments = 'Max appointments must be at least 1.';
+  if (
+    String(availabilityForm.start_time || '').trim() &&
+    String(availabilityForm.end_time || '').trim() &&
+    String(availabilityForm.start_time).slice(0, 5) >= String(availabilityForm.end_time).slice(0, 5)
+  ) {
+    availabilityFormErrors.end_time = 'End time must be later than start time.';
+  }
+  if (Object.values(availabilityFormErrors).some(Boolean)) {
+    return;
+  }
+
+  availabilitySaving.value = true;
+  try {
+    const editingExisting = Number(availabilityForm.id || 0) > 0;
+    const existingRow = editingExisting ? availabilityRows.value.find((row) => row.id === availabilityForm.id) : null;
+    const nextSignature = [
+      String(availabilityForm.doctor_name || '').trim().toLowerCase(),
+      String(availabilityForm.department_name || '').trim().toLowerCase(),
+      Number(availabilityForm.day_of_week),
+      String(availabilityForm.start_time || '').slice(0, 5),
+      String(availabilityForm.end_time || '').slice(0, 5)
+    ].join('|');
+    const prevSignature = existingRow
+      ? [existingRow.doctorName.toLowerCase(), existingRow.departmentName.toLowerCase(), existingRow.dayOfWeek, existingRow.startTime, existingRow.endTime].join('|')
+      : '';
+
+    await upsertDoctorAvailability({
+      doctorName: String(availabilityForm.doctor_name || '').trim(),
+      departmentName: String(availabilityForm.department_name || '').trim(),
+      dayOfWeek: Number(availabilityForm.day_of_week),
+      startTime: String(availabilityForm.start_time || '').slice(0, 5),
+      endTime: String(availabilityForm.end_time || '').slice(0, 5),
+      maxAppointments: Number(availabilityForm.max_appointments || 8),
+      isActive: Boolean(availabilityForm.is_active),
+      actor: 'Admin'
+    });
+    if (editingExisting && existingRow && prevSignature !== nextSignature) {
+      await deleteDoctorAvailability(existingRow.id, 'Admin');
+    }
+    availabilityDialog.value = false;
+    await loadAvailabilityRows();
+    showFeedback('success', 'Doctor availability updated', 'Schedule configuration has been saved.');
+  } catch (error) {
+    showFeedback('error', 'Save failed', error instanceof Error ? error.message : String(error));
+  } finally {
+    availabilitySaving.value = false;
+  }
+}
+
+function openDeleteAvailabilityDialog(row: DoctorAvailabilityScheduleRow): void {
+  availabilityDeleteTarget.value = row;
+  availabilityDeleteDialog.value = true;
+}
+
+async function removeAvailabilityRow(): Promise<void> {
+  const row = availabilityDeleteTarget.value;
+  if (!row) return;
+  availabilitySaving.value = true;
+  try {
+    await deleteDoctorAvailability(row.id, 'Admin');
+    availabilityDeleteDialog.value = false;
+    availabilityDeleteTarget.value = null;
+    await loadAvailabilityRows();
+    showFeedback('success', 'Schedule deleted', 'Doctor availability row has been removed.');
+  } catch (error) {
+    showFeedback('error', 'Delete failed', error instanceof Error ? error.message : String(error));
+  } finally {
+    availabilitySaving.value = false;
   }
 }
 
@@ -273,7 +571,7 @@ function openAddDialog(): void {
   addForm.payment_method = 'Cash';
   addForm.appointment_priority = 'Routine';
   addForm.department_name = 'General Medicine';
-  addForm.doctor_name = departmentDoctorMap['General Medicine'][0] || doctorOptions.value.find((item) => item !== 'Doctor: Any') || '';
+  addForm.doctor_name = doctorOptionsForDepartment.value[0] || '';
   addForm.visit_type = 'General Check-Up';
   addForm.appointment_date = toInputDate(new Date().toISOString());
   addForm.preferred_time = '';
@@ -284,6 +582,7 @@ function openAddDialog(): void {
   addForm.patient_gender = '';
   addForm.status = 'New';
   addDialog.value = true;
+  void loadAddDoctorAvailability();
 }
 
 async function saveEdit(): Promise<void> {
@@ -336,7 +635,8 @@ async function saveAdd(): Promise<void> {
   if (!phone) addFormErrors.phone_number = 'Phone number is required.';
   else if (!isPhoneValid) addFormErrors.phone_number = 'Enter a valid phone number.';
   if (!String(addForm.department_name || '').trim()) addFormErrors.department_name = 'Department is required.';
-  if (!String(addForm.doctor_name || '').trim()) addFormErrors.doctor_name = 'Doctor is required.';
+  if (!hasAddDepartmentDoctors.value) addFormErrors.doctor_name = `No doctor is assigned to ${addForm.department_name || 'selected department'}.`;
+  else if (!String(addForm.doctor_name || '').trim()) addFormErrors.doctor_name = 'Doctor is required.';
   if (!String(addForm.visit_type || '').trim()) addFormErrors.visit_type = 'Visit type is required.';
   if (!String(addForm.appointment_date || '').trim()) addFormErrors.appointment_date = 'Appointment date is required.';
   if (!String(addForm.status || '').trim()) addFormErrors.status = 'Status is required.';
@@ -347,6 +647,11 @@ async function saveAdd(): Promise<void> {
 
   if (Object.values(addFormErrors).some(Boolean)) {
     showFeedback('error', 'Validation failed', 'Please fix highlighted fields before saving.');
+    return;
+  }
+  if (!addDoctorAvailability.value?.isDoctorAvailable) {
+    addFormErrors.preferred_time = addDoctorAvailability.value?.reason || 'Selected doctor is not available for this date/time.';
+    showFeedback('error', 'Doctor unavailable', addFormErrors.preferred_time);
     return;
   }
 
@@ -376,9 +681,14 @@ function applyExistingPatientLookup(value: string): void {
 }
 
 function onDepartmentChange(value: string): void {
-  const doctors = departmentDoctorMap[value] || [];
-  if (!doctors.length) return;
-  if (!doctors.includes(addForm.doctor_name || '')) {
+  const doctors = doctorsCatalog.value
+    .filter((item) => item.isActive && normalizeDepartment(item.departmentName) === normalizeDepartment(value))
+    .map((item) => item.doctorName);
+  if (!doctors.length) {
+    addForm.doctor_name = '';
+    return;
+  }
+  if (!doctors.includes(String(addForm.doctor_name || ''))) {
     addForm.doctor_name = doctors[0];
   }
 }
@@ -388,6 +698,15 @@ watch(
   (value) => {
     if (!value) return;
     onDepartmentChange(value);
+    void loadAddDoctorAvailability();
+  }
+);
+
+watch(
+  () => [addForm.doctor_name, addForm.appointment_date, addForm.preferred_time, addDialog.value],
+  () => {
+    if (!addDialog.value) return;
+    void loadAddDoctorAvailability();
   }
 );
 
@@ -402,6 +721,8 @@ watch(page, () => {
 
 onMounted(() => {
   void loadAppointments();
+  void loadDoctorsCatalog();
+  void loadAvailabilityRows();
   realtime.startPolling(() => {
     void loadAppointments({ silent: true });
   }, REALTIME_POLICY.polling.registrationMs);
@@ -422,11 +743,6 @@ onBeforeUnmount(() => {
             <div class="hero-kicker">Clinical Operations</div>
             <h1 class="text-h4 font-weight-black mb-1">Appointments</h1>
             <p class="hero-subtitle mb-0">Manage and review all patient bookings.</p>
-          </div>
-          <div class="hero-side-card">
-            <div class="hero-side-label">Booking Actions</div>
-            <div class="hero-side-text">Create and manage schedule entries from one queue.</div>
-            <v-btn color="primary" prepend-icon="mdi-plus" rounded="pill" class="mt-2 saas-primary-btn" @click="openAddDialog">Add Appointment</v-btn>
           </div>
         </div>
       </v-card-text>
@@ -488,9 +804,12 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="d-flex justify-space-between align-center mb-2">
+        <div class="d-flex justify-space-between align-center mb-2 ga-2 flex-wrap">
           <h2 class="text-h5 font-weight-bold">Appointments</h2>
-          <p class="text-body-2 text-medium-emphasis">Showing {{ rows.length }} of {{ totalItems }}</p>
+          <div class="d-flex align-center ga-2 flex-wrap">
+            <p class="text-body-2 text-medium-emphasis mb-0">Showing {{ rows.length }} of {{ totalItems }}</p>
+            <v-btn color="primary" prepend-icon="mdi-plus" rounded="pill" class="saas-primary-btn" @click="openAddDialog">Add Appointment</v-btn>
+          </div>
         </div>
 
         <v-table class="appointment-table" density="comfortable">
@@ -552,6 +871,85 @@ onBeforeUnmount(() => {
         </div>
       </v-card-text>
     </v-card>
+
+    <v-card rounded="xl" variant="flat" class="mt-5">
+      <v-card-item>
+        <v-card-title class="text-h6 font-weight-bold">Doctor Availability Management</v-card-title>
+        <v-card-subtitle>Configure weekly doctor schedules used by patient booking and appointment validation.</v-card-subtitle>
+        <template #append>
+          <div class="d-flex ga-2">
+            <v-btn variant="outlined" rounded="pill" class="saas-outline-btn" :loading="availabilityLoading" prepend-icon="mdi-refresh" @click="loadAvailabilityRows">Refresh</v-btn>
+            <v-btn variant="outlined" rounded="pill" class="saas-outline-btn" prepend-icon="mdi-account-plus-outline" :loading="doctorsLoading" @click="openDoctorDialog">Add Doctor</v-btn>
+            <v-btn color="primary" rounded="pill" class="saas-primary-btn" prepend-icon="mdi-plus" @click="openAddAvailabilityDialog">Add Schedule</v-btn>
+          </div>
+        </template>
+      </v-card-item>
+      <v-card-text class="pt-2">
+        <v-row class="mb-2">
+          <v-col cols="12" md="6">
+            <v-select
+              v-model="availabilityFilterDoctor"
+              :items="doctorAvailabilityFilterOptions"
+              density="comfortable"
+              variant="outlined"
+              hide-details
+              label="Doctor Filter"
+            />
+          </v-col>
+          <v-col cols="12" md="6">
+            <v-select
+              v-model="availabilityFilterDepartment"
+              :items="['All Departments', ...departmentOptions]"
+              density="comfortable"
+              variant="outlined"
+              hide-details
+              label="Department Filter"
+            />
+          </v-col>
+        </v-row>
+
+        <v-table density="comfortable" class="availability-table">
+          <thead>
+            <tr>
+              <th>DOCTOR</th>
+              <th>DEPARTMENT</th>
+              <th>DAY</th>
+              <th>TIME WINDOW</th>
+              <th>CAPACITY</th>
+              <th>STATUS</th>
+              <th>ACTIONS</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in filteredAvailabilityRows" :key="item.id">
+              <td>{{ item.doctorName }}</td>
+              <td>{{ item.departmentName }}</td>
+              <td>{{ dayOfWeekLabel(item.dayOfWeek) }}</td>
+              <td>{{ item.startTime }} - {{ item.endTime }}</td>
+              <td>{{ item.maxAppointments }}</td>
+              <td>
+                <v-chip size="small" :color="item.isActive ? 'success' : 'warning'" variant="tonal">{{ item.isActive ? 'Active' : 'Inactive' }}</v-chip>
+              </td>
+              <td>
+                <div class="d-flex ga-2">
+                  <v-btn icon size="small" class="saas-icon-btn" color="indigo" variant="tonal" @click="openEditAvailabilityDialog(item)">
+                    <EditIcon class="action-icon action-icon-edit" size="16" stroke-width="2.2" />
+                  </v-btn>
+                  <v-btn icon size="small" class="saas-icon-btn saas-icon-btn-danger" color="error" variant="tonal" :loading="availabilitySaving" @click="openDeleteAvailabilityDialog(item)">
+                    <TrashIcon class="action-icon action-icon-delete" size="16" stroke-width="2.2" />
+                  </v-btn>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="!availabilityLoading && filteredAvailabilityRows.length === 0">
+              <td colspan="7" class="text-center py-5 text-medium-emphasis">No doctor availability rows found.</td>
+            </tr>
+          </tbody>
+        </v-table>
+      </v-card-text>
+    </v-card>
+
+    <ModuleActivityLogs module="appointments" title="Module Activity Logs" :per-page="8" />
 
     <v-dialog v-model="viewDialog" max-width="600">
       <v-card class="saas-modal-card">
@@ -666,8 +1064,16 @@ onBeforeUnmount(() => {
                 label="Doctor *"
                 variant="outlined"
                 density="comfortable"
+                :disabled="!hasAddDepartmentDoctors"
+                :hint="addDoctorSelectHint"
+                persistent-hint
                 :error-messages="addFormErrors.doctor_name"
               />
+            </v-col>
+            <v-col cols="12" v-if="!hasAddDepartmentDoctors">
+              <v-alert type="warning" variant="tonal" density="comfortable">
+                No doctors are currently assigned to {{ addForm.department_name || 'this department' }}.
+              </v-alert>
             </v-col>
             <v-col cols="12" md="6">
               <v-text-field v-model="addForm.visit_type" label="Visit Type *" variant="outlined" density="comfortable" :error-messages="addFormErrors.visit_type" hint="Example: Follow-up, General Check-Up" persistent-hint />
@@ -679,10 +1085,25 @@ onBeforeUnmount(() => {
               <SaasDateTimePickerField v-model="addForm.appointment_date" mode="date" label="Appointment Date *" :error-messages="addFormErrors.appointment_date" />
             </v-col>
             <v-col cols="12" md="4">
-              <SaasDateTimePickerField v-model="addForm.preferred_time" mode="time" label="Preferred Time" clearable />
+              <SaasDateTimePickerField
+                v-model="addForm.preferred_time"
+                mode="time"
+                label="Preferred Time"
+                :loading="addAvailabilityLoading"
+                :allowed-times="addAvailableTimeOptions"
+                :error-messages="addFormErrors.preferred_time"
+                hint="Time options are based on doctor availability."
+                persistent-hint
+                clearable
+              />
             </v-col>
             <v-col cols="12" md="4">
               <v-select v-model="addForm.status" :items="appointmentStatusOptions" label="Appointment Status *" variant="outlined" density="comfortable" :error-messages="addFormErrors.status" />
+            </v-col>
+            <v-col cols="12" v-if="addDoctorAvailability">
+              <v-alert :type="addDoctorAvailability.isDoctorAvailable ? 'success' : 'warning'" variant="tonal" density="comfortable">
+                {{ addDoctorAvailability.reason }}
+              </v-alert>
             </v-col>
 
             <v-col cols="12"><div class="modal-section-title">Medical Info</div></v-col>
@@ -709,6 +1130,152 @@ onBeforeUnmount(() => {
         <v-card-actions class="justify-end">
           <v-btn variant="text" @click="addDialog = false">Cancel</v-btn>
           <v-btn color="primary" rounded="pill" class="saas-primary-btn" :loading="addSaving" @click="saveAdd">Create Appointment</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="availabilityDialog" max-width="760">
+      <v-card class="saas-modal-card">
+        <v-card-title class="saas-modal-title text-h6 font-weight-bold">
+          {{ availabilityForm.id ? 'Edit Doctor Availability' : 'Add Doctor Availability' }}
+        </v-card-title>
+        <v-card-text>
+          <v-row>
+            <v-col cols="12" md="6">
+              <v-combobox
+                v-model="availabilityForm.doctor_name"
+                :items="doctorAvailabilityFilterOptions.filter((item) => item !== 'All Doctors')"
+                label="Doctor Name *"
+                variant="outlined"
+                density="comfortable"
+                :error-messages="availabilityFormErrors.doctor_name"
+              />
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-select
+                v-model="availabilityForm.department_name"
+                :items="departmentOptions"
+                label="Department *"
+                variant="outlined"
+                density="comfortable"
+                :error-messages="availabilityFormErrors.department_name"
+              />
+            </v-col>
+            <v-col cols="12" md="4">
+              <v-select
+                v-model="availabilityForm.day_of_week"
+                :items="dayOfWeekOptions"
+                item-title="title"
+                item-value="value"
+                label="Day of Week *"
+                variant="outlined"
+                density="comfortable"
+              />
+            </v-col>
+            <v-col cols="12" md="4">
+              <SaasDateTimePickerField
+                v-model="availabilityForm.start_time"
+                mode="time"
+                label="Start Time *"
+                :error-messages="availabilityFormErrors.start_time"
+              />
+            </v-col>
+            <v-col cols="12" md="4">
+              <SaasDateTimePickerField
+                v-model="availabilityForm.end_time"
+                mode="time"
+                label="End Time *"
+                :error-messages="availabilityFormErrors.end_time"
+              />
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-text-field
+                v-model.number="availabilityForm.max_appointments"
+                type="number"
+                min="1"
+                label="Max Appointments *"
+                variant="outlined"
+                density="comfortable"
+                :error-messages="availabilityFormErrors.max_appointments"
+              />
+            </v-col>
+            <v-col cols="12" md="6" class="d-flex align-center">
+              <v-switch v-model="availabilityForm.is_active" color="success" inset label="Schedule is active" hide-details />
+            </v-col>
+          </v-row>
+        </v-card-text>
+        <v-card-actions class="justify-end">
+          <v-btn variant="text" @click="availabilityDialog = false">Cancel</v-btn>
+          <v-btn color="primary" rounded="pill" class="saas-primary-btn" :loading="availabilitySaving" @click="saveAvailabilityRow">
+            Save Schedule
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="doctorDialog" max-width="680">
+      <v-card class="saas-modal-card">
+        <v-card-title class="saas-modal-title text-h6 font-weight-bold">Add Doctor</v-card-title>
+        <v-card-text>
+          <v-row>
+            <v-col cols="12" md="6">
+              <v-text-field
+                v-model="doctorForm.doctor_name"
+                label="Doctor Name *"
+                variant="outlined"
+                density="comfortable"
+                :error-messages="doctorFormErrors.doctor_name"
+              />
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-select
+                v-model="doctorForm.department_name"
+                :items="departmentOptions"
+                label="Department *"
+                variant="outlined"
+                density="comfortable"
+                :error-messages="doctorFormErrors.department_name"
+              />
+            </v-col>
+            <v-col cols="12">
+              <v-text-field
+                v-model="doctorForm.specialization"
+                label="Specialization"
+                variant="outlined"
+                density="comfortable"
+              />
+            </v-col>
+            <v-col cols="12">
+              <v-switch v-model="doctorForm.is_active" inset color="success" label="Doctor is active" hide-details />
+            </v-col>
+          </v-row>
+        </v-card-text>
+        <v-card-actions class="justify-end">
+          <v-btn variant="text" :disabled="doctorSaving" @click="doctorDialog = false">Cancel</v-btn>
+          <v-btn color="primary" rounded="pill" class="saas-primary-btn" :loading="doctorSaving" @click="saveDoctor">Save Doctor</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="availabilityDeleteDialog" max-width="520">
+      <v-card class="saas-modal-card">
+        <v-card-title class="saas-modal-title text-h6 font-weight-bold">Delete Doctor Availability</v-card-title>
+        <v-card-text class="pt-5" v-if="availabilityDeleteTarget">
+          <p class="text-body-1 mb-3">
+            Remove this schedule row from doctor availability?
+          </p>
+          <div class="delete-review-grid">
+            <article><label>Doctor</label><strong>{{ availabilityDeleteTarget.doctorName }}</strong></article>
+            <article><label>Department</label><strong>{{ availabilityDeleteTarget.departmentName }}</strong></article>
+            <article><label>Day</label><strong>{{ dayOfWeekLabel(availabilityDeleteTarget.dayOfWeek) }}</strong></article>
+            <article><label>Time</label><strong>{{ availabilityDeleteTarget.startTime }} - {{ availabilityDeleteTarget.endTime }}</strong></article>
+          </div>
+        </v-card-text>
+        <v-card-actions class="justify-end">
+          <v-btn variant="text" :disabled="availabilitySaving" @click="availabilityDeleteDialog = false; availabilityDeleteTarget = null">Cancel</v-btn>
+          <v-btn color="error" rounded="pill" class="saas-danger-btn" :loading="availabilitySaving" @click="removeAvailabilityRow">
+            Delete Row
+          </v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -779,6 +1346,8 @@ onBeforeUnmount(() => {
 .search-field { min-width: 280px; flex: 2 1 320px; }
 .appointment-table th { font-size: 0.78rem; font-weight: 700; }
 .appointment-table td { vertical-align: middle; }
+.availability-table th { font-size: 0.76rem; font-weight: 700; }
+.availability-table td { vertical-align: middle; }
 
 .saas-primary-btn {
   box-shadow: 0 8px 18px rgba(24, 104, 208, 0.3);
@@ -788,6 +1357,9 @@ onBeforeUnmount(() => {
 }
 .saas-outline-btn {
   border-width: 1px !important;
+  color: #2f568f !important;
+  border-color: rgba(54, 86, 143, 0.32) !important;
+  background: #f5f8ff !important;
   text-transform: none;
   font-weight: 600;
 }
@@ -811,6 +1383,14 @@ onBeforeUnmount(() => {
 }
 .action-icon-edit {
   color: #4f46e5;
+}
+.action-icon-delete {
+  color: #dc2626;
+}
+
+.saas-icon-btn-danger {
+  border-color: rgba(220, 38, 38, 0.26) !important;
+  background: rgba(220, 38, 38, 0.08) !important;
 }
 
 .feedback-card {
@@ -837,5 +1417,29 @@ onBeforeUnmount(() => {
   letter-spacing: 0.5px;
   text-transform: uppercase;
   color: #26417f;
+}
+
+.delete-review-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.delete-review-grid article {
+  border: 1px solid rgba(76, 104, 168, 0.18);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #f8fbff;
+}
+
+.delete-review-grid label {
+  display: block;
+  font-size: 12px;
+  color: #5e7390;
+}
+
+.delete-review-grid strong {
+  font-size: 14px;
+  color: #173963;
 }
 </style>

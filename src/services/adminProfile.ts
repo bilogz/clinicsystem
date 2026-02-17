@@ -1,3 +1,5 @@
+import { fetchApiData, invalidateApiCache } from '@/services/apiClient';
+
 export type AdminActivityLog = {
   dateTime: string;
   action: string;
@@ -42,12 +44,6 @@ type UpdateProfileRequest = {
 
 const STORAGE_KEY = 'nexora_admin_profile_payload';
 
-type ApiResponse<T> = {
-  ok: boolean;
-  message?: string;
-  data?: T;
-};
-
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '');
 }
@@ -58,15 +54,6 @@ function resolveApiUrl(): string {
   const configured = import.meta.env.VITE_BACKEND_API_BASE_URL?.trim();
   if (configured) return `${trimTrailingSlashes(configured)}/admin-profile`;
   return '/api/admin-profile';
-}
-
-async function parseResponse<T>(response: Response): Promise<ApiResponse<T>> {
-  const text = await response.text();
-  const payload = text ? (JSON.parse(text) as ApiResponse<T>) : ({ ok: false } as ApiResponse<T>);
-  if (!response.ok || !payload.ok) {
-    throw payload.message || `Request failed (${response.status})`;
-  }
-  return payload;
 }
 
 function nowIso(): string {
@@ -150,9 +137,8 @@ function prependLog(payload: AdminProfilePayload, log: AdminActivityLog): AdminP
 
 export async function fetchAdminProfile(): Promise<AdminProfilePayload> {
   try {
-    const response = await fetch(resolveApiUrl(), { credentials: 'include' });
-    const parsed = await parseResponse<AdminProfilePayload>(response);
-    if (parsed.data) return parsed.data;
+    const data = await fetchApiData<AdminProfilePayload>(resolveApiUrl(), { ttlMs: 10_000 });
+    if (data) return data;
   } catch {
     // fallback to local storage
   }
@@ -161,18 +147,16 @@ export async function fetchAdminProfile(): Promise<AdminProfilePayload> {
 
 export async function updateAdminProfile(payload: UpdateProfileRequest): Promise<AdminProfilePayload> {
   try {
-    const response = await fetch(resolveApiUrl(), {
+    await fetchApiData<unknown>(resolveApiUrl(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
+      body: {
         username: 'joecelgarcia1@gmail.com',
         full_name: payload.fullName.trim(),
         phone: payload.phone.trim(),
         preferences: payload.preferences
-      })
+      }
     });
-    await parseResponse<unknown>(response);
+    invalidateApiCache('/api/admin-profile');
     return await fetchAdminProfile();
   } catch {
     // fallback to local storage

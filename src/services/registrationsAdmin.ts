@@ -1,3 +1,6 @@
+import { emitRealtimeRefresh } from '@/composables/useRealtimeListSync';
+import { fetchApiData, invalidateApiCache } from '@/services/apiClient';
+
 export type RegistrationStatus = 'Pending' | 'Review' | 'Active' | 'Archived';
 
 export type RegistrationRow = {
@@ -29,12 +32,6 @@ export type RegistrationListPayload = {
     total: number;
     totalPages: number;
   };
-};
-
-type RegistrationApiResponse<T> = {
-  ok: boolean;
-  message?: string;
-  data?: T;
 };
 
 type RegistrationQuery = {
@@ -103,37 +100,24 @@ function buildUrl(query: RegistrationQuery = {}): string {
   return suffix ? `${base}?${suffix}` : base;
 }
 
-async function parseResponse<T>(response: Response): Promise<RegistrationApiResponse<T>> {
-  const text = await response.text();
-  const payload = text ? (JSON.parse(text) as RegistrationApiResponse<T>) : ({ ok: false } as RegistrationApiResponse<T>);
-  if (!response.ok || !payload.ok) {
-    throw payload.message || `Request failed (${response.status})`;
-  }
-  return payload;
-}
-
 async function executeRegistrationAction(action: RegistrationAction, payload: RegistrationActionPayload): Promise<RegistrationRow> {
-  const response = await fetch(resolveApiUrl(), {
+  const data = await fetchApiData<RegistrationRow>(resolveApiUrl(), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify({
+    body: {
       action,
       ...payload
-    })
+    }
   });
-  const parsed = await parseResponse<RegistrationRow>(response);
-  if (!parsed.data) throw `No ${action} registration returned.`;
-  return parsed.data;
+  invalidateApiCache('/api/registrations');
+  invalidateApiCache('/api/dashboard');
+  invalidateApiCache('/api/reports');
+  invalidateApiCache('/api/patients');
+  emitRealtimeRefresh(`registration_${action}`);
+  return data;
 }
 
 export async function fetchRegistrations(query: RegistrationQuery = {}): Promise<RegistrationListPayload> {
-  const response = await fetch(buildUrl(query), { credentials: 'include' });
-  const payload = await parseResponse<RegistrationListPayload>(response);
-  if (!payload.data) {
-    throw 'No registration data returned.';
-  }
-  return payload.data;
+  return await fetchApiData<RegistrationListPayload>(buildUrl(query), { ttlMs: 8_000 });
 }
 
 export async function createRegistration(payload: RegistrationUpsertPayload): Promise<RegistrationRow> {

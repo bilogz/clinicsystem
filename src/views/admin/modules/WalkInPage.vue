@@ -2,9 +2,11 @@
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { CheckIcon } from 'vue-tabler-icons';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { createWalkIn, fetchWalkIns, runWalkInAction, type Severity, type WalkInCase, type WalkInStatus, type WalkInAnalytics } from '@/services/walkInAdmin';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
+import { emitSuccessModal } from '@/composables/useSuccessModal';
 
 type ActionType = 'new' | 'identify' | 'queue_triage' | 'start_triage' | 'triage' | 'assign' | 'complete' | 'emergency' | 'view';
 type UserRole = 'Nurse' | 'Doctor' | 'Admin';
@@ -300,6 +302,10 @@ function applyCaseToForm(item: WalkInCase): void {
 }
 
 function showToast(message: string, color: 'success' | 'warning' | 'info' | 'error' = 'success'): void {
+  if (color === 'success') {
+    emitSuccessModal({ title: 'Success', message, tone: 'success' });
+    return;
+  }
   snackbarText.value = message;
   snackbarColor.value = color;
   snackbar.value = true;
@@ -592,7 +598,6 @@ onBeforeUnmount(() => {
               />
               <div class="hero-side-label">New Intake</div>
               <div class="hero-side-text">Create and route new walk-in cases from one queue.</div>
-              <v-btn color="primary" prepend-icon="mdi-account-plus-outline" rounded="pill" class="mt-2 saas-primary-btn" @click="openAction('new')">New Walk-In</v-btn>
             </div>
           </div>
         </v-card-text>
@@ -616,6 +621,9 @@ onBeforeUnmount(() => {
       <v-card variant="outlined">
         <v-card-item>
           <v-card-title>Live Walk-In Queue</v-card-title>
+          <template #append>
+            <v-btn color="primary" prepend-icon="mdi-account-plus-outline" rounded="pill" class="saas-primary-btn" @click="openAction('new')">New Walk-In</v-btn>
+          </template>
         </v-card-item>
         <v-card-text>
           <v-row class="mb-3">
@@ -707,6 +715,8 @@ onBeforeUnmount(() => {
         </v-card-text>
       </v-card>
     </div>
+
+    <ModuleActivityLogs module="walkin" title="Module Activity Logs" :per-page="8" />
 
     <v-dialog v-model="dialogOpen" max-width="660" transition="dialog-bottom-transition">
       <v-card class="walkin-dialog-card">

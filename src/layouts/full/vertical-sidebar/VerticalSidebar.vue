@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { shallowRef } from 'vue';
+import { computed } from 'vue';
 import { useCustomizerStore } from '../../../stores/customizer';
 import sidebarItems from './sidebarItem';
+import { useAuthStore } from '@/stores/auth';
+import { filterSidebarItemsByAccess } from '@/config/accessControl';
 
 import Logo from '../logo/LogoMain.vue';
 import NavCollapse from './NavCollapse/NavCollapse.vue';
@@ -9,7 +11,8 @@ import NavGroup from './NavGroup/NavGroup.vue';
 import NavItem from './NavItem/NavItem.vue';
 
 const customizer = useCustomizerStore();
-const sidebarMenu = shallowRef(sidebarItems);
+const auth = useAuthStore();
+const sidebarMenu = computed(() => filterSidebarItemsByAccess(sidebarItems, auth.user));
 </script>
 
 <template>

@@ -1,3 +1,6 @@
+import { emitRealtimeRefresh } from '@/composables/useRealtimeListSync';
+import { fetchApiData, invalidateApiCache } from '@/services/apiClient';
+
 export type CheckupState =
   | 'intake'
   | 'queue'
@@ -51,12 +54,6 @@ export type CheckupListPayload = {
     total: number;
     totalPages: number;
   };
-};
-
-type ApiResponse<T> = {
-  ok: boolean;
-  message?: string;
-  data?: T;
 };
 
 type CheckupQuery = {
@@ -117,40 +114,18 @@ function buildUrl(query: CheckupQuery = {}): string {
   return suffix ? `${resolveApiUrl()}?${suffix}` : resolveApiUrl();
 }
 
-async function parseResponse<T>(response: Response): Promise<ApiResponse<T>> {
-  const url = response.url || resolveApiUrl();
-  const text = await response.text();
-  let payload: ApiResponse<T>;
-  try {
-    payload = text ? (JSON.parse(text) as ApiResponse<T>) : ({ ok: false } as ApiResponse<T>);
-  } catch {
-    const lower = text.trim().slice(0, 120).toLowerCase();
-    if (lower.startsWith('<!doctype') || lower.startsWith('<html')) {
-      throw `Check-up API returned HTML at ${url}. Use Vite /api/checkups endpoint (Neon middleware), not PHP/backend routes.`;
-    }
-    throw `Unexpected response format (${response.status}) at ${url}.`;
-  }
-  if (!response.ok || !payload.ok) {
-    throw payload.message || `Request failed (${response.status})`;
-  }
-  return payload;
-}
-
 export async function fetchCheckupQueue(query: CheckupQuery = {}): Promise<CheckupListPayload> {
-  const response = await fetch(buildUrl(query), { credentials: 'include' });
-  const payload = await parseResponse<CheckupListPayload>(response);
-  if (!payload.data) throw 'No check-up queue data returned.';
-  return payload.data;
+  return await fetchApiData<CheckupListPayload>(buildUrl(query), { ttlMs: 8_000 });
 }
 
 export async function dispatchCheckupAction(request: CheckupActionRequest): Promise<CheckupVisit> {
-  const response = await fetch(resolveApiUrl(), {
+  const data = await fetchApiData<CheckupVisit>(resolveApiUrl(), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify(request)
+    body: request
   });
-  const payload = await parseResponse<CheckupVisit>(response);
-  if (!payload.data) throw `No updated visit returned for action ${request.action}.`;
-  return payload.data;
+  invalidateApiCache('/api/checkups');
+  invalidateApiCache('/api/dashboard');
+  invalidateApiCache('/api/reports');
+  emitRealtimeRefresh(`checkup_${request.action}`);
+  return data;
 }

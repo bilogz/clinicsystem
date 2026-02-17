@@ -1,3 +1,5 @@
+import { fetchApiData, invalidateApiCache } from '@/services/apiClient';
+
 export type MentalHealthStatus = 'create' | 'active' | 'follow_up' | 'at_risk' | 'completed' | 'escalated' | 'archived';
 
 export type MentalHealthRisk = 'low' | 'medium' | 'high';
@@ -76,12 +78,6 @@ export type MentalHealthSnapshot = {
   };
 };
 
-type ApiResponse<T> = {
-  ok: boolean;
-  message?: string;
-  data?: T;
-};
-
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '');
 }
@@ -94,28 +90,17 @@ function resolveApiUrl(): string {
   return '/api/mental-health';
 }
 
-async function parseResponse<T>(response: Response): Promise<ApiResponse<T>> {
-  const text = await response.text();
-  const payload = text ? (JSON.parse(text) as ApiResponse<T>) : ({ ok: false } as ApiResponse<T>);
-  if (!response.ok || !payload.ok) {
-    throw payload.message || `Request failed (${response.status})`;
-  }
-  return payload;
-}
-
 export async function fetchMentalHealthSnapshot(): Promise<MentalHealthSnapshot> {
-  const response = await fetch(resolveApiUrl(), { credentials: 'include' });
-  const parsed = await parseResponse<MentalHealthSnapshot>(response);
-  if (!parsed.data) throw 'No mental health data returned.';
-  return parsed.data;
+  return await fetchApiData<MentalHealthSnapshot>(resolveApiUrl(), { ttlMs: 10_000 });
 }
 
 export async function dispatchMentalHealthAction(payload: Record<string, unknown>): Promise<void> {
-  const response = await fetch(resolveApiUrl(), {
+  await fetchApiData<unknown>(resolveApiUrl(), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify(payload)
+    body: payload
   });
-  await parseResponse<unknown>(response);
+  invalidateApiCache('/api/mental-health');
+  invalidateApiCache('/api/dashboard');
+  invalidateApiCache('/api/reports');
+  invalidateApiCache('/api/patients');
 }

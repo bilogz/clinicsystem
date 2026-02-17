@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import {
   createLabRequest,
   fetchLabActivity,
@@ -19,6 +20,8 @@ import {
 } from '@/services/laboratoryWorkflow';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
+import { emitSuccessModal } from '@/composables/useSuccessModal';
+import { requestConfirmModal } from '@/composables/useConfirmModal';
 
 type WorkflowStep = 'order' | 'processing' | 'encode' | 'release' | 'history';
 type RowAction = 'process' | 'encode' | 'release' | 'view';
@@ -174,6 +177,10 @@ const rejectForm = reactive({
 const pendingAction = ref<'none' | 'start' | 'save_processing' | 'save_draft' | 'finalize' | 'release'>('none');
 let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
 let lastAutosaveSignature = '';
+const autosaveInFlight = ref(false);
+const workflowBaselineSignature = ref('');
+const lastAutosavedAt = ref<string | null>(null);
+let draftSaveToken = 0;
 const realtime = useRealtimeListSync();
 
 const snackbar = reactive({
@@ -354,7 +361,7 @@ const currentFieldDefinitions = computed(() => FIELD_TEMPLATES[activeWorkflow.va
 const canStartProcessing = computed(() => activeWorkflow.value?.status === 'Pending');
 const canFinalize = computed(() => activeWorkflow.value?.status === 'In Progress' || activeWorkflow.value?.status === 'Result Ready');
 const canRelease = computed(() => activeWorkflow.value?.status === 'Result Ready');
-const canExport = computed(() => activeWorkflow.value?.status === 'Completed');
+const canExport = computed(() => activeWorkflow.value?.status === 'Result Ready' || activeWorkflow.value?.status === 'Completed');
 
 onMounted(async () => {
   await loadQueue();
@@ -410,17 +417,24 @@ watch(
     if (!activeWorkflow.value) return;
     if (workflowStep.value !== 'encode') return;
     if (workflowBusy.value) return;
+    if (autosaveInFlight.value) return;
     if (activeWorkflow.value.status === 'Pending' || activeWorkflow.value.status === 'Completed' || activeWorkflow.value.status === 'Cancelled') return;
-    const signature = JSON.stringify({
-      requestId: activeWorkflow.value.requestId,
-      values: encodeForm,
-      attachment: processingForm.rawAttachmentName
-    });
+    if (!hasUnsavedWorkflowChanges()) return;
+    const signature = buildWorkflowFormSignature(activeWorkflow.value);
     if (signature === lastAutosaveSignature) return;
     if (autosaveTimer) clearTimeout(autosaveTimer);
     autosaveTimer = setTimeout(() => {
-      lastAutosaveSignature = signature;
-      void onSaveDraft(true);
+      void (async () => {
+        if (workflowBusy.value || autosaveInFlight.value) return;
+        if (!hasUnsavedWorkflowChanges()) return;
+        autosaveInFlight.value = true;
+        const autosaveSignature = buildWorkflowFormSignature(activeWorkflow.value);
+        const saved = await onSaveDraft(true);
+        if (saved) {
+          lastAutosaveSignature = autosaveSignature;
+        }
+        autosaveInFlight.value = false;
+      })();
     }, 1400);
   },
   { deep: true }
@@ -454,6 +468,10 @@ watch(
 );
 
 function showToast(text: string, color: SnackbarTone = 'success'): void {
+  if (color === 'success') {
+    emitSuccessModal({ title: 'Success', message: text, tone: 'success' });
+    return;
+  }
   snackbar.text = text;
   snackbar.color = color;
   snackbar.open = true;
@@ -924,6 +942,7 @@ function upsertWorkflowFromBackend(detail: LabRequestDetail, logs: LabActivityLo
 }
 
 async function loadQueue(options: { silent?: boolean } = {}): Promise<void> {
+  const previousSelectedRequestId = selectedRequestId.value;
   const remoteQueue = await realtime.runLatest(
     async () =>
       fetchLabQueue({
@@ -958,9 +977,22 @@ async function loadQueue(options: { silent?: boolean } = {}): Promise<void> {
   remoteQueue.forEach((row) => ensureWorkflowForQueueRow(row));
   backendMode.value = 'connected';
 
-  if (remoteQueue.length > 0) {
-    selectedRequestId.value = remoteQueue[0].requestId;
+  if (remoteQueue.length === 0) {
+    selectedRequestId.value = null;
+    return;
   }
+
+  const selectedStillExists =
+    previousSelectedRequestId != null &&
+    remoteQueue.some((row) => row.requestId === previousSelectedRequestId);
+
+  // Keep currently selected workflow during background refresh to avoid modal/form resets.
+  if (selectedStillExists) {
+    selectedRequestId.value = previousSelectedRequestId;
+    return;
+  }
+
+  selectedRequestId.value = remoteQueue[0].requestId;
 }
 
 function resetEncodeErrors(): void {
@@ -970,6 +1002,7 @@ function resetEncodeErrors(): void {
 }
 
 function hydrateFormsFromWorkflow(record: WorkflowRecord): void {
+  lastAutosavedAt.value = null;
   processingForm.sampleCollected = record.sampleCollected;
   processingForm.assignedLabStaff = record.assignedLabStaff || 'Tech Anne';
   processingForm.rawAttachmentName = record.rawAttachmentName || '';
@@ -986,6 +1019,81 @@ function hydrateFormsFromWorkflow(record: WorkflowRecord): void {
     const savedValue = record.encodedValues[field.key];
     encodeForm[field.key] = savedValue == null ? '' : savedValue;
   });
+
+  workflowBaselineSignature.value = buildWorkflowFormSignature(record);
+}
+
+function buildWorkflowFormSignature(record = activeWorkflow.value): string {
+  if (!record) {
+    return '';
+  }
+
+  const encoded = Object.entries(encodeForm)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => [key, value == null ? '' : String(value)]);
+
+  return JSON.stringify({
+    requestId: record.requestId,
+    step: workflowStep.value,
+    processing: {
+      sampleCollected: processingForm.sampleCollected,
+      assignedLabStaff: processingForm.assignedLabStaff.trim(),
+      rawAttachmentName: processingForm.rawAttachmentName.trim(),
+      specimenType: processingForm.specimenType.trim(),
+      sampleSource: processingForm.sampleSource.trim(),
+      collectionDateTime: processingForm.collectionDateTime
+    },
+    encoded,
+    resultReferenceRange: record.resultReferenceRange.trim(),
+    verifiedBy: record.verifiedBy.trim(),
+    verifiedAt: record.verifiedAt || ''
+  });
+}
+
+function markWorkflowAsSynced(record = activeWorkflow.value): void {
+  workflowBaselineSignature.value = buildWorkflowFormSignature(record);
+}
+
+function hasUnsavedWorkflowChanges(): boolean {
+  if (!workflowDialog.value || !activeWorkflow.value) {
+    return false;
+  }
+  if (!workflowBaselineSignature.value) {
+    return false;
+  }
+  return buildWorkflowFormSignature(activeWorkflow.value) !== workflowBaselineSignature.value;
+}
+
+async function confirmWorkflowDiscard(message: string): Promise<boolean> {
+  if (!hasUnsavedWorkflowChanges()) {
+    return true;
+  }
+  return requestConfirmModal({
+    title: 'Unsaved Changes',
+    message,
+    confirmText: 'Discard',
+    cancelText: 'Keep Editing',
+    tone: 'warning'
+  });
+}
+
+async function closeWorkflowDialog(): Promise<void> {
+  if (workflowBusy.value) {
+    return;
+  }
+  const canClose = await confirmWorkflowDiscard('You have unsaved laboratory changes. Discard changes and close this workflow?');
+  if (!canClose) {
+    return;
+  }
+  workflowDialog.value = false;
+}
+
+async function onWorkflowDialogModelUpdate(nextValue: boolean): Promise<void> {
+  if (nextValue) {
+    workflowDialog.value = true;
+    return;
+  }
+  await closeWorkflowDialog();
 }
 
 function getFieldTemplate(category: string): TestFieldDefinition[] {
@@ -1171,6 +1279,13 @@ async function openWorkflow(requestId: number, action: RowAction): Promise<void>
     ensureWorkflowForQueueRow(row);
   }
 
+  if (workflowDialog.value && selectedRequestId.value !== requestId) {
+    const canSwitch = await confirmWorkflowDiscard('You have unsaved laboratory changes. Discard changes and open another request?');
+    if (!canSwitch) {
+      return;
+    }
+  }
+
   selectedRequestId.value = requestId;
   workflowDialog.value = true;
   workflowLoading.value = true;
@@ -1190,6 +1305,7 @@ async function openWorkflow(requestId: number, action: RowAction): Promise<void>
     hydrateFormsFromWorkflow(record);
     lastAutosaveSignature = '';
     workflowStep.value = resolveStepFromAction(record, action);
+    markWorkflowAsSynced(record);
   }
 
   workflowLoading.value = false;
@@ -1355,7 +1471,31 @@ async function onStartProcessing(): Promise<void> {
   workflowStep.value = 'processing';
   pendingAction.value = 'none';
   workflowBusy.value = false;
+  markWorkflowAsSynced(current);
   showToast('Request moved to In Progress.', 'success');
+}
+
+function setEncodeFieldValue(key: string, value: unknown): void {
+  encodeForm[key] = value == null ? '' : String(value);
+  if (encodeErrors[key]) {
+    delete encodeErrors[key];
+  }
+}
+
+function onReferenceRangeChange(value: string | null): void {
+  if (!activeWorkflow.value) return;
+  activeWorkflow.value.resultReferenceRange = String(value ?? '');
+  if (activeWorkflow.value.resultReferenceRange.trim() && encodeErrors.resultReferenceRange) {
+    delete encodeErrors.resultReferenceRange;
+  }
+}
+
+function onVerifiedByChange(value: string | null): void {
+  if (!activeWorkflow.value) return;
+  activeWorkflow.value.verifiedBy = String(value ?? '');
+  if (activeWorkflow.value.verifiedBy.trim() && encodeErrors.verifiedBy) {
+    delete encodeErrors.verifiedBy;
+  }
 }
 
 async function onSaveProcessingProgress(): Promise<void> {
@@ -1390,6 +1530,7 @@ async function onSaveProcessingProgress(): Promise<void> {
 
   pendingAction.value = 'none';
   workflowBusy.value = false;
+  markWorkflowAsSynced(current);
   showToast('Processing progress saved.', 'success');
 }
 
@@ -1429,53 +1570,82 @@ function onProceedToEncode(): void {
   updateWorkflowAndQueue(current);
   workflowStep.value = 'encode';
 }
-async function onSaveDraft(silent = false): Promise<void> {
+async function onSaveDraft(silent = false): Promise<boolean> {
   const record = activeWorkflow.value;
-  if (!record) return;
+  if (!record) return false;
   if (!canProcessWorkflow.value) {
     showToast('Your role is not allowed to encode results.', 'warning');
-    return;
+    return false;
   }
   if (record.status === 'Pending') {
     showToast('Request must be In Progress before saving draft results.', 'warning');
-    return;
+    return false;
+  }
+  if (silent && workflowBusy.value) {
+    return false;
+  }
+  if (!silent && autosaveTimer) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = null;
   }
 
-  workflowBusy.value = true;
-  pendingAction.value = 'save_draft';
+  const saveToken = ++draftSaveToken;
 
-  const values = collectEncodeValues();
-  const summary = buildResultSummary(values);
+  if (!silent) {
+    workflowBusy.value = true;
+    pendingAction.value = 'save_draft';
+  }
+  let saved = false;
+  try {
+    const values = collectEncodeValues();
+    const summary = buildResultSummary(values);
 
-  if (backendMode.value !== 'local') {
-    try {
-      const response = await saveLabResults({
-        requestId: record.requestId,
-        summary,
-        encodedValues: values,
-        attachmentName: processingForm.rawAttachmentName.trim(),
-        finalize: false,
-        resultEncodedAt: record.resultEncodedAt,
-        resultReferenceRange: record.resultReferenceRange,
-        verifiedBy: record.verifiedBy
-      });
-      if (response) upsertWorkflowFromBackend(response, record.activityLogs);
-      backendMode.value = 'connected';
-    } catch (error) {
-      activateLocalMode(error);
+    if (backendMode.value !== 'local') {
+      try {
+        const response = await saveLabResults({
+          requestId: record.requestId,
+          summary,
+          encodedValues: values,
+          attachmentName: processingForm.rawAttachmentName.trim(),
+          finalize: false,
+          resultEncodedAt: record.resultEncodedAt,
+          resultReferenceRange: record.resultReferenceRange,
+          verifiedBy: record.verifiedBy
+        });
+        if (response) upsertWorkflowFromBackend(response, record.activityLogs);
+        backendMode.value = 'connected';
+      } catch (error) {
+        activateLocalMode(error);
+      }
+    }
+
+    // Ignore stale save completions if a newer save already started.
+    if (saveToken !== draftSaveToken) {
+      return false;
+    }
+
+    const current = workflowCache[record.requestId] || record;
+    current.encodedValues = values;
+    current.rawAttachmentName = processingForm.rawAttachmentName.trim();
+    current.resultReferenceRange = record.resultReferenceRange;
+    current.verifiedBy = record.verifiedBy;
+    current.verifiedAt = record.verifiedAt;
+
+    appendActivity(current, 'Result Draft Saved', 'Encoded result draft saved for later finalization.');
+    updateWorkflowAndQueue(current);
+    markWorkflowAsSynced(current);
+    lastAutosavedAt.value = new Date().toISOString();
+    saved = true;
+    if (!silent) showToast('Result draft saved.', 'success');
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : 'Failed to save draft.', 'error');
+  } finally {
+    if (!silent) {
+      pendingAction.value = 'none';
+      workflowBusy.value = false;
     }
   }
-
-  const current = workflowCache[record.requestId] || record;
-  current.encodedValues = values;
-  current.rawAttachmentName = processingForm.rawAttachmentName.trim();
-
-  appendActivity(current, 'Result Draft Saved', 'Encoded result draft saved for later finalization.');
-  updateWorkflowAndQueue(current);
-
-  pendingAction.value = 'none';
-  workflowBusy.value = false;
-  if (!silent) showToast('Result draft saved.', 'success');
+  return saved;
 }
 
 async function onFinalizeResult(): Promise<void> {
@@ -1533,6 +1703,7 @@ async function onFinalizeResult(): Promise<void> {
   workflowStep.value = 'release';
   pendingAction.value = 'none';
   workflowBusy.value = false;
+  markWorkflowAsSynced(current);
   showToast('Result finalized.', 'success');
 }
 
@@ -1585,6 +1756,7 @@ async function onReleaseReport(): Promise<void> {
   workflowStep.value = 'history';
   pendingAction.value = 'none';
   workflowBusy.value = false;
+  markWorkflowAsSynced(current);
   showToast('Report released successfully.', 'success');
 }
 
@@ -1621,6 +1793,7 @@ async function onRejectOrResample(): Promise<void> {
   rejectDialog.value = false;
   pendingAction.value = 'none';
   workflowBusy.value = false;
+  markWorkflowAsSynced(current);
   showToast(rejectForm.resampleFlag ? 'Resample requested.' : 'Request rejected.', 'success');
 }
 
@@ -1628,26 +1801,285 @@ function onDownloadReport(): void {
   const record = activeWorkflow.value;
   if (!record) return;
   if (!canExport.value) {
-    showToast('Report can be downloaded only after completion.', 'warning');
+    showToast('Report can be downloaded when status is Result Ready or Completed.', 'warning');
     return;
+  }
+
+  const reportOpened = openReportWindow(record, 'download');
+  if (!reportOpened) {
+    const fallbackPrinted = printReportViaIframe(record);
+    if (!fallbackPrinted) {
+      showToast('Unable to open report. Please allow pop-ups/printing and try again.', 'warning');
+      return;
+    }
   }
 
   appendActivity(record, 'PDF Downloaded', 'User triggered report PDF export.');
   updateWorkflowAndQueue(record);
-  showToast('PDF download queued (static preview).', 'info');
+  showToast('Report opened. Choose "Save as PDF" in the print dialog.', 'info');
 }
 
 function onPrintReport(): void {
   const record = activeWorkflow.value;
   if (!record) return;
   if (!canExport.value) {
-    showToast('Report can be printed only after completion.', 'warning');
+    showToast('Report can be printed when status is Result Ready or Completed.', 'warning');
     return;
+  }
+
+  const reportOpened = openReportWindow(record, 'print');
+  if (!reportOpened) {
+    const fallbackPrinted = printReportViaIframe(record);
+    if (!fallbackPrinted) {
+      showToast('Unable to open print window. Please allow pop-ups/printing and try again.', 'warning');
+      return;
+    }
   }
 
   appendActivity(record, 'Report Printed', 'User opened print action for the released report.');
   updateWorkflowAndQueue(record);
-  window.print();
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function buildReportMarkup(record: WorkflowRecord): string {
+  const fields = getFieldTemplate(record.category);
+  const reportNumber = `LAB-${record.requestId}`;
+  const releasedAt = formatDateTime(record.releasedAt);
+  const encodedAt = formatDateTime(record.resultEncodedAt);
+  const requestedAt = formatDateTime(record.requestedAt);
+  const verifiedBy = record.verifiedBy || '--';
+  const rows = fields
+    .map((field) => {
+      const raw = record.encodedValues[field.key];
+      const value = raw == null || String(raw).trim() === '' ? '--' : String(raw);
+      const suffix = field.unit ? ` ${field.unit}` : '';
+      return `<tr><td>${escapeHtml(field.label)}</td><td>${escapeHtml(value)}${escapeHtml(suffix)}</td></tr>`;
+    })
+    .join('');
+
+  const notes = record.notes || record.clinicalDiagnosis || '--';
+  const referenceRange = record.resultReferenceRange || '--';
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nexora Lab Report ${escapeHtml(reportNumber)}</title>
+  <style>
+    :root {
+      --brand: #1f4fa9;
+      --brand-dark: #0f2f6b;
+      --accent: #1e88e5;
+      --surface: #ffffff;
+      --surface-soft: #f3f7ff;
+      --text: #1f2937;
+      --muted: #64748b;
+      --border: #d8e1f2;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      background: linear-gradient(180deg, #eaf1ff 0%, #f8fbff 38%, #ffffff 100%);
+      color: var(--text);
+      padding: 24px;
+    }
+    .sheet {
+      width: 100%;
+      max-width: 920px;
+      margin: 0 auto;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 12px 30px rgba(12, 38, 94, 0.12);
+    }
+    .header {
+      background: linear-gradient(135deg, var(--brand-dark), var(--brand));
+      color: #fff;
+      padding: 22px 26px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .brand { font-size: 20px; font-weight: 800; letter-spacing: .2px; }
+    .sub { font-size: 12px; opacity: .9; margin-top: 2px; }
+    .chip {
+      font-size: 12px;
+      font-weight: 700;
+      background: rgba(255,255,255,.16);
+      border: 1px solid rgba(255,255,255,.28);
+      border-radius: 999px;
+      padding: 6px 10px;
+    }
+    .body { padding: 20px 24px 24px; }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface-soft);
+      padding: 12px 14px;
+    }
+    .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
+    .value { margin-top: 4px; font-size: 14px; font-weight: 700; color: #17386f; }
+    h2 { margin: 12px 0 8px; font-size: 18px; color: #14366f; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      background: #fff;
+      margin-top: 8px;
+    }
+    th, td { padding: 10px 12px; border-bottom: 1px solid #e7edf9; text-align: left; font-size: 13px; }
+    th { background: #edf3ff; color: #193a72; font-size: 12px; text-transform: uppercase; letter-spacing: .35px; }
+    tr:last-child td { border-bottom: none; }
+    .notes {
+      margin-top: 14px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fff;
+      padding: 10px 12px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .footer {
+      margin-top: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    @media print {
+      body { background: #fff; padding: 0; }
+      .sheet { box-shadow: none; border-radius: 0; border: none; max-width: none; }
+    }
+  </style>
+</head>
+<body>
+  <article class="sheet">
+    <header class="header">
+      <div>
+        <div class="brand">Nexora Medical Center</div>
+        <div class="sub">Laboratory Diagnostic Report</div>
+      </div>
+      <div class="chip">Result Ready</div>
+    </header>
+
+    <section class="body">
+      <div class="grid">
+        <div class="card"><div class="label">Patient</div><div class="value">${escapeHtml(record.patientName)} (${escapeHtml(record.patientId)})</div></div>
+        <div class="card"><div class="label">Request</div><div class="value">#${escapeHtml(record.requestId)} / ${escapeHtml(reportNumber)}</div></div>
+        <div class="card"><div class="label">Department</div><div class="value">${escapeHtml(record.doctorDepartment || '--')}</div></div>
+        <div class="card"><div class="label">Doctor</div><div class="value">${escapeHtml(record.requestedByDoctor || '--')}</div></div>
+        <div class="card"><div class="label">Requested At</div><div class="value">${escapeHtml(requestedAt)}</div></div>
+        <div class="card"><div class="label">Released At</div><div class="value">${escapeHtml(releasedAt)}</div></div>
+      </div>
+
+      <h2>Test Results - ${escapeHtml(record.category)}</h2>
+      <table>
+        <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+
+      <div class="notes"><strong>Result Reference Range:</strong> ${escapeHtml(referenceRange)}</div>
+      <div class="notes"><strong>Clinical Notes:</strong> ${escapeHtml(notes)}</div>
+
+      <div class="footer">
+        <span>Verified by: <strong>${escapeHtml(verifiedBy)}</strong></span>
+        <span>Encoded: ${escapeHtml(encodedAt)}</span>
+      </div>
+    </section>
+  </article>
+</body>
+</html>`;
+}
+
+function printReportViaIframe(record: WorkflowRecord): boolean {
+  try {
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.srcdoc = buildReportMarkup(record);
+    document.body.appendChild(iframe);
+
+    iframe.onload = () => {
+      try {
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+      } finally {
+        setTimeout(() => {
+          iframe.remove();
+        }, 1500);
+      }
+    };
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function openReportWindow(record: WorkflowRecord, mode: 'print' | 'download'): boolean {
+  let reportWindow: Window | null = null;
+  try {
+    reportWindow = window.open('about:blank', '_blank', 'width=1100,height=900');
+  } catch {
+    reportWindow = null;
+  }
+  if (!reportWindow) {
+    return false;
+  }
+  try {
+    reportWindow.opener = null;
+  } catch {
+    // Ignore browsers that block setting opener.
+  }
+
+  try {
+    reportWindow.document.open();
+    reportWindow.document.write(buildReportMarkup(record));
+    reportWindow.document.close();
+    reportWindow.focus();
+    reportWindow.onafterprint = () => {
+      reportWindow?.close();
+    };
+
+    setTimeout(() => {
+      reportWindow?.print();
+    }, mode === 'download' ? 350 : 220);
+  } catch {
+    try {
+      reportWindow.close();
+    } catch {
+      // Ignore close errors.
+    }
+    return false;
+  }
+
+  return true;
 }
 
 function workflowStepLabel(step: WorkflowStep): string {
@@ -1661,6 +2093,13 @@ function workflowStepLabel(step: WorkflowStep): string {
 function updateVerifiedAt(value: string | null): void {
   if (!activeWorkflow.value) return;
   activeWorkflow.value.verifiedAt = value ? new Date(value).toISOString() : null;
+}
+
+function formatAutosavedAt(value: string | null): string {
+  if (!value) return 'Not yet autosaved';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Autosaved';
+  return `Autosaved ${new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(date)}`;
 }
 </script>
 
@@ -1692,9 +2131,7 @@ function updateVerifiedAt(value: string | null): void {
             </div>
 
             <div class="d-flex align-center ga-2 flex-wrap">
-              <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="queueLoading" @click="refreshQueueNow">Refresh</v-btn>
               <v-select v-model="currentRole" :items="roleOptions" label="Session Role" variant="solo-filled" density="compact" hide-details class="role-inline-select" />
-              <v-btn class="saas-btn saas-btn-light" prepend-icon="mdi-plus" :disabled="!canCreateRequest" @click="openCreateRequestDialog">New Lab Request</v-btn>
             </div>
           </div>
         </v-card-text>
@@ -1709,6 +2146,16 @@ function updateVerifiedAt(value: string | null): void {
       </v-row>
 
       <v-card class="lab-surface-card" variant="outlined">
+        <v-card-item>
+          <v-card-title>Laboratory Queue</v-card-title>
+          <template #append>
+            <div class="d-flex align-center ga-2 flex-wrap">
+              <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="queueLoading" @click="refreshQueueNow">Refresh</v-btn>
+              <v-btn class="saas-btn saas-btn-light" prepend-icon="mdi-plus" :disabled="!canCreateRequest" @click="openCreateRequestDialog">New Lab Request</v-btn>
+            </div>
+          </template>
+        </v-card-item>
+        <v-divider />
         <v-card-text>
           <div class="d-flex flex-wrap align-center ga-2 mb-3">
             <v-text-field v-model="searchQuery" class="flex-grow-1" variant="outlined" density="comfortable" hide-details prepend-inner-icon="mdi-magnify" label="Search patient, visit_id, request_id" />
@@ -1772,7 +2219,9 @@ function updateVerifiedAt(value: string | null): void {
         </v-card-text>
       </v-card>
     </div>
-    <v-dialog v-model="workflowDialog" max-width="1380" transition="dialog-bottom-transition" scrollable>
+    <ModuleActivityLogs module="laboratory" title="Module Activity Logs" :per-page="8" />
+
+    <v-dialog :model-value="workflowDialog" max-width="1380" transition="dialog-bottom-transition" scrollable @update:model-value="onWorkflowDialogModelUpdate">
       <v-card class="workflow-dialog-card">
         <v-card-item class="workflow-header">
           <v-card-title>
@@ -1787,7 +2236,7 @@ function updateVerifiedAt(value: string | null): void {
               <v-chip v-if="activeWorkflow" size="small" :color="statusChipColor(activeWorkflow.status)" variant="tonal">{{ activeWorkflow.status }}</v-chip>
               <v-btn icon="mdi-printer" variant="text" :disabled="!canExport" @click="onPrintReport" />
               <v-btn icon="mdi-file-download-outline" variant="text" :disabled="!canExport" @click="onDownloadReport" />
-              <v-btn icon="mdi-close" variant="text" @click="workflowDialog = false" />
+              <v-btn icon="mdi-close" variant="text" @click="() => void closeWorkflowDialog()" />
             </div>
           </template>
         </v-card-item>
@@ -1878,13 +2327,24 @@ function updateVerifiedAt(value: string | null): void {
                               variant="outlined"
                               density="comfortable"
                               :error-messages="encodeErrors[field.key] ? [encodeErrors[field.key]] : []"
-                              @update:model-value="(value) => (encodeForm[field.key] = String(value ?? ''))"
+                              @update:model-value="(value) => setEncodeFieldValue(field.key, value)"
                             />
-                            <v-text-field v-else v-model="encodeForm[field.key]" :label="`${field.label}${field.required ? ' *' : ''}${field.unit ? ` (${field.unit})` : ''}`" :type="field.type === 'number' ? 'number' : 'text'" variant="outlined" density="comfortable" :error-messages="encodeErrors[field.key] ? [encodeErrors[field.key]] : []" :hint="field.min != null || field.max != null ? `Range: ${field.min ?? '-'} to ${field.max ?? '-'}` : undefined" persistent-hint />
+                            <v-text-field
+                              v-else
+                              :model-value="String(encodeForm[field.key] ?? '')"
+                              :label="`${field.label}${field.required ? ' *' : ''}${field.unit ? ` (${field.unit})` : ''}`"
+                              :type="field.type === 'number' ? 'number' : 'text'"
+                              variant="outlined"
+                              density="comfortable"
+                              :error-messages="encodeErrors[field.key] ? [encodeErrors[field.key]] : []"
+                              :hint="field.min != null || field.max != null ? `Range: ${field.min ?? '-'} to ${field.max ?? '-'}` : undefined"
+                              persistent-hint
+                              @update:model-value="(value) => setEncodeFieldValue(field.key, value)"
+                            />
                           </v-col>
                           <v-col cols="12">
                             <v-textarea
-                              v-model="activeWorkflow.resultReferenceRange"
+                              :model-value="activeWorkflow.resultReferenceRange"
                               label="Result Reference Range *"
                               variant="outlined"
                               density="comfortable"
@@ -1892,16 +2352,18 @@ function updateVerifiedAt(value: string | null): void {
                               hint="Include expected normal ranges and interpretation guidance."
                               persistent-hint
                               :error-messages="encodeErrors.resultReferenceRange ? [encodeErrors.resultReferenceRange] : []"
+                              @update:model-value="(value) => onReferenceRangeChange(value == null ? '' : String(value))"
                             />
                           </v-col>
                           <v-col cols="12" md="6">
                             <v-select
-                              v-model="activeWorkflow.verifiedBy"
+                              :model-value="activeWorkflow.verifiedBy"
                               :items="labStaffOptions"
                               label="Verified By *"
                               variant="outlined"
                               density="comfortable"
                               :error-messages="encodeErrors.verifiedBy ? [encodeErrors.verifiedBy] : []"
+                              @update:model-value="(value) => onVerifiedByChange(value == null ? '' : String(value))"
                             />
                           </v-col>
                           <v-col cols="12" md="6">
@@ -1913,9 +2375,14 @@ function updateVerifiedAt(value: string | null): void {
                             />
                           </v-col>
                         </v-row>
-                        <div class="d-flex justify-space-between mt-4 flex-wrap ga-2">
-                          <v-btn class="saas-btn saas-btn-ghost" :loading="workflowBusy && pendingAction === 'save_draft'" :disabled="workflowBusy" @click="onSaveDraft">Save Draft</v-btn>
-                          <v-btn class="saas-btn saas-btn-primary" :loading="workflowBusy && pendingAction === 'finalize'" :disabled="workflowBusy || !canFinalize" @click="onFinalizeResult">Finalize Result</v-btn>
+                        <div class="d-flex justify-space-between align-center mt-4 flex-wrap ga-2">
+                          <div class="text-caption text-medium-emphasis">
+                            {{ formatAutosavedAt(lastAutosavedAt) }}
+                          </div>
+                          <div class="d-flex ga-2">
+                            <v-btn class="saas-btn saas-btn-ghost" :loading="workflowBusy && pendingAction === 'save_draft'" :disabled="workflowBusy" @click="onSaveDraft">Save Draft</v-btn>
+                            <v-btn class="saas-btn saas-btn-primary" :loading="workflowBusy && pendingAction === 'finalize'" :disabled="workflowBusy || !canFinalize" @click="onFinalizeResult">Finalize Result</v-btn>
+                          </div>
                         </div>
                       </v-window-item>
 

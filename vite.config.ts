@@ -411,6 +411,95 @@ async function ensureLaboratoryTables(sql: ReturnType<typeof neon>): Promise<voi
   await sql.query(`CREATE INDEX IF NOT EXISTS idx_lab_logs_request ON laboratory_activity_logs(request_id, created_at DESC)`);
 }
 
+async function ensureDoctorAvailabilityTables(sql: ReturnType<typeof neon>): Promise<void> {
+  await ensureDoctorsTable(sql);
+  await sql.query(`
+    CREATE TABLE IF NOT EXISTS doctor_availability (
+      id BIGSERIAL PRIMARY KEY,
+      doctor_name VARCHAR(120) NOT NULL,
+      department_name VARCHAR(120) NOT NULL,
+      day_of_week SMALLINT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+      start_time TIME NOT NULL,
+      end_time TIME NOT NULL,
+      max_appointments INT NOT NULL DEFAULT 8 CHECK (max_appointments > 0),
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      UNIQUE (doctor_name, department_name, day_of_week, start_time, end_time)
+    )
+  `);
+  await sql.query(`CREATE INDEX IF NOT EXISTS idx_doctor_availability_lookup ON doctor_availability(doctor_name, department_name, day_of_week, is_active)`);
+
+  await sql.query(
+    `INSERT INTO doctor_availability (doctor_name, department_name, day_of_week, start_time, end_time, max_appointments, is_active)
+     VALUES
+       ('Dr. Humour', 'General Medicine', 1, '08:00', '12:00', 8, TRUE),
+       ('Dr. Humour', 'General Medicine', 3, '08:00', '12:00', 8, TRUE),
+       ('Dr. Jenni', 'General Medicine', 2, '13:00', '17:00', 8, TRUE),
+       ('Dr. Jenni', 'General Medicine', 4, '13:00', '17:00', 8, TRUE),
+       ('Dr. Rivera', 'Pediatrics', 1, '09:00', '13:00', 10, TRUE),
+       ('Dr. Rivera', 'Pediatrics', 3, '09:00', '13:00', 10, TRUE),
+       ('Dr. Morco', 'Orthopedic', 2, '09:00', '12:00', 6, TRUE),
+       ('Dr. Martinez', 'Orthopedic', 4, '09:00', '12:00', 6, TRUE),
+       ('Dr. Santos', 'Dental', 1, '10:00', '15:00', 10, TRUE),
+       ('Dr. Lim', 'Dental', 3, '10:00', '15:00', 10, TRUE),
+       ('Dr. A. Rivera', 'Laboratory', 2, '08:00', '11:00', 5, TRUE),
+       ('Dr. S. Villaraza', 'Mental Health', 5, '13:00', '18:00', 8, TRUE),
+       ('Dr. B. Martinez', 'Check-Up', 2, '08:00', '12:00', 8, TRUE),
+       ('Dr. B. Martinez', 'Check-Up', 5, '08:00', '12:00', 8, TRUE)
+     ON CONFLICT (doctor_name, department_name, day_of_week, start_time, end_time) DO NOTHING`
+  );
+}
+
+async function ensureDoctorsTable(sql: ReturnType<typeof neon>): Promise<void> {
+  await sql.query(`
+    CREATE TABLE IF NOT EXISTS doctors (
+      id BIGSERIAL PRIMARY KEY,
+      doctor_name VARCHAR(120) NOT NULL UNIQUE,
+      department_name VARCHAR(120) NOT NULL,
+      specialization VARCHAR(160) NULL,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `);
+  await sql.query(`CREATE INDEX IF NOT EXISTS idx_doctors_department ON doctors(department_name, is_active)`);
+
+  await sql.query(`
+    INSERT INTO doctors (doctor_name, department_name, specialization, is_active)
+    VALUES
+      ('Dr. Humour', 'General Medicine', 'Internal Medicine', TRUE),
+      ('Dr. Jenni', 'General Medicine', 'General Medicine', TRUE),
+      ('Dr. Rivera', 'Pediatrics', 'Pediatrics', TRUE),
+      ('Dr. Morco', 'Orthopedic', 'Orthopedics', TRUE),
+      ('Dr. Martinez', 'Orthopedic', 'Orthopedics', TRUE),
+      ('Dr. Santos', 'Dental', 'Dentistry', TRUE),
+      ('Dr. Lim', 'Dental', 'Dentistry', TRUE),
+      ('Dr. A. Rivera', 'Laboratory', 'Pathology', TRUE),
+      ('Dr. S. Villaraza', 'Mental Health', 'Psychiatry', TRUE),
+      ('Dr. B. Martinez', 'Check-Up', 'General Practice', TRUE)
+    ON CONFLICT (doctor_name) DO NOTHING
+  `);
+}
+
+async function ensureModuleActivityLogsTable(sql: ReturnType<typeof neon>): Promise<void> {
+  await sql.query(`
+    CREATE TABLE IF NOT EXISTS module_activity_logs (
+      id BIGSERIAL PRIMARY KEY,
+      module VARCHAR(60) NOT NULL,
+      action VARCHAR(120) NOT NULL,
+      detail TEXT NOT NULL,
+      actor VARCHAR(120) NOT NULL DEFAULT 'System',
+      entity_type VARCHAR(60) NULL,
+      entity_key VARCHAR(120) NULL,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `);
+  await sql.query(`CREATE INDEX IF NOT EXISTS idx_module_activity_recent ON module_activity_logs(created_at DESC)`);
+  await sql.query(`CREATE INDEX IF NOT EXISTS idx_module_activity_module ON module_activity_logs(module, created_at DESC)`);
+}
+
 async function ensureAdminProfileTables(sql: ReturnType<typeof neon>): Promise<void> {
   await sql.query(`
     CREATE TABLE IF NOT EXISTS admin_profiles (
@@ -419,6 +508,8 @@ async function ensureAdminProfileTables(sql: ReturnType<typeof neon>): Promise<v
       full_name VARCHAR(190) NOT NULL,
       email VARCHAR(190) NOT NULL,
       role VARCHAR(80) NOT NULL DEFAULT 'admin',
+      department VARCHAR(120) NOT NULL DEFAULT 'Administration',
+      access_exemptions TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
       is_super_admin BOOLEAN NOT NULL DEFAULT FALSE,
       password_hash TEXT NULL,
       status VARCHAR(30) NOT NULL DEFAULT 'active',
@@ -445,6 +536,8 @@ async function ensureAdminProfileTables(sql: ReturnType<typeof neon>): Promise<v
 
   await sql.query(`ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN NOT NULL DEFAULT FALSE`);
   await sql.query(`ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS password_hash TEXT NULL`);
+  await sql.query(`ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS department VARCHAR(120) NOT NULL DEFAULT 'Administration'`);
+  await sql.query(`ALTER TABLE admin_profiles ADD COLUMN IF NOT EXISTS access_exemptions TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]`);
   await sql.query(`CREATE INDEX IF NOT EXISTS idx_admin_profiles_role ON admin_profiles(role)`);
 
   await sql.query(`
@@ -461,24 +554,7 @@ async function ensureAdminProfileTables(sql: ReturnType<typeof neon>): Promise<v
   `);
   await sql.query(`CREATE INDEX IF NOT EXISTS idx_admin_sessions_profile ON admin_sessions(admin_profile_id, expires_at DESC)`);
 
-  const existingRows = (await sql.query(`SELECT COUNT(*)::int AS total FROM admin_profiles`)) as Array<{ total: number }>;
-  if (!Number(existingRows[0]?.total || 0)) {
-    await sql.query(
-      `INSERT INTO admin_profiles (username, full_name, email, role, is_super_admin, password_hash, status, phone)
-       VALUES ('joecelgarcia1@gmail.com', 'Nexora Admin', 'joecelgarcia1@gmail.com', 'admin', TRUE, $1, 'active', '+63 912 345 6789')
-       ON CONFLICT (username) DO NOTHING`
-      ,
-      [hashPatientPassword('Admin#123')]
-    );
-  }
-
-  await sql.query(
-    `UPDATE admin_profiles
-     SET password_hash = COALESCE(NULLIF(password_hash, ''), $1),
-         is_super_admin = COALESCE(is_super_admin, FALSE)
-     WHERE LOWER(username) = 'joecelgarcia1@gmail.com'`,
-    [hashPatientPassword('Admin#123')]
-  );
+  // Account seeding is managed via SQL seed files, not hardcoded in runtime.
 }
 
 async function ensurePatientMasterTables(sql: ReturnType<typeof neon>): Promise<void> {
@@ -594,6 +670,9 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
           url.pathname !== '/api/laboratory' &&
           url.pathname !== '/api/pharmacy' &&
           url.pathname !== '/api/mental-health' &&
+          url.pathname !== '/api/doctors' &&
+          url.pathname !== '/api/doctor-availability' &&
+          url.pathname !== '/api/module-activity' &&
           url.pathname !== '/api/patients' &&
           url.pathname !== '/api/reports' &&
           url.pathname !== '/api/dashboard' &&
@@ -643,12 +722,198 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
           return parsed.toISOString().slice(0, 10);
         };
 
+        const toActionLabel = (value: string): string => {
+          const raw = toSafeText(value);
+          if (!raw) return 'Action';
+          return raw
+            .replace(/[_-]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/\b\w/g, (ch) => ch.toUpperCase());
+        };
+
+        async function insertModuleActivity(
+          moduleName: string,
+          action: string,
+          detail: string,
+          actor: string,
+          entityType: string | null = null,
+          entityKey: string | null = null,
+          metadata: Record<string, unknown> = {}
+        ): Promise<void> {
+          await ensureModuleActivityLogsTable(sql);
+          await sql.query(
+            `INSERT INTO module_activity_logs (module, action, detail, actor, entity_type, entity_key, metadata)
+             VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
+            [
+              toSafeText(moduleName) || 'general',
+              toSafeText(action) || 'Action',
+              toSafeText(detail) || 'No detail',
+              toSafeText(actor) || 'System',
+              entityType ? toSafeText(entityType) : null,
+              entityKey ? toSafeText(entityKey) : null,
+              JSON.stringify(metadata || {})
+            ]
+          );
+        }
+
+        async function getDoctorAvailabilitySnapshot(
+          doctorName: string,
+          departmentName: string,
+          appointmentDate: string,
+          preferredTime: string,
+          excludeBookingId: string | null = null
+        ): Promise<{
+          isDoctorAvailable: boolean;
+          reason: string;
+          scheduleRows: Array<{ id: number; start_time: string; end_time: string; max_appointments: number }>;
+          slots: Array<{ id: number; startTime: string; endTime: string; maxAppointments: number; bookedAppointments: number; remainingAppointments: number; isOpen: boolean }>;
+          recommendedTimes: string[];
+        }> {
+          await ensureDoctorAvailabilityTables(sql);
+          await ensurePatientAppointmentsTable(sql);
+
+          const targetDate = toSafeIsoDate(appointmentDate);
+          if (!targetDate) {
+            return {
+              isDoctorAvailable: false,
+              reason: 'Invalid appointment date.',
+              scheduleRows: [],
+              slots: [],
+              recommendedTimes: []
+            };
+          }
+
+          const normalizedDoctor = toSafeText(doctorName);
+          const normalizedDepartment = toSafeText(departmentName);
+          if (!normalizedDoctor || !normalizedDepartment) {
+            return {
+              isDoctorAvailable: false,
+              reason: 'Doctor and department are required.',
+              scheduleRows: [],
+              slots: [],
+              recommendedTimes: []
+            };
+          }
+
+          const dayRows = (await sql.query(
+            `SELECT id, start_time::text AS start_time, end_time::text AS end_time, max_appointments
+             FROM doctor_availability
+             WHERE LOWER(doctor_name) = LOWER($1)
+               AND LOWER(department_name) = LOWER($2)
+               AND day_of_week = EXTRACT(DOW FROM $3::date)
+               AND is_active = TRUE
+             ORDER BY start_time ASC`,
+            [normalizedDoctor, normalizedDepartment, targetDate]
+          )) as Array<{ id: number; start_time: string; end_time: string; max_appointments: number }>;
+
+          if (!dayRows.length) {
+            return {
+              isDoctorAvailable: false,
+              reason: `${normalizedDoctor} has no active schedule for ${targetDate}.`,
+              scheduleRows: [],
+              slots: [],
+              recommendedTimes: []
+            };
+          }
+
+          const slotRows: Array<{ id: number; start_time: string; end_time: string; max_appointments: number; booked_count: number }> = [];
+          for (const row of dayRows) {
+            const counts = (await sql.query(
+              `SELECT COUNT(*)::int AS total
+               FROM patient_appointments
+               WHERE LOWER(doctor_name) = LOWER($1)
+                 AND appointment_date = $2::date
+                 AND COALESCE(preferred_time, '') >= $3
+                 AND COALESCE(preferred_time, '') < $4
+                 AND LOWER(COALESCE(status, '')) <> 'canceled'
+                 AND ($5::text IS NULL OR booking_id <> $5::text)`,
+              [normalizedDoctor, targetDate, row.start_time.slice(0, 5), row.end_time.slice(0, 5), excludeBookingId || null]
+            )) as Array<{ total: number }>;
+            slotRows.push({
+              id: Number(row.id),
+              start_time: String(row.start_time || '').slice(0, 5),
+              end_time: String(row.end_time || '').slice(0, 5),
+              max_appointments: Number(row.max_appointments || 0),
+              booked_count: Number(counts[0]?.total || 0)
+            });
+          }
+
+          const slots = slotRows.map((slot) => {
+            const remaining = Math.max(0, Number(slot.max_appointments || 0) - Number(slot.booked_count || 0));
+            return {
+              id: slot.id,
+              startTime: slot.start_time,
+              endTime: slot.end_time,
+              maxAppointments: Number(slot.max_appointments || 0),
+              bookedAppointments: Number(slot.booked_count || 0),
+              remainingAppointments: remaining,
+              isOpen: remaining > 0
+            };
+          });
+
+          const recommendedTimes: string[] = [];
+          for (const slot of slots) {
+            if (!slot.isOpen) continue;
+            const [hh, mm] = slot.startTime.split(':').map((x) => Number(x || 0));
+            let pointer = hh * 60 + mm;
+            const [endH, endM] = slot.endTime.split(':').map((x) => Number(x || 0));
+            const endPointer = endH * 60 + endM;
+            while (pointer < endPointer && recommendedTimes.length < 24) {
+              const h = Math.floor(pointer / 60);
+              const m = pointer % 60;
+              recommendedTimes.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
+              pointer += 30;
+            }
+          }
+
+          const normalizedPreferred = toSafeText(preferredTime).slice(0, 5);
+          if (normalizedPreferred) {
+            const matched = slots.find((slot) => normalizedPreferred >= slot.startTime && normalizedPreferred < slot.endTime);
+            if (!matched) {
+              return {
+                isDoctorAvailable: false,
+                reason: `Preferred time ${normalizedPreferred} is outside the doctor's schedule.`,
+                scheduleRows: dayRows,
+                slots,
+                recommendedTimes
+              };
+            }
+            if (!matched.isOpen) {
+              return {
+                isDoctorAvailable: false,
+                reason: `Doctor schedule is full for the ${matched.startTime}-${matched.endTime} slot.`,
+                scheduleRows: dayRows,
+                slots,
+                recommendedTimes
+              };
+            }
+          } else if (!slots.some((slot) => slot.isOpen)) {
+            return {
+              isDoctorAvailable: false,
+              reason: `No remaining doctor slots for ${targetDate}.`,
+              scheduleRows: dayRows,
+              slots,
+              recommendedTimes
+            };
+          }
+
+          return {
+            isDoctorAvailable: true,
+            reason: 'Doctor is available.',
+            scheduleRows: dayRows,
+            slots,
+            recommendedTimes
+          };
+        }
+
         async function insertPharmacyLog(action: string, detail: string, actor: string, tone: 'success' | 'warning' | 'info' | 'error' = 'info'): Promise<void> {
           await sql.query(
             `INSERT INTO pharmacy_activity_logs (action, detail, actor, tone)
              VALUES ($1, $2, $3, $4)`,
             [action, detail, actor, tone]
           );
+          await insertModuleActivity('pharmacy', action, detail, actor, 'pharmacy', null, { tone });
         }
 
         async function insertPharmacyMovement(
@@ -825,6 +1090,8 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                 full_name: string;
                 email: string;
                 role: string;
+                department: string;
+                access_exemptions: string[] | null;
                 is_super_admin: boolean;
                 status: string;
               }
@@ -833,7 +1100,7 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
             if (!adminSessionTokenHash) return null;
             await ensureAdminProfileTables(sql);
             const rows = (await sql.query(
-              `SELECT s.admin_profile_id, a.username, a.full_name, a.email, a.role, a.is_super_admin, a.status
+              `SELECT s.admin_profile_id, a.username, a.full_name, a.email, a.role, a.department, a.access_exemptions, a.is_super_admin, a.status
                FROM admin_sessions s
                JOIN admin_profiles a ON a.id = s.admin_profile_id
                WHERE s.session_token_hash = $1
@@ -848,11 +1115,138 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
               full_name: string;
               email: string;
               role: string;
+              department: string;
+              access_exemptions: string[] | null;
               is_super_admin: boolean;
               status: string;
             }>;
             return rows[0] || null;
           };
+
+          const resolveModuleAccessForAdmin = (session: NonNullable<Awaited<ReturnType<typeof resolveAdminSession>>>): string[] => {
+            const role = String(session.role || '').toLowerCase();
+            const department = String(session.department || '').toLowerCase();
+            const normalizeModule = (value: string): string | null => {
+              const raw = String(value || '').trim().toLowerCase();
+              if (!raw) return null;
+              if (raw === 'appointments' || raw === 'appointment') return 'appointments';
+              if (raw === 'patients' || raw === 'patient' || raw === 'patients_database') return 'patients';
+              if (raw === 'registration' || raw === 'registrations') return 'registration';
+              if (raw === 'walkin' || raw === 'walk-in' || raw === 'walk_in') return 'walkin';
+              if (raw === 'checkup' || raw === 'check-up' || raw === 'check_up') return 'checkup';
+              if (raw === 'laboratory' || raw === 'lab') return 'laboratory';
+              if (raw === 'pharmacy' || raw === 'pharmacy_inventory' || raw === 'pharmacy-inventory') return 'pharmacy';
+              if (raw === 'mental_health' || raw === 'mental-health' || raw === 'mentalhealth') return 'mental_health';
+              if (raw === 'reports' || raw === 'report') return 'reports';
+              return null;
+            };
+            if (session.is_super_admin || role === 'admin') {
+              return ['appointments', 'patients', 'registration', 'walkin', 'checkup', 'laboratory', 'pharmacy', 'mental_health', 'reports'];
+            }
+            const allowed = new Set<string>();
+            if (department.includes('appoint')) allowed.add('appointments');
+            if (department.includes('patient')) allowed.add('patients');
+            if (department.includes('registr')) allowed.add('registration');
+            if (department.includes('walk')) allowed.add('walkin');
+            if (department.includes('check')) allowed.add('checkup');
+            if (department.includes('laboratory') || department === 'lab') allowed.add('laboratory');
+            if (department.includes('pharmacy')) allowed.add('pharmacy');
+            if (department.includes('mental')) allowed.add('mental_health');
+            if (department.includes('report') || department.includes('finance')) allowed.add('reports');
+
+            if (role.includes('appoint')) allowed.add('appointments');
+            if (role.includes('patient') || role.includes('record')) allowed.add('patients');
+            if (role.includes('registr')) allowed.add('registration');
+            if (role.includes('walk')) allowed.add('walkin');
+            if (role.includes('check') || role.includes('doctor')) allowed.add('checkup');
+            if (role.includes('lab')) allowed.add('laboratory');
+            if (role.includes('pharma')) allowed.add('pharmacy');
+            if (role.includes('mental') || role.includes('counsel')) allowed.add('mental_health');
+            if (role.includes('report') || role.includes('analyst') || role.includes('finance')) allowed.add('reports');
+
+            const exemptions = Array.isArray(session.access_exemptions) ? session.access_exemptions : [];
+            for (const exemption of exemptions) {
+              const moduleName = normalizeModule(exemption);
+              if (moduleName) {
+                allowed.add(moduleName);
+              }
+            }
+            return Array.from(allowed);
+          };
+
+          const moduleToApiPrefix: Record<string, string[]> = {
+            patients: ['/api/patients'],
+            registration: ['/api/registrations'],
+            walkin: ['/api/walk-ins'],
+            checkup: ['/api/checkups'],
+            laboratory: ['/api/laboratory'],
+            pharmacy: ['/api/pharmacy'],
+            mental_health: ['/api/mental-health'],
+            reports: ['/api/reports']
+          };
+
+          const isAdminProtectedApi = (path: string): boolean => {
+            return (
+              path === '/api/dashboard' ||
+              path === '/api/module-activity' ||
+              path === '/api/admin-profile' ||
+              Object.values(moduleToApiPrefix).flat().some((prefix) => path.startsWith(prefix))
+            );
+          };
+
+          const moduleFromPath = (path: string): string | null => {
+            for (const [moduleKey, prefixes] of Object.entries(moduleToApiPrefix)) {
+              if (prefixes.some((prefix) => path.startsWith(prefix))) {
+                return moduleKey;
+              }
+            }
+            return null;
+          };
+
+          const enforceAdminModuleAccess = async (): Promise<boolean> => {
+            if (!isAdminProtectedApi(url.pathname)) return true;
+            const session = await resolveAdminSession();
+            if (!session) {
+              writeJson(res, 401, { ok: false, message: 'Admin authentication required.' });
+              return false;
+            }
+            const allowedModules = resolveModuleAccessForAdmin(session);
+            if (session.is_super_admin || String(session.role || '').toLowerCase() === 'admin') {
+              return true;
+            }
+
+            if (url.pathname === '/api/dashboard' || url.pathname === '/api/admin-profile') {
+              return true;
+            }
+
+            if (url.pathname === '/api/module-activity') {
+              const requestedModule = String(url.searchParams.get('module') || '').trim().toLowerCase();
+              if (!requestedModule || requestedModule === 'all') {
+                if (!allowedModules.includes('reports')) {
+                  writeJson(res, 403, { ok: false, message: 'Access denied for module activity scope.' });
+                  return false;
+                }
+                return true;
+              }
+              if (!allowedModules.includes(requestedModule)) {
+                writeJson(res, 403, { ok: false, message: `Access denied for module: ${requestedModule}.` });
+                return false;
+              }
+              return true;
+            }
+
+            const targetModule = moduleFromPath(url.pathname);
+            if (!targetModule) return true;
+            if (!allowedModules.includes(targetModule)) {
+              writeJson(res, 403, { ok: false, message: `Access denied for ${targetModule} module.` });
+              return false;
+            }
+            return true;
+          };
+
+          if (!(await enforceAdminModuleAccess())) {
+            return;
+          }
 
           if (url.pathname === '/api/patient-auth' && (req.method || 'GET').toUpperCase() === 'GET') {
             await ensurePatientAuthTables(sql);
@@ -2246,6 +2640,7 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                  VALUES ($1, $2, $3, $4)`,
                 [id, name, detail, role]
               );
+              await insertModuleActivity('mental_health', name, detail, role, 'mental_session', id ? String(id) : null);
             };
 
             if (action === 'save_draft') {
@@ -2864,11 +3259,131 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
               writeJson(res, 422, { ok: false, message: 'Unsupported patients action.' });
               return;
             }
+            await insertModuleActivity(
+              'patients',
+              'Patient Master Sync Requested',
+              'Patient profile sync requested from modules.',
+              toSafeText(body.actor) || 'System',
+              'patient_master',
+              null
+            );
             writeJson(res, 200, { ok: true, message: 'Sync requested. Use GET /api/patients to refresh merged profiles.' });
             return;
           }
 
+          if (url.pathname === '/api/module-activity' && (req.method || 'GET').toUpperCase() === 'GET') {
+            await ensureModuleActivityLogsTable(sql);
+
+            const moduleFilter = toSafeText(url.searchParams.get('module')).toLowerCase();
+            const actorFilter = toSafeText(url.searchParams.get('actor'));
+            const search = toSafeText(url.searchParams.get('search'));
+            const page = Math.max(1, toSafeInt(url.searchParams.get('page'), 1));
+            const perPage = Math.min(100, Math.max(1, toSafeInt(url.searchParams.get('per_page'), 12)));
+            const offset = (page - 1) * perPage;
+
+            const where: string[] = [];
+            const params: unknown[] = [];
+            let idx = 1;
+
+            if (moduleFilter && moduleFilter !== 'all') {
+              params.push(moduleFilter);
+              where.push(`LOWER(module) = $${idx}`);
+              idx += 1;
+            }
+            if (actorFilter) {
+              params.push(`%${actorFilter}%`);
+              where.push(`actor ILIKE $${idx}`);
+              idx += 1;
+            }
+            if (search) {
+              params.push(`%${search}%`);
+              where.push(`(action ILIKE $${idx} OR detail ILIKE $${idx} OR COALESCE(entity_key, '') ILIKE $${idx})`);
+              idx += 1;
+            }
+
+            const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+            const totalRows = (await sql.query(
+              `SELECT COUNT(*)::int AS total FROM module_activity_logs ${whereSql}`,
+              params
+            )) as Array<{ total: number }>;
+            let total = Number(totalRows[0]?.total || 0);
+
+            let rows = await sql.query(
+              `SELECT id, module, action, detail, actor, entity_type, entity_key, metadata, created_at::text AS created_at
+               FROM module_activity_logs
+               ${whereSql}
+               ORDER BY created_at DESC
+               LIMIT $${idx} OFFSET $${idx + 1}`,
+              [...params, perPage, offset]
+            );
+
+            // Backward-compatible fallback: show laboratory activity logs even if
+            // module_activity_logs has not been populated yet.
+            if ((!Array.isArray(rows) || rows.length === 0) && moduleFilter === 'laboratory') {
+              await ensureLaboratoryTables(sql);
+
+              const fallbackWhere: string[] = [];
+              const fallbackParams: unknown[] = [];
+              let fallbackIdx = 1;
+
+              if (actorFilter) {
+                fallbackParams.push(`%${actorFilter}%`);
+                fallbackWhere.push(`l.actor ILIKE $${fallbackIdx}`);
+                fallbackIdx += 1;
+              }
+              if (search) {
+                fallbackParams.push(`%${search}%`);
+                fallbackWhere.push(`(l.action ILIKE $${fallbackIdx} OR l.details ILIKE $${fallbackIdx} OR l.request_id::text ILIKE $${fallbackIdx})`);
+                fallbackIdx += 1;
+              }
+
+              const fallbackWhereSql = fallbackWhere.length ? `WHERE ${fallbackWhere.join(' AND ')}` : '';
+
+              const fallbackTotalRows = (await sql.query(
+                `SELECT COUNT(*)::int AS total
+                 FROM laboratory_activity_logs l
+                 ${fallbackWhereSql}`,
+                fallbackParams
+              )) as Array<{ total: number }>;
+              total = Number(fallbackTotalRows[0]?.total || 0);
+
+              const fallbackRows = await sql.query(
+                `SELECT
+                   l.id,
+                   'laboratory'::text AS module,
+                   l.action,
+                   l.details AS detail,
+                   l.actor,
+                   'lab_request'::text AS entity_type,
+                   l.request_id::text AS entity_key,
+                   '{}'::jsonb AS metadata,
+                   l.created_at::text AS created_at
+                 FROM laboratory_activity_logs l
+                 ${fallbackWhereSql}
+                 ORDER BY l.created_at DESC
+                 LIMIT $${fallbackIdx} OFFSET $${fallbackIdx + 1}`,
+                [...fallbackParams, perPage, offset]
+              );
+              rows = Array.isArray(fallbackRows) ? fallbackRows : [];
+            }
+
+            writeJson(res, 200, {
+              ok: true,
+              data: {
+                items: Array.isArray(rows) ? rows : [],
+                meta: {
+                  page,
+                  perPage,
+                  total,
+                  totalPages: Math.max(1, Math.ceil(total / perPage))
+                }
+              }
+            });
+            return;
+          }
+
           if (url.pathname === '/api/reports' && (req.method || 'GET').toUpperCase() === 'GET') {
+            await ensureModuleActivityLogsTable(sql);
             const tableExists = async (tableName: string): Promise<boolean> => {
               const rows = (await sql.query(`SELECT to_regclass($1) AS reg`, [`public.${tableName}`])) as Array<{ reg: string | null }>;
               return Boolean(rows[0]?.reg);
@@ -2878,9 +3393,8 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
             const hasWalkins = await tableExists('patient_walkins');
             const hasCheckups = await tableExists('checkup_visits');
             const hasMentalSessions = await tableExists('mental_health_sessions');
-            const hasMentalActivity = await tableExists('mental_health_activity_logs');
             const hasPharmacyDispense = await tableExists('pharmacy_dispense_requests');
-            const hasPharmacyActivity = await tableExists('pharmacy_activity_logs');
+            const hasModuleActivity = await tableExists('module_activity_logs');
 
             const requestedFrom = toSafeIsoDate(url.searchParams.get('from'));
             const requestedTo = toSafeIsoDate(url.searchParams.get('to'));
@@ -3052,26 +3566,14 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
               'pharmacy'
             );
 
-            const activityLogs: Array<{ module: string; action: string; detail: string; actor: string; created_at: string }> = [];
-            if (hasMentalActivity) {
-              const rows = (await sql.query(
-                `SELECT 'mental_health'::text AS module, action, detail, actor_role AS actor, created_at::text AS created_at
-                 FROM mental_health_activity_logs
-                 ORDER BY created_at DESC
-                 LIMIT 8`
-              )) as Array<{ module: string; action: string; detail: string; actor: string; created_at: string }>;
-              activityLogs.push(...rows);
-            }
-            if (hasPharmacyActivity) {
-              const rows = (await sql.query(
-                `SELECT 'pharmacy'::text AS module, action, detail, actor, created_at::text AS created_at
-                 FROM pharmacy_activity_logs
-                 ORDER BY created_at DESC
-                 LIMIT 8`
-              )) as Array<{ module: string; action: string; detail: string; actor: string; created_at: string }>;
-              activityLogs.push(...rows);
-            }
-            activityLogs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+            const activityLogs: Array<{ module: string; action: string; detail: string; actor: string; created_at: string }> = hasModuleActivity
+              ? ((await sql.query(
+                  `SELECT module, action, detail, actor, created_at::text AS created_at
+                   FROM module_activity_logs
+                   ORDER BY created_at DESC
+                   LIMIT 20`
+                )) as Array<{ module: string; action: string; detail: string; actor: string; created_at: string }>)
+              : [];
 
             writeJson(res, 200, {
               ok: true,
@@ -3235,6 +3737,8 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                       fullName: session.full_name,
                       email: session.email,
                       role: session.role,
+                      department: session.department,
+                      accessExemptions: Array.isArray(session.access_exemptions) ? session.access_exemptions : [],
                       isSuperAdmin: Boolean(session.is_super_admin)
                     }
                   : null
@@ -3276,9 +3780,9 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
               }
 
               const rows = (await sql.query(
-                `SELECT id, username, full_name, email, role, is_super_admin, status, password_hash
+                `SELECT id, username, full_name, email, role, department, access_exemptions, is_super_admin, status, password_hash
                  FROM admin_profiles
-                 WHERE LOWER(username) = $1
+                 WHERE LOWER(username) = $1 OR LOWER(email) = $1
                  LIMIT 1`,
                 [username]
               )) as Array<{
@@ -3287,6 +3791,8 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                 full_name: string;
                 email: string;
                 role: string;
+                department: string;
+                access_exemptions: string[] | null;
                 is_super_admin: boolean;
                 status: string;
                 password_hash: string | null;
@@ -3324,6 +3830,8 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                     fullName: account.full_name,
                     email: account.email,
                     role: account.role,
+                    department: account.department,
+                    accessExemptions: Array.isArray(account.access_exemptions) ? account.access_exemptions : [],
                     isSuperAdmin: Boolean(account.is_super_admin)
                   }
                 }
@@ -3345,6 +3853,10 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
             const email = toSafeText(body.email).toLowerCase();
             const fullName = toSafeText(body.full_name);
             const role = toSafeText(body.role) || 'Admin';
+            const department = toSafeText(body.department) || 'Administration';
+            const accessExemptionsInput = Array.isArray(body.access_exemptions)
+              ? body.access_exemptions.map((value) => toSafeText(value).toLowerCase()).filter(Boolean)
+              : [];
             const phone = toSafeText(body.phone);
             const status = toSafeText(body.status) || 'active';
             const password = toSafeText(body.password);
@@ -3373,9 +3885,9 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
             }
 
             await sql.query(
-              `INSERT INTO admin_profiles (username, full_name, email, role, is_super_admin, password_hash, status, phone)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-              [username, fullName, email, role, isSuperAdmin, hashPatientPassword(password), status, phone]
+              `INSERT INTO admin_profiles (username, full_name, email, role, department, access_exemptions, is_super_admin, password_hash, status, phone)
+               VALUES ($1,$2,$3,$4,$5,$6::text[],$7,$8,$9,$10)`,
+              [username, fullName, email, role, department, accessExemptionsInput, isSuperAdmin, hashPatientPassword(password), status, phone]
             );
             await sql.query(
               `INSERT INTO admin_activity_logs (username, action, raw_action, description, ip_address)
@@ -3396,7 +3908,7 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
             const requestedUsername = toSafeText(url.searchParams.get('username')).toLowerCase();
             const username = requestedUsername && adminSession.is_super_admin ? requestedUsername : adminSession.username.toLowerCase();
             const profileRows = (await sql.query(
-              `SELECT username, full_name, email, role, is_super_admin, status, phone, created_at::text AS created_at, last_login_at::text AS last_login_at,
+              `SELECT username, full_name, email, role, department, is_super_admin, status, phone, created_at::text AS created_at, last_login_at::text AS last_login_at,
                       email_notifications, in_app_notifications, dark_mode
                FROM admin_profiles
                WHERE username = $1
@@ -3426,6 +3938,7 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                   username: String(profile.username || ''),
                   email: String(profile.email || ''),
                   role: String(profile.role || ''),
+                  department: String(profile.department || 'Administration'),
                   isSuperAdmin: Boolean(profile.is_super_admin),
                   status: String(profile.status || ''),
                   phone: String(profile.phone || ''),
@@ -3613,6 +4126,14 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                 `INSERT INTO laboratory_activity_logs (request_id, action, details, actor)
                  VALUES ($1, $2, $3, $4)`,
                 [requestId, actionLabel, details, actor || 'Lab Staff']
+              );
+              await insertModuleActivity(
+                'laboratory',
+                actionLabel,
+                details,
+                actor || 'Lab Staff',
+                'lab_request',
+                String(requestId)
               );
             };
 
@@ -3887,6 +4408,10 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
 
             const body = await readJsonBody(req);
             const action = String(body.action || '').trim().toLowerCase();
+            const actor = toSafeText(body.actor) || 'System';
+            const logWalkIn = async (actionLabel: string, detail: string, caseKey: string): Promise<void> => {
+              await insertModuleActivity('walkin', actionLabel, detail, actor, 'walkin_case', caseKey);
+            };
 
             if (action === 'create') {
               const patientName = String(body.patient_name || '').trim();
@@ -3937,6 +4462,8 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                   String(body.assigned_doctor || 'Nurse Triage').trim() || 'Nurse Triage'
                 ]
               );
+              const created = (Array.isArray(createdRows) ? createdRows[0] : null) as Record<string, unknown> | null;
+              await logWalkIn('Walk-In Created', `Walk-in case ${caseId} created for ${patientName}.`, toSafeText(created?.case_id || caseId));
               writeJson(res, 200, { ok: true, message: 'Walk-in created.', data: Array.isArray(createdRows) ? createdRows[0] : null });
               return;
             }
@@ -3970,6 +4497,8 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                  RETURNING id, case_id, patient_name, age, contact, chief_complaint, severity, intake_time, assigned_doctor, status`,
                 [id]
               );
+              const updated = (Array.isArray(rows) ? rows[0] : null) as Record<string, unknown> | null;
+              await logWalkIn('Patient Identified', 'Case moved to identified status.', toSafeText(updated?.case_id || id));
               writeJson(res, 200, { ok: true, data: Array.isArray(rows) ? rows[0] : null });
               return;
             }
@@ -3985,6 +4514,8 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                  RETURNING id, case_id, patient_name, age, contact, chief_complaint, severity, intake_time, assigned_doctor, status`,
                 [id]
               );
+              const updated = (Array.isArray(rows) ? rows[0] : null) as Record<string, unknown> | null;
+              await logWalkIn('Queued To Triage', 'Case queued for triage.', toSafeText(updated?.case_id || id));
               writeJson(res, 200, { ok: true, data: Array.isArray(rows) ? rows[0] : null });
               return;
             }
@@ -4001,6 +4532,8 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                  RETURNING id, case_id, patient_name, age, contact, chief_complaint, severity, intake_time, assigned_doctor, status`,
                 [id]
               );
+              const updated = (Array.isArray(rows) ? rows[0] : null) as Record<string, unknown> | null;
+              await logWalkIn('Triage Started', 'Case triage started.', toSafeText(updated?.case_id || id));
               writeJson(res, 200, { ok: true, data: Array.isArray(rows) ? rows[0] : null });
               return;
             }
@@ -4022,6 +4555,8 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                  RETURNING id, case_id, patient_name, age, contact, chief_complaint, severity, intake_time, assigned_doctor, status`,
                 [String(body.chief_complaint || '').trim() || null, severityValue, nextStatus, id]
               );
+              const updated = (Array.isArray(rows) ? rows[0] : null) as Record<string, unknown> | null;
+              await logWalkIn('Triage Saved', `Triage saved with severity ${severityValue}.`, toSafeText(updated?.case_id || id));
               writeJson(res, 200, { ok: true, data: Array.isArray(rows) ? rows[0] : null });
               return;
             }
@@ -4040,6 +4575,8 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                  RETURNING id, case_id, patient_name, age, contact, chief_complaint, severity, intake_time, assigned_doctor, status`,
                 [String(body.assigned_doctor || '').trim() || null, id]
               );
+              const updated = (Array.isArray(rows) ? rows[0] : null) as Record<string, unknown> | null;
+              await logWalkIn('Doctor Assigned', `Doctor assigned: ${toSafeText(body.assigned_doctor) || 'Unchanged'}.`, toSafeText(updated?.case_id || id));
               writeJson(res, 200, { ok: true, data: Array.isArray(rows) ? rows[0] : null });
               return;
             }
@@ -4055,6 +4592,8 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                  RETURNING id, case_id, patient_name, age, contact, chief_complaint, severity, intake_time, assigned_doctor, status`,
                 [id]
               );
+              const updated = (Array.isArray(rows) ? rows[0] : null) as Record<string, unknown> | null;
+              await logWalkIn('Case Completed', 'Walk-in case marked as completed.', toSafeText(updated?.case_id || id));
               writeJson(res, 200, { ok: true, data: Array.isArray(rows) ? rows[0] : null });
               return;
             }
@@ -4071,7 +4610,319 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                  RETURNING id, case_id, patient_name, age, contact, chief_complaint, severity, intake_time, assigned_doctor, status`,
                 [id]
               );
+              const updated = (Array.isArray(rows) ? rows[0] : null) as Record<string, unknown> | null;
+              await logWalkIn('Emergency Escalated', 'Case escalated to emergency queue.', toSafeText(updated?.case_id || id));
               writeJson(res, 200, { ok: true, data: Array.isArray(rows) ? rows[0] : null });
+              return;
+            }
+
+            writeJson(res, 422, { ok: false, message: 'Unsupported action.' });
+            return;
+          }
+
+          if (url.pathname === '/api/doctors' && (req.method || 'GET').toUpperCase() === 'GET') {
+            await ensureDoctorsTable(sql);
+            const departmentName = toSafeText(url.searchParams.get('department'));
+            const includeInactive = toSafeText(url.searchParams.get('include_inactive')).toLowerCase() === 'true';
+            const where: string[] = [];
+            const params: unknown[] = [];
+            let idx = 1;
+
+            if (departmentName) {
+              where.push(`LOWER(department_name) = LOWER($${idx})`);
+              params.push(departmentName);
+              idx += 1;
+            }
+            if (!includeInactive) {
+              where.push(`is_active = TRUE`);
+            }
+
+            const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+            const rows = await sql.query(
+              `SELECT id, doctor_name, department_name, specialization, is_active, created_at::text AS created_at, updated_at::text AS updated_at
+               FROM doctors
+               ${whereSql}
+               ORDER BY doctor_name ASC`,
+              params
+            );
+            writeJson(res, 200, { ok: true, data: Array.isArray(rows) ? rows : [] });
+            return;
+          }
+
+          if (url.pathname === '/api/doctors' && (req.method || '').toUpperCase() === 'POST') {
+            await ensureDoctorsTable(sql);
+            const body = await readJsonBody(req);
+            const action = toSafeText(body.action).toLowerCase() || 'upsert';
+            const actor = toSafeText(body.actor) || 'Admin';
+
+            if (action === 'upsert') {
+              const doctorName = toSafeText(body.doctor_name);
+              const departmentName = toSafeText(body.department_name);
+              const specialization = toSafeText(body.specialization) || null;
+              const isActive = body.is_active == null ? true : Boolean(body.is_active);
+              if (!doctorName || !departmentName) {
+                writeJson(res, 422, { ok: false, message: 'doctor_name and department_name are required.' });
+                return;
+              }
+
+              const rows = await sql.query(
+                `INSERT INTO doctors (doctor_name, department_name, specialization, is_active, updated_at)
+                 VALUES ($1, $2, $3, $4, NOW())
+                 ON CONFLICT (doctor_name)
+                 DO UPDATE SET
+                   department_name = EXCLUDED.department_name,
+                   specialization = EXCLUDED.specialization,
+                   is_active = EXCLUDED.is_active,
+                   updated_at = NOW()
+                 RETURNING id, doctor_name, department_name, specialization, is_active, created_at::text AS created_at, updated_at::text AS updated_at`,
+                [doctorName, departmentName, specialization, isActive]
+              );
+
+              await insertModuleActivity(
+                'doctors',
+                'Doctor Upserted',
+                `${doctorName} profile saved under ${departmentName}.`,
+                actor,
+                'doctor',
+                doctorName,
+                { departmentName, specialization, isActive }
+              );
+              writeJson(res, 200, { ok: true, message: 'Doctor saved successfully.', data: Array.isArray(rows) ? rows[0] : null });
+              return;
+            }
+
+            if (action === 'delete') {
+              const id = toSafeInt(body.id, 0);
+              if (!id) {
+                writeJson(res, 422, { ok: false, message: 'id is required.' });
+                return;
+              }
+              const rows = await sql.query(
+                `DELETE FROM doctors
+                 WHERE id = $1
+                 RETURNING id, doctor_name, department_name, specialization, is_active`,
+                [id]
+              );
+              if (!Array.isArray(rows) || !rows.length) {
+                writeJson(res, 404, { ok: false, message: 'Doctor not found.' });
+                return;
+              }
+              const removed = rows[0] as Record<string, unknown>;
+              await insertModuleActivity(
+                'doctors',
+                'Doctor Deleted',
+                `${toSafeText(removed.doctor_name)} was removed from doctor master list.`,
+                actor,
+                'doctor',
+                toSafeText(removed.doctor_name),
+                { id }
+              );
+              writeJson(res, 200, { ok: true, message: 'Doctor deleted.', data: removed });
+              return;
+            }
+
+            writeJson(res, 422, { ok: false, message: 'Unsupported action.' });
+            return;
+          }
+
+          if (url.pathname === '/api/doctor-availability' && (req.method || 'GET').toUpperCase() === 'GET') {
+            await ensureDoctorAvailabilityTables(sql);
+            const doctorName = toSafeText(url.searchParams.get('doctor'));
+            const departmentName = toSafeText(url.searchParams.get('department'));
+            const appointmentDate = toSafeText(url.searchParams.get('date'));
+            const preferredTime = toSafeText(url.searchParams.get('preferred_time'));
+            const mode = toSafeText(url.searchParams.get('mode')).toLowerCase();
+
+            if (mode === 'times') {
+              const targetDate = toSafeIsoDate(appointmentDate);
+              if (!targetDate) {
+                writeJson(res, 422, { ok: false, message: 'Valid date is required for mode=times.' });
+                return;
+              }
+              if (!departmentName) {
+                writeJson(res, 422, { ok: false, message: 'department is required for mode=times.' });
+                return;
+              }
+
+              const doctorRows = (await sql.query(
+                `SELECT doctor_name, department_name
+                 FROM doctors
+                 WHERE is_active = TRUE
+                   AND LOWER(department_name) = LOWER($1)
+                   AND ($2::text = '' OR LOWER(doctor_name) = LOWER($2))
+                 ORDER BY doctor_name ASC`,
+                [departmentName, doctorName || '']
+              )) as Array<{ doctor_name: string; department_name: string }>;
+
+              const doctorSnapshots = await Promise.all(
+                doctorRows.map(async (row) => {
+                  const snapshot = await getDoctorAvailabilitySnapshot(
+                    toSafeText(row.doctor_name),
+                    toSafeText(row.department_name),
+                    targetDate,
+                    ''
+                  );
+                  return {
+                    doctorName: toSafeText(row.doctor_name),
+                    departmentName: toSafeText(row.department_name),
+                    isDoctorAvailable: snapshot.isDoctorAvailable,
+                    reason: snapshot.reason,
+                    slots: snapshot.slots,
+                    recommendedTimes: snapshot.recommendedTimes
+                  };
+                })
+              );
+
+              const allowedTimes = Array.from(
+                new Set(
+                  doctorSnapshots
+                    .flatMap((item) => item.recommendedTimes || [])
+                    .map((value) => String(value || '').slice(0, 5))
+                    .filter((value) => /^\d{2}:\d{2}$/.test(value))
+                )
+              ).sort();
+
+              writeJson(res, 200, {
+                ok: true,
+                data: {
+                  appointmentDate: targetDate,
+                  departmentName,
+                  allowedTimes,
+                  doctors: doctorSnapshots
+                }
+              });
+              return;
+            }
+
+            if (appointmentDate && doctorName && departmentName && mode !== 'raw') {
+              const snapshot = await getDoctorAvailabilitySnapshot(doctorName, departmentName, appointmentDate, preferredTime);
+              writeJson(res, 200, {
+                ok: true,
+                data: {
+                  doctorName,
+                  departmentName,
+                  appointmentDate,
+                  isDoctorAvailable: snapshot.isDoctorAvailable,
+                  reason: snapshot.reason,
+                  slots: snapshot.slots,
+                  recommendedTimes: snapshot.recommendedTimes
+                }
+              });
+              return;
+            }
+
+            const where: string[] = [];
+            const params: unknown[] = [];
+            let idx = 1;
+            if (doctorName) {
+              params.push(doctorName.toLowerCase());
+              where.push(`LOWER(doctor_name) = $${idx}`);
+              idx += 1;
+            }
+            if (departmentName) {
+              params.push(departmentName.toLowerCase());
+              where.push(`LOWER(department_name) = $${idx}`);
+              idx += 1;
+            }
+            const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+            const rows = await sql.query(
+              `SELECT id, doctor_name, department_name, day_of_week, start_time::text AS start_time, end_time::text AS end_time, max_appointments, is_active, created_at::text AS created_at, updated_at::text AS updated_at
+               FROM doctor_availability
+               ${whereSql}
+               ORDER BY doctor_name ASC, department_name ASC, day_of_week ASC, start_time ASC`,
+              params
+            );
+            writeJson(res, 200, { ok: true, data: Array.isArray(rows) ? rows : [] });
+            return;
+          }
+
+          if (url.pathname === '/api/doctor-availability' && (req.method || '').toUpperCase() === 'POST') {
+            await ensureDoctorAvailabilityTables(sql);
+            await ensureDoctorsTable(sql);
+            const body = await readJsonBody(req);
+            const action = toSafeText(body.action).toLowerCase();
+            const actor = toSafeText(body.actor) || 'Admin';
+
+            if (action === 'upsert') {
+              const doctorName = toSafeText(body.doctor_name);
+              const departmentName = toSafeText(body.department_name);
+              const dayOfWeek = toSafeInt(body.day_of_week, -1);
+              const startTime = toSafeText(body.start_time).slice(0, 5);
+              const endTime = toSafeText(body.end_time).slice(0, 5);
+              const maxAppointments = Math.max(1, toSafeInt(body.max_appointments, 8));
+              const isActive = body.is_active == null ? true : Boolean(body.is_active);
+
+              if (!doctorName || !departmentName || dayOfWeek < 0 || dayOfWeek > 6 || !startTime || !endTime) {
+                writeJson(res, 422, { ok: false, message: 'doctor_name, department_name, day_of_week, start_time, end_time are required.' });
+                return;
+              }
+              if (startTime >= endTime) {
+                writeJson(res, 422, { ok: false, message: 'end_time must be later than start_time.' });
+                return;
+              }
+
+              await sql.query(
+                `INSERT INTO doctors (doctor_name, department_name, is_active, updated_at)
+                 VALUES ($1, $2, TRUE, NOW())
+                 ON CONFLICT (doctor_name)
+                 DO UPDATE SET
+                    department_name = EXCLUDED.department_name,
+                    updated_at = NOW()`,
+                [doctorName, departmentName]
+              );
+
+              const rows = await sql.query(
+                `INSERT INTO doctor_availability (doctor_name, department_name, day_of_week, start_time, end_time, max_appointments, is_active, updated_at)
+                 VALUES ($1,$2,$3,$4::time,$5::time,$6,$7,NOW())
+                 ON CONFLICT (doctor_name, department_name, day_of_week, start_time, end_time)
+                 DO UPDATE SET
+                    max_appointments = EXCLUDED.max_appointments,
+                    is_active = EXCLUDED.is_active,
+                    updated_at = NOW()
+                 RETURNING id, doctor_name, department_name, day_of_week, start_time::text AS start_time, end_time::text AS end_time, max_appointments, is_active, updated_at::text AS updated_at`,
+                [doctorName, departmentName, dayOfWeek, startTime, endTime, maxAppointments, isActive]
+              );
+
+              await insertModuleActivity(
+                'doctor_availability',
+                'Schedule Upserted',
+                `${doctorName} ${departmentName} schedule updated for day ${dayOfWeek} (${startTime}-${endTime}).`,
+                actor,
+                'doctor',
+                doctorName,
+                { departmentName, dayOfWeek, startTime, endTime, maxAppointments, isActive }
+              );
+              writeJson(res, 200, { ok: true, message: 'Doctor availability updated.', data: Array.isArray(rows) ? rows[0] : null });
+              return;
+            }
+
+            if (action === 'delete') {
+              const id = toSafeInt(body.id, 0);
+              if (!id) {
+                writeJson(res, 422, { ok: false, message: 'id is required.' });
+                return;
+              }
+              const rows = await sql.query(
+                `DELETE FROM doctor_availability
+                 WHERE id = $1
+                 RETURNING id, doctor_name, department_name, day_of_week, start_time::text AS start_time, end_time::text AS end_time, max_appointments, is_active`,
+                [id]
+              );
+              if (!Array.isArray(rows) || !rows.length) {
+                writeJson(res, 404, { ok: false, message: 'Schedule row not found.' });
+                return;
+              }
+              const deleted = rows[0] as Record<string, unknown>;
+              await insertModuleActivity(
+                'doctor_availability',
+                'Schedule Deleted',
+                `${toSafeText(deleted.doctor_name)} ${toSafeText(deleted.department_name)} schedule row removed.`,
+                actor,
+                'doctor',
+                toSafeText(deleted.doctor_name),
+                { id }
+              );
+              writeJson(res, 200, { ok: true, message: 'Doctor availability deleted.', data: deleted });
               return;
             }
 
@@ -4324,6 +5175,16 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
             }
 
             const updated = await sql.query(query, params);
+            const updatedRow = (Array.isArray(updated) ? updated[0] : null) as Record<string, unknown> | null;
+            await insertModuleActivity(
+              'checkup',
+              toActionLabel(action),
+              `Check-up action ${toActionLabel(action)} applied to visit ${toSafeText(updatedRow?.visit_id || id)}.`,
+              toSafeText(body.actor) || 'System',
+              'checkup_visit',
+              toSafeText(updatedRow?.visit_id || id),
+              { action, id }
+            );
             writeJson(res, 200, { ok: true, data: Array.isArray(updated) ? updated[0] : null });
             return;
           }
@@ -4392,6 +5253,15 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                   String(body.assigned_to || 'Unassigned').trim() || 'Unassigned'
                 ]
               );
+              const created = (Array.isArray(createdRows) ? createdRows[0] : null) as Record<string, unknown> | null;
+              await insertModuleActivity(
+                'registration',
+                'Registration Created',
+                `Registration ${toSafeText(created?.case_id || caseId)} created for ${patientName}.`,
+                toSafeText(body.actor) || 'System',
+                'registration',
+                toSafeText(created?.case_id || caseId)
+              );
 
               writeJson(res, 200, { ok: true, message: 'Registration created.', data: Array.isArray(createdRows) ? createdRows[0] : null });
               return;
@@ -4433,6 +5303,15 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                 writeJson(res, 404, { ok: false, message: 'Registration not found.' });
                 return;
               }
+              const updated = updatedRows[0] as Record<string, unknown>;
+              await insertModuleActivity(
+                'registration',
+                'Registration Updated',
+                `Registration ${toSafeText(updated.case_id || id)} updated.`,
+                toSafeText(body.actor) || 'System',
+                'registration',
+                toSafeText(updated.case_id || id)
+              );
 
               writeJson(res, 200, { ok: true, message: 'Registration updated.', data: updatedRows[0] });
               return;
@@ -4457,6 +5336,15 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                 writeJson(res, 404, { ok: false, message: 'Registration not found.' });
                 return;
               }
+              const approved = approvedRows[0] as Record<string, unknown>;
+              await insertModuleActivity(
+                'registration',
+                action === 'approve' ? 'Registration Approved' : 'Registration Status Updated',
+                `Registration ${toSafeText(approved.case_id || id)} status set to ${targetStatus}.`,
+                toSafeText(body.actor) || 'System',
+                'registration',
+                toSafeText(approved.case_id || id)
+              );
 
               writeJson(res, 200, { ok: true, message: `Registration status updated to ${targetStatus}.`, data: approvedRows[0] });
               return;
@@ -4486,6 +5374,15 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                 writeJson(res, 404, { ok: false, message: 'Registration not found.' });
                 return;
               }
+              const updated = updatedRows[0] as Record<string, unknown>;
+              await insertModuleActivity(
+                'registration',
+                'Registration Assigned',
+                `Registration ${toSafeText(updated.case_id || id)} assigned to ${assignedTo}.`,
+                toSafeText(body.actor) || 'System',
+                'registration',
+                toSafeText(updated.case_id || id)
+              );
 
               writeJson(res, 200, { ok: true, message: 'Registration reassigned.', data: updatedRows[0] });
               return;
@@ -4522,6 +5419,15 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
               );
 
               const actionMessage = action === 'reject' ? 'Registration rejected.' : 'Registration archived.';
+              const updated = (Array.isArray(updatedRows) ? updatedRows[0] : null) as Record<string, unknown> | null;
+              await insertModuleActivity(
+                'registration',
+                action === 'reject' ? 'Registration Rejected' : 'Registration Archived',
+                `${action === 'reject' ? 'Rejected' : 'Archived'} registration ${toSafeText(updated?.case_id || id)}. Reason: ${reason}`,
+                toSafeText(body.actor) || 'System',
+                'registration',
+                toSafeText(updated?.case_id || id)
+              );
               writeJson(res, 200, { ok: true, message: actionMessage, data: Array.isArray(updatedRows) ? updatedRows[0] : null });
               return;
             }
@@ -4688,6 +5594,11 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                 writeJson(res, 422, { ok: false, message: 'Invalid appointment status.' });
                 return;
               }
+              const availability = await getDoctorAvailabilitySnapshot(doctorName, departmentName, appointmentDate, preferredTime);
+              if (!availability.isDoctorAvailable) {
+                writeJson(res, 422, { ok: false, message: availability.reason });
+                return;
+              }
 
               const now = new Date();
               const yyyy = now.getFullYear();
@@ -4775,12 +5686,41 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
                 message: 'Appointment created.',
                 data: Array.isArray(createdRows) ? createdRows[0] : null
               });
+              const created = (Array.isArray(createdRows) ? createdRows[0] : null) as Record<string, unknown> | null;
+              await insertModuleActivity(
+                'appointments',
+                'Appointment Created',
+                `Created appointment ${toSafeText(created?.booking_id || bookingId)} for ${patientName} with ${doctorName}.`,
+                toSafeText(body.actor) || 'System',
+                'appointment',
+                toSafeText(created?.booking_id || bookingId),
+                { doctorName, departmentName, appointmentDate, preferredTime: preferredTime || null, status }
+              );
               return;
             }
 
             const bookingId = String(body.booking_id || '').trim();
             if (!bookingId) {
               writeJson(res, 422, { ok: false, message: 'booking_id is required.' });
+              return;
+            }
+
+            const existingRows = (await sql.query(
+              `SELECT booking_id, doctor_name, department_name, appointment_date::text AS appointment_date, preferred_time
+               FROM patient_appointments
+               WHERE booking_id = $1
+               LIMIT 1`,
+              [bookingId]
+            )) as Array<{
+              booking_id: string;
+              doctor_name: string;
+              department_name: string;
+              appointment_date: string;
+              preferred_time: string | null;
+            }>;
+            const existingAppointment = existingRows[0];
+            if (!existingAppointment) {
+              writeJson(res, 404, { ok: false, message: 'Appointment not found.' });
               return;
             }
 
@@ -4820,6 +5760,25 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
             if (!setParts.length) {
               writeJson(res, 422, { ok: false, message: 'No fields to update.' });
               return;
+            }
+
+            const nextDoctorName = 'doctor_name' in body ? toSafeText(body.doctor_name) : toSafeText(existingAppointment.doctor_name);
+            const nextDepartmentName = 'department_name' in body ? toSafeText(body.department_name) : toSafeText(existingAppointment.department_name);
+            const nextAppointmentDate = 'appointment_date' in body ? toSafeText(body.appointment_date) : toSafeText(existingAppointment.appointment_date);
+            const nextPreferredTime = 'preferred_time' in body ? toSafeText(body.preferred_time) : toSafeText(existingAppointment.preferred_time);
+            const nextStatus = 'status' in body ? toSafeText(body.status).toLowerCase() : '';
+            if (nextStatus !== 'canceled') {
+              const availability = await getDoctorAvailabilitySnapshot(
+                nextDoctorName,
+                nextDepartmentName,
+                nextAppointmentDate,
+                nextPreferredTime,
+                bookingId
+              );
+              if (!availability.isDoctorAvailable) {
+                writeJson(res, 422, { ok: false, message: availability.reason });
+                return;
+              }
             }
 
             values.push(bookingId);
@@ -4863,6 +5822,20 @@ function neonAppointmentsApiPlugin(databaseUrl?: string): Plugin {
               message: 'Appointment updated.',
               data: updatedRows[0]
             });
+            await insertModuleActivity(
+              'appointments',
+              'Appointment Updated',
+              `Updated appointment ${bookingId}.`,
+              toSafeText(body.actor) || 'System',
+              'appointment',
+              bookingId,
+              {
+                doctorName: nextDoctorName || null,
+                departmentName: nextDepartmentName || null,
+                appointmentDate: nextAppointmentDate || null,
+                preferredTime: nextPreferredTime || null
+              }
+            );
             return;
           }
 

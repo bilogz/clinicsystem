@@ -12,7 +12,24 @@ type PollOptions = {
   immediate?: boolean;
   pauseWhenHidden?: boolean;
   refreshOnVisible?: boolean;
+  pauseWhenDialogOpen?: boolean;
 };
+
+const REALTIME_REFRESH_EVENT = 'clinic:realtime-refresh';
+const REALTIME_REFRESH_STORAGE_KEY = 'clinic:realtime-refresh';
+
+export function emitRealtimeRefresh(reason = 'data_changed'): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(REALTIME_REFRESH_EVENT, { detail: { reason, at: Date.now() } }));
+  }
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(REALTIME_REFRESH_STORAGE_KEY, `${Date.now()}:${reason}`);
+    } catch {
+      // ignore storage quota / private mode issues
+    }
+  }
+}
 
 export function useRealtimeListSync() {
   let requestToken = 0;
@@ -23,9 +40,11 @@ export function useRealtimeListSync() {
   let pollOptions: Required<PollOptions> = {
     immediate: false,
     pauseWhenHidden: true,
-    refreshOnVisible: true
+    refreshOnVisible: true,
+    pauseWhenDialogOpen: true
   };
   let visibilityBound = false;
+  let refreshEventBound = false;
 
   async function runLatest<T>(task: () => Promise<T>, options: RunOptions = {}): Promise<T | undefined> {
     const token = ++requestToken;
@@ -54,6 +73,13 @@ export function useRealtimeListSync() {
     if (pollOptions.pauseWhenHidden && typeof document !== 'undefined' && document.hidden) {
       scheduleNextPoll();
       return;
+    }
+    if (pollOptions.pauseWhenDialogOpen && typeof document !== 'undefined') {
+      const hasActiveDialog = Boolean(document.querySelector('.v-overlay--active .v-dialog, .v-overlay--active .v-card'));
+      if (hasActiveDialog) {
+        scheduleNextPoll();
+        return;
+      }
     }
     if (inFlight) {
       scheduleNextPoll();
@@ -100,6 +126,31 @@ export function useRealtimeListSync() {
     visibilityBound = false;
   }
 
+  function onRefreshEvent(): void {
+    if (!pollTask) return;
+    void runPollTick();
+  }
+
+  function onStorageRefresh(event: StorageEvent): void {
+    if (event.key !== REALTIME_REFRESH_STORAGE_KEY) return;
+    if (!pollTask) return;
+    void runPollTick();
+  }
+
+  function bindRefreshListeners(): void {
+    if (refreshEventBound || typeof window === 'undefined') return;
+    window.addEventListener(REALTIME_REFRESH_EVENT, onRefreshEvent as EventListener);
+    window.addEventListener('storage', onStorageRefresh);
+    refreshEventBound = true;
+  }
+
+  function unbindRefreshListeners(): void {
+    if (!refreshEventBound || typeof window === 'undefined') return;
+    window.removeEventListener(REALTIME_REFRESH_EVENT, onRefreshEvent as EventListener);
+    window.removeEventListener('storage', onStorageRefresh);
+    refreshEventBound = false;
+  }
+
   function startPolling(task: () => void | Promise<void>, intervalMs: number, options: PollOptions = {}): void {
     stopPolling();
     pollTask = task;
@@ -107,9 +158,11 @@ export function useRealtimeListSync() {
     pollOptions = {
       immediate: options.immediate ?? false,
       pauseWhenHidden: options.pauseWhenHidden ?? true,
-      refreshOnVisible: options.refreshOnVisible ?? true
+      refreshOnVisible: options.refreshOnVisible ?? true,
+      pauseWhenDialogOpen: options.pauseWhenDialogOpen ?? true
     };
     bindVisibilityListener();
+    bindRefreshListeners();
     if (pollOptions.immediate) {
       void runPollTick();
       return;
@@ -123,6 +176,7 @@ export function useRealtimeListSync() {
     pollTask = null;
     inFlight = false;
     unbindVisibilityListener();
+    unbindRefreshListeners();
   }
 
   function invalidatePending(): void {

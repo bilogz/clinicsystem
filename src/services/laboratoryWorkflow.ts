@@ -1,3 +1,6 @@
+import { emitRealtimeRefresh } from '@/composables/useRealtimeListSync';
+import { fetchApiData, invalidateApiCache } from '@/services/apiClient';
+
 export type LabStatus = 'Pending' | 'In Progress' | 'Result Ready' | 'Completed' | 'Cancelled';
 export type LabPriority = 'Normal' | 'Urgent' | 'STAT';
 
@@ -126,12 +129,6 @@ type LabStore = {
 
 const LAB_STORE_KEY = 'nexora_laboratory_store_v1';
 
-type ApiResponse<T> = {
-  ok: boolean;
-  message?: string;
-  data?: T;
-};
-
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '');
 }
@@ -142,15 +139,6 @@ function resolveApiUrl(): string {
   const configured = import.meta.env.VITE_BACKEND_API_BASE_URL?.trim();
   if (configured) return `${trimTrailingSlashes(configured)}/laboratory`;
   return '/api/laboratory';
-}
-
-async function parseResponse<T>(response: Response): Promise<ApiResponse<T>> {
-  const text = await response.text();
-  const payload = text ? (JSON.parse(text) as ApiResponse<T>) : ({ ok: false } as ApiResponse<T>);
-  if (!response.ok || !payload.ok) {
-    throw payload.message || `Request failed (${response.status})`;
-  }
-  return payload;
 }
 
 function toQueueFromApi(item: any): LabQueueRequest {
@@ -532,11 +520,10 @@ function updateRequest(requestId: number, updater: (item: LabRequestDetail) => L
 
 export async function createLabRequest(payload: CreateLabRequestPayload): Promise<LabRequestDetail> {
   try {
-    const response = await fetch(resolveApiUrl(), {
+    const data = await fetchApiData<any>(resolveApiUrl(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
+      timeoutMs: 12_000,
+      body: {
         action: 'create',
         patient_name: payload.patientName,
         patient_id: payload.patientId,
@@ -557,11 +544,16 @@ export async function createLabRequest(payload: CreateLabRequestPayload): Promis
         insurance_reference: payload.insuranceReference || '',
         billing_reference: payload.billingReference || '',
         assigned_lab_staff: payload.assignedLabStaff || 'Tech Anne'
-      })
+      }
     });
-    const parsed = await parseResponse<any>(response);
-    if (!parsed.data) throw 'No created laboratory request returned.';
-    return toDetailFromApi(parsed.data);
+    const created = toDetailFromApi(data);
+    invalidateApiCache('/api/laboratory');
+    invalidateApiCache('/api/module-activity');
+    invalidateApiCache('/api/dashboard');
+    invalidateApiCache('/api/reports');
+    invalidateApiCache('/api/patients');
+    emitRealtimeRefresh('laboratory_create');
+    return created;
   } catch {
     const store = readStore();
     const nextId = Math.max(1000, ...store.requests.map((row) => row.requestId)) + 1;
@@ -605,6 +597,7 @@ export async function createLabRequest(payload: CreateLabRequestPayload): Promis
     store.requests.unshift(created);
     addLog(store, nextId, 'Request Created', 'New lab request created from laboratory queue dashboard.', 'Lab Staff');
     writeStore(store);
+    emitRealtimeRefresh('laboratory_create');
     return created;
   }
 }
@@ -619,9 +612,11 @@ export async function fetchLabQueue(params: LabQueueFilterParams = {}): Promise<
     if (params.doctor) query.set('doctor', params.doctor);
     if (params.fromDate) query.set('fromDate', params.fromDate);
     if (params.toDate) query.set('toDate', params.toDate);
-    const response = await fetch(`${resolveApiUrl()}${query.toString() ? `?${query.toString()}` : ''}`, { credentials: 'include' });
-    const parsed = await parseResponse<any[]>(response);
-    return Array.isArray(parsed.data) ? parsed.data.map((item) => toQueueFromApi(item)) : [];
+    const data = await fetchApiData<any[]>(`${resolveApiUrl()}${query.toString() ? `?${query.toString()}` : ''}`, {
+      ttlMs: 7_000,
+      timeoutMs: 12_000
+    });
+    return Array.isArray(data) ? data.map((item) => toQueueFromApi(item)) : [];
   } catch {
     const store = readStore();
     const q = (params.search || '').trim().toLowerCase();
@@ -657,10 +652,11 @@ export async function fetchLabQueue(params: LabQueueFilterParams = {}): Promise<
 
 export async function fetchLabRequest(requestId: number): Promise<LabRequestDetail> {
   try {
-    const response = await fetch(`${resolveApiUrl()}?request_id=${requestId}&mode=detail`, { credentials: 'include' });
-    const parsed = await parseResponse<any>(response);
-    if (!parsed.data) throw 'Laboratory request not found.';
-    return toDetailFromApi(parsed.data);
+    const data = await fetchApiData<any>(`${resolveApiUrl()}?request_id=${requestId}&mode=detail`, {
+      ttlMs: 10_000,
+      timeoutMs: 12_000
+    });
+    return toDetailFromApi(data);
   } catch {
     const store = readStore();
     const item = store.requests.find((entry) => entry.requestId === requestId);
@@ -673,10 +669,12 @@ export async function fetchLabRequest(requestId: number): Promise<LabRequestDeta
 
 export async function fetchLabActivity(requestId: number): Promise<LabActivityLog[]> {
   try {
-    const response = await fetch(`${resolveApiUrl()}?request_id=${requestId}&mode=activity`, { credentials: 'include' });
-    const parsed = await parseResponse<any[]>(response);
-    return Array.isArray(parsed.data)
-      ? parsed.data.map((item) => ({
+    const data = await fetchApiData<any[]>(`${resolveApiUrl()}?request_id=${requestId}&mode=activity`, {
+      ttlMs: 7_000,
+      timeoutMs: 12_000
+    });
+    return Array.isArray(data)
+      ? data.map((item) => ({
           id: Number(item.id || 0),
           requestId: Number(item.request_id || item.requestId || 0),
           action: String(item.action || ''),
@@ -693,11 +691,10 @@ export async function fetchLabActivity(requestId: number): Promise<LabActivityLo
 
 export async function startLabProcessing(payload: StartProcessingPayload): Promise<LabRequestDetail | null> {
   try {
-    const response = await fetch(resolveApiUrl(), {
+    const data = await fetchApiData<any>(resolveApiUrl(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
+      timeoutMs: 12_000,
+      body: {
         action: 'start_processing',
         request_id: payload.requestId,
         lab_staff: payload.labStaff,
@@ -707,10 +704,16 @@ export async function startLabProcessing(payload: StartProcessingPayload): Promi
         specimen_type: payload.specimenType,
         sample_source: payload.sampleSource,
         collection_date_time: payload.collectionDateTime
-      })
+      }
     });
-    const parsed = await parseResponse<any>(response);
-    return parsed.data ? toDetailFromApi(parsed.data) : null;
+    const updated = data ? toDetailFromApi(data) : null;
+    invalidateApiCache('/api/laboratory');
+    invalidateApiCache('/api/module-activity');
+    invalidateApiCache('/api/dashboard');
+    invalidateApiCache('/api/reports');
+    invalidateApiCache('/api/patients');
+    if (updated) emitRealtimeRefresh('laboratory_start_processing');
+    return updated;
   } catch {
     const store = readStore();
     const idx = store.requests.findIndex((item) => item.requestId === payload.requestId);
@@ -730,17 +733,17 @@ export async function startLabProcessing(payload: StartProcessingPayload): Promi
 
     addLog(store, payload.requestId, 'Processing Started', 'Sample collected and processing started.', payload.labStaff || 'Lab Staff');
     writeStore(store);
+    emitRealtimeRefresh('laboratory_start_processing');
     return { ...store.requests[idx] };
   }
 }
 
 export async function saveLabResults(payload: SaveResultsPayload): Promise<LabRequestDetail | null> {
   try {
-    const response = await fetch(resolveApiUrl(), {
+    const data = await fetchApiData<any>(resolveApiUrl(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
+      timeoutMs: 12_000,
+      body: {
         action: 'save_results',
         request_id: payload.requestId,
         summary: payload.summary,
@@ -750,10 +753,16 @@ export async function saveLabResults(payload: SaveResultsPayload): Promise<LabRe
         result_encoded_at: payload.resultEncodedAt,
         result_reference_range: payload.resultReferenceRange,
         verified_by: payload.verifiedBy
-      })
+      }
     });
-    const parsed = await parseResponse<any>(response);
-    return parsed.data ? toDetailFromApi(parsed.data) : null;
+    const updated = data ? toDetailFromApi(data) : null;
+    invalidateApiCache('/api/laboratory');
+    invalidateApiCache('/api/module-activity');
+    invalidateApiCache('/api/dashboard');
+    invalidateApiCache('/api/reports');
+    invalidateApiCache('/api/patients');
+    if (updated) emitRealtimeRefresh(payload.finalize ? 'laboratory_finalize_results' : 'laboratory_save_draft');
+    return updated;
   } catch {
     const store = readStore();
     const idx = store.requests.findIndex((item) => item.requestId === payload.requestId);
@@ -782,25 +791,31 @@ export async function saveLabResults(payload: SaveResultsPayload): Promise<LabRe
       current.assignedLabStaff || 'Lab Staff'
     );
     writeStore(store);
+    emitRealtimeRefresh(payload.finalize ? 'laboratory_finalize_results' : 'laboratory_save_draft');
     return { ...store.requests[idx] };
   }
 }
 
 export async function releaseLabReport(payload: ReleaseReportPayload): Promise<LabRequestDetail | null> {
   try {
-    const response = await fetch(resolveApiUrl(), {
+    const data = await fetchApiData<any>(resolveApiUrl(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
+      timeoutMs: 12_000,
+      body: {
         action: 'release',
         request_id: payload.requestId,
         released_by: payload.releasedBy,
         released_at: payload.releasedAt
-      })
+      }
     });
-    const parsed = await parseResponse<any>(response);
-    return parsed.data ? toDetailFromApi(parsed.data) : null;
+    const updated = data ? toDetailFromApi(data) : null;
+    invalidateApiCache('/api/laboratory');
+    invalidateApiCache('/api/module-activity');
+    invalidateApiCache('/api/dashboard');
+    invalidateApiCache('/api/reports');
+    invalidateApiCache('/api/patients');
+    if (updated) emitRealtimeRefresh('laboratory_release');
+    return updated;
   } catch {
     const store = readStore();
     const idx = store.requests.findIndex((item) => item.requestId === payload.requestId);
@@ -816,26 +831,32 @@ export async function releaseLabReport(payload: ReleaseReportPayload): Promise<L
 
     addLog(store, payload.requestId, 'Report Released', 'Lab report released to doctor/check-up.', payload.releasedBy || 'Lab Staff');
     writeStore(store);
+    emitRealtimeRefresh('laboratory_release');
     return { ...store.requests[idx] };
   }
 }
 
 export async function rejectLabRequest(payload: { requestId: number; reason: string; resampleFlag: boolean; actor: string }): Promise<LabRequestDetail | null> {
   try {
-    const response = await fetch(resolveApiUrl(), {
+    const data = await fetchApiData<any>(resolveApiUrl(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
+      timeoutMs: 12_000,
+      body: {
         action: 'reject',
         request_id: payload.requestId,
         reason: payload.reason,
         resample_flag: payload.resampleFlag,
         actor: payload.actor
-      })
+      }
     });
-    const parsed = await parseResponse<any>(response);
-    return parsed.data ? toDetailFromApi(parsed.data) : null;
+    const updated = data ? toDetailFromApi(data) : null;
+    invalidateApiCache('/api/laboratory');
+    invalidateApiCache('/api/module-activity');
+    invalidateApiCache('/api/dashboard');
+    invalidateApiCache('/api/reports');
+    invalidateApiCache('/api/patients');
+    if (updated) emitRealtimeRefresh(payload.resampleFlag ? 'laboratory_resample' : 'laboratory_reject');
+    return updated;
   } catch {
     const store = readStore();
     const idx = store.requests.findIndex((item) => item.requestId === payload.requestId);
@@ -855,6 +876,7 @@ export async function rejectLabRequest(payload: { requestId: number; reason: str
       payload.actor || 'Lab Staff'
     );
     writeStore(store);
+    emitRealtimeRefresh(payload.resampleFlag ? 'laboratory_resample' : 'laboratory_reject');
     return { ...store.requests[idx] };
   }
 }

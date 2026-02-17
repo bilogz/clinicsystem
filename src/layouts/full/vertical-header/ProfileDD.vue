@@ -17,6 +17,7 @@ const router = useRouter();
 
 const menuSearch = ref('');
 const showLogoutConfirm = ref(false);
+const logoutLoading = ref(false);
 
 const menuItems = [
   { label: 'Account Settings', icon: SettingsIcon, action: () => router.push('/profile?tab=account') },
@@ -66,7 +67,12 @@ function handleLogoutClick(): void {
 
 async function confirmLogout(): Promise<void> {
   showLogoutConfirm.value = false;
-  await authStore.logout();
+  logoutLoading.value = true;
+  try {
+    await authStore.logout();
+  } finally {
+    logoutLoading.value = false;
+  }
 }
 
 onMounted(() => {
@@ -146,5 +152,21 @@ onUnmounted(() => {
         </v-card-actions>
       </v-card>
     </v-dialog>
+
+    <v-dialog :model-value="logoutLoading" persistent max-width="360">
+      <v-card class="pa-6 text-center logout-loading-card">
+        <v-progress-circular indeterminate color="error" size="48" width="4" class="mb-4" />
+        <div class="text-h6 mb-1">Signing Out</div>
+        <div class="text-body-2 text-medium-emphasis">Closing your session securely...</div>
+      </v-card>
+    </v-dialog>
   </div>
 </template>
+
+<style scoped>
+.logout-loading-card {
+  border: 1px solid rgba(219, 62, 62, 0.22);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #fff6f6 100%);
+}
+</style>

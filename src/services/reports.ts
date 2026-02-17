@@ -1,3 +1,5 @@
+import { fetchApiData } from '@/services/apiClient';
+
 export type ReportsKpis = {
   totalPatients: number;
   activeProfiles: number;
@@ -38,12 +40,6 @@ export type ReportsSnapshot = {
   recentActivity: ReportsActivityRow[];
 };
 
-type ApiResponse<T> = {
-  ok: boolean;
-  message?: string;
-  data?: T;
-};
-
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '');
 }
@@ -56,22 +52,10 @@ function resolveApiUrl(): string {
   return '/api/reports';
 }
 
-async function parseResponse<T>(response: Response): Promise<ApiResponse<T>> {
-  const text = await response.text();
-  const payload = text ? (JSON.parse(text) as ApiResponse<T>) : ({ ok: false } as ApiResponse<T>);
-  if (!response.ok || !payload.ok) {
-    throw payload.message || `Request failed (${response.status})`;
-  }
-  return payload;
-}
-
 export async function fetchReportsSnapshot(filters: { from?: string; to?: string } = {}): Promise<ReportsSnapshot> {
   const params = new URLSearchParams();
   if (filters.from) params.set('from', filters.from);
   if (filters.to) params.set('to', filters.to);
   const url = `${resolveApiUrl()}${params.toString() ? `?${params.toString()}` : ''}`;
-  const response = await fetch(url, { credentials: 'include' });
-  const parsed = await parseResponse<ReportsSnapshot>(response);
-  if (!parsed.data) throw 'No reports data returned.';
-  return parsed.data;
+  return await fetchApiData<ReportsSnapshot>(url, { ttlMs: 12_000 });
 }

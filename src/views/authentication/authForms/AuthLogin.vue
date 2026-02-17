@@ -1,26 +1,40 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { useAuthStore } from '@/stores/auth';
 import { Form } from 'vee-validate';
 
 const show1 = ref(false);
-const password = ref('Admin#123');
-const username = ref('joecelgarcia1@gmail.com');
-const passwordRules = ref([(v: string) => !!v || 'Password is required']);
-const emailRules = ref([(v: string) => !!v || 'Email is required']);
+const password = ref('');
+const username = ref('');
+const apiError = ref('');
+const signingIn = ref(false);
+const passwordRules = ref([(v: string) => !!String(v || '').trim() || 'Password is required']);
+const emailRules = ref([
+  (v: string) => !!String(v || '').trim() || 'Email is required',
+  (v: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim()) || 'Enter a valid email'
+]);
+const canSubmit = computed(() => {
+  return Boolean(String(username.value || '').trim()) && Boolean(String(password.value || '').trim());
+});
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-function validate(_values: any, { setErrors }: any) {
+async function validate(_values: any, { setErrors }: any) {
   const authStore = useAuthStore();
-  return authStore.login(username.value, password.value).catch((error) => setErrors({ apiError: error }));
+  apiError.value = '';
+  signingIn.value = true;
+  try {
+    await authStore.login(username.value, password.value);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    apiError.value = message || 'Unable to sign in.';
+    setErrors({ apiError: message });
+  } finally {
+    signingIn.value = false;
+  }
 }
 </script>
 
 <template>
-  <v-alert color="lightprimary" variant="tonal" class="mb-6">
-    Default Super Admin: <strong>joecelgarcia1@gmail.com</strong><br />
-    Password: <strong>Admin#123</strong>
-  </v-alert>
   <Form @submit="validate" class="mt-7 loginForm" v-slot="{ errors, isSubmitting }">
     <v-text-field
       v-model="username"
@@ -50,13 +64,19 @@ function validate(_values: any, { setErrors }: any) {
       autocomplete="current-password"
     ></v-text-field>
 
-    <v-btn color="primary" :loading="isSubmitting" block class="mt-6" variant="flat" size="large" type="submit">
-      Sign In</v-btn
-    >
-    <div v-if="errors.apiError" class="mt-2">
-      <v-alert color="error">{{ errors.apiError }}</v-alert>
+    <v-btn color="primary" :loading="isSubmitting || signingIn" :disabled="isSubmitting || signingIn || !canSubmit" block class="mt-6 login-submit-btn" variant="flat" size="large" type="submit">Sign In</v-btn>
+    <div v-if="apiError || errors.apiError" class="mt-2">
+      <v-alert color="error" variant="tonal">{{ apiError || errors.apiError }}</v-alert>
     </div>
   </Form>
+
+  <v-dialog :model-value="signingIn" persistent max-width="360">
+    <v-card class="pa-6 text-center auth-loading-card">
+      <v-progress-circular indeterminate color="primary" size="48" width="4" class="mb-4" />
+      <div class="text-h6 mb-1">Signing In</div>
+      <div class="text-body-2 text-medium-emphasis">Securing your admin session...</div>
+    </v-card>
+  </v-dialog>
 </template>
 <style lang="scss">
 .outlinedInput .v-field {
@@ -76,5 +96,14 @@ function validate(_values: any, { setErrors }: any) {
   .v-text-field .v-field--active input {
     font-weight: 500;
   }
+}
+.login-submit-btn {
+  letter-spacing: 0.25px;
+  font-weight: 700;
+}
+.auth-loading-card {
+  border: 1px solid rgba(31, 91, 188, 0.2);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #f5f9ff 100%);
 }
 </style>

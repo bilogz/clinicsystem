@@ -1,12 +1,14 @@
 import { defineStore } from 'pinia';
 import { router } from '@/router';
 import { createAdminAccount, fetchAdminSession, loginAdmin, logoutAdmin, type AdminUser } from '@/services/adminAuth';
+import { defaultRouteForUser } from '@/config/accessControl';
 
 type AuthUser = AdminUser;
 
 type AuthState = {
   user: AuthUser | null;
   returnUrl: string | null;
+  sessionChecked: boolean;
 };
 
 const LOCAL_USER_KEY = 'user';
@@ -24,17 +26,23 @@ export const useAuthStore = defineStore({
   id: 'auth',
   state: (): AuthState => ({
     user: readLocalUser(),
-    returnUrl: null
+    returnUrl: null,
+    sessionChecked: false
   }),
   actions: {
+    defaultRouteForUser(user: AuthUser | null): string {
+      return defaultRouteForUser(user);
+    },
+
     async hydrateSession(force = false) {
-      if (this.user && !force) return this.user;
+      if (this.sessionChecked && !force) return this.user;
       try {
         const sessionUser = await fetchAdminSession();
         this.user = sessionUser;
       } catch {
         this.user = null;
       }
+      this.sessionChecked = true;
       if (this.user) localStorage.setItem(LOCAL_USER_KEY, JSON.stringify(this.user));
       else localStorage.removeItem(LOCAL_USER_KEY);
       return this.user;
@@ -42,8 +50,11 @@ export const useAuthStore = defineStore({
 
     async login(username: string, password: string) {
       this.user = await loginAdmin(username.trim(), password);
+      this.sessionChecked = true;
       localStorage.setItem(LOCAL_USER_KEY, JSON.stringify(this.user));
-      router.push(this.returnUrl || '/dashboard/default');
+      const target = this.returnUrl || this.defaultRouteForUser(this.user);
+      this.returnUrl = null;
+      router.push(target);
     },
 
     async logout() {
@@ -53,6 +64,8 @@ export const useAuthStore = defineStore({
         // keep local logout behavior
       }
       this.user = null;
+      this.sessionChecked = true;
+      this.returnUrl = null;
       localStorage.removeItem(LOCAL_USER_KEY);
       router.push('/admin/login');
     },

@@ -1,9 +1,11 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { dispatchPharmacyAction, fetchPharmacySnapshot } from '@/services/pharmacyInventory';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
+import { emitSuccessModal } from '@/composables/useSuccessModal';
 
 type StockState = 'Healthy' | 'Low' | 'Out of Stock';
 type QuickFilter = 'all' | 'out' | 'low' | 'healthy' | 'expiring';
@@ -654,6 +656,10 @@ function sortIcon(key: SortKey): string {
 }
 
 function showToast(text: string, color: 'success' | 'info' | 'warning' | 'error' = 'success'): void {
+  if (color === 'success') {
+    emitSuccessModal({ title: 'Success', message: text, tone: 'success' });
+    return;
+  }
   snackbarText.value = text;
   snackbarColor.value = color;
   snackbar.value = true;
@@ -998,9 +1004,6 @@ async function submitAction(): Promise<void> {
             <v-col cols="12" md="4" class="d-flex justify-md-end mt-3 mt-md-0">
               <div class="d-flex ga-2 flex-wrap justify-md-end">
                 <v-select v-model="sessionRole" :items="['Admin', 'Pharmacist', 'Pharmacy Staff', 'Nurse', 'Doctor']" label="Role" density="compact" variant="solo-filled" hide-details class="role-select" />
-                <v-btn class="saas-btn saas-btn-light" size="large" prepend-icon="mdi-plus" :disabled="!actionAllowed('add')" @click="openAction('add')">
-                  Add New Medicine
-                </v-btn>
               </div>
             </v-col>
           </v-row>
@@ -1043,6 +1046,17 @@ async function submitAction(): Promise<void> {
       </v-row>
 
       <v-card class="surface-card mb-4" variant="outlined">
+        <v-card-item>
+          <v-card-title>Stock & Dispense Table</v-card-title>
+          <template #append>
+            <div class="d-flex ga-2 flex-wrap justify-md-end">
+              <v-btn class="saas-btn saas-btn-light" size="large" prepend-icon="mdi-plus" :disabled="!actionAllowed('add')" @click="openAction('add')">
+                Add New Medicine
+              </v-btn>
+            </div>
+          </template>
+        </v-card-item>
+        <v-divider />
         <v-card-text>
           <v-row>
             <v-col cols="12" md="3">
@@ -1322,6 +1336,8 @@ async function submitAction(): Promise<void> {
         </div>
       </div>
     </v-navigation-drawer>
+
+    <ModuleActivityLogs module="pharmacy" title="Module Activity Logs" :per-page="8" />
 
     <v-dialog v-model="selectedMedicineDialog" max-width="560" transition="dialog-bottom-transition">
       <v-card v-if="selectedMedicine">

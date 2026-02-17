@@ -3,10 +3,12 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { ArchiveIcon, CheckIcon, DotsIcon, EditIcon } from 'vue-tabler-icons';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { useAuthStore } from '@/stores/auth';
 import { createAppointment } from '@/services/appointmentsAdmin';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
+import { emitSuccessModal } from '@/composables/useSuccessModal';
 import {
   archiveRegistration,
   assignRegistration,
@@ -265,6 +267,10 @@ function initials(name: string): string {
 }
 
 function showToast(message: string, color: 'success' | 'info' | 'warning' | 'error' = 'success'): void {
+  if (color === 'success') {
+    emitSuccessModal({ title: 'Success', message, tone: 'success' });
+    return;
+  }
   snackbarText.value = message;
   snackbarColor.value = color;
   snackbar.value = true;
@@ -608,14 +614,6 @@ onUnmounted(() => {
               <p class="hero-text mb-0">Track intake, triage concerns, approvals, and downstream handoffs across modules.</p>
             </div>
 
-            <div class="hero-actions d-flex ga-2 flex-wrap">
-              <v-btn class="capsule-btn" color="primary" prepend-icon="mdi-account-plus-outline" rounded="pill" @click="openModal('add')">
-                New Registration
-              </v-btn>
-              <v-btn class="capsule-btn" color="white" variant="outlined" prepend-icon="mdi-filter-off-outline" rounded="pill" @click="applySearchReset">
-                Reset Filters
-              </v-btn>
-            </div>
           </div>
         </v-card-text>
       </v-card>
@@ -636,10 +634,16 @@ onUnmounted(() => {
         <v-card-item>
           <v-card-title class="text-h5">Patient Records</v-card-title>
           <template #append>
-            <div class="d-flex ga-2">
-              <v-btn size="small" variant="outlined" prepend-icon="mdi-calendar-clock-outline" @click="router.push('/appointments')">Appointments</v-btn>
-              <v-btn size="small" variant="outlined" prepend-icon="mdi-run-fast" @click="router.push('/modules/walk-in')">Walk-In Queue</v-btn>
-              <v-btn size="small" variant="outlined" prepend-icon="mdi-flask-outline" @click="router.push('/modules/laboratory')">Laboratory</v-btn>
+            <div class="d-flex ga-2 flex-wrap justify-end">
+              <v-btn class="capsule-btn" color="primary" prepend-icon="mdi-account-plus-outline" rounded="pill" @click="openModal('add')">
+                New Registration
+              </v-btn>
+              <v-btn class="capsule-btn reset-filters-btn" color="secondary" variant="outlined" prepend-icon="mdi-filter-off-outline" rounded="pill" @click="applySearchReset">
+                Reset Filters
+              </v-btn>
+              <v-btn class="table-link-btn" size="small" variant="outlined" prepend-icon="mdi-calendar-clock-outline" @click="router.push('/appointments')">Appointments</v-btn>
+              <v-btn class="table-link-btn" size="small" variant="outlined" prepend-icon="mdi-run-fast" @click="router.push('/modules/walk-in')">Walk-In Queue</v-btn>
+              <v-btn class="table-link-btn" size="small" variant="outlined" prepend-icon="mdi-flask-outline" @click="router.push('/modules/laboratory')">Laboratory</v-btn>
             </div>
           </template>
         </v-card-item>
@@ -753,6 +757,8 @@ onUnmounted(() => {
         </v-card-text>
       </v-card>
     </div>
+
+    <ModuleActivityLogs module="registration" title="Module Activity Logs" :per-page="8" />
 
     <v-navigation-drawer v-model="previewOpen" temporary location="right" width="420" class="preview-drawer">
       <div class="pa-4" v-if="previewRecord">
@@ -968,6 +974,20 @@ onUnmounted(() => {
 .capsule-btn {
   text-transform: none;
   font-weight: 700;
+}
+
+.reset-filters-btn {
+  color: #264b85 !important;
+  border-color: rgba(38, 75, 133, 0.35) !important;
+  background: #f3f8ff !important;
+}
+
+.table-link-btn {
+  color: #254781 !important;
+  border-color: rgba(38, 75, 133, 0.3) !important;
+  background: #f7faff !important;
+  text-transform: none;
+  font-weight: 600;
 }
 
 .metric-card {

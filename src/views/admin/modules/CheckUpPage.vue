@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { useAuthStore } from '@/stores/auth';
 import { useCheckupWorkflowStore } from '@/stores/checkupWorkflow';
 import type { CheckupState, CheckupVisit } from '@/services/checkupWorkflow';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
+import { emitSuccessModal } from '@/composables/useSuccessModal';
 
 type UserRole = 'Admin' | 'Receptionist' | 'Doctor' | 'Nurse';
 type ConfirmAction = 'archive' | 'reopen' | 'escalate_emergency';
@@ -80,6 +82,10 @@ const workspaceFlags = computed(() => {
 });
 
 function showToast(message: string, color: 'success' | 'warning' | 'info' | 'error' = 'info'): void {
+  if (color === 'success') {
+    emitSuccessModal({ title: 'Success', message, tone: 'success' });
+    return;
+  }
   toastText.value = message;
   toastColor.value = color;
   toast.value = true;
@@ -298,7 +304,6 @@ onBeforeUnmount(() => {
               <v-chip :color="workflowStore.syncing ? 'warning' : 'success'" size="small" variant="tonal">
                 {{ workflowStore.syncing ? 'Syncing' : 'Live' }}
               </v-chip>
-              <v-btn class="saas-hero-btn mt-2" size="small" variant="flat" :loading="workflowStore.loading" @click="refreshQueue">Refresh</v-btn>
             </div>
           </div>
         </v-card-text>
@@ -320,6 +325,9 @@ onBeforeUnmount(() => {
         <v-card-item>
           <v-card-title>Consultation Queue Board</v-card-title>
           <v-card-subtitle>Row click opens workspace. Primary action is workflow-contextual.</v-card-subtitle>
+          <template #append>
+            <v-btn class="saas-hero-btn" size="small" variant="flat" :loading="workflowStore.loading" @click="refreshQueue">Refresh</v-btn>
+          </template>
         </v-card-item>
         <v-card-text>
           <v-row class="mb-3">
@@ -379,9 +387,7 @@ onBeforeUnmount(() => {
                     </v-btn>
                     <v-menu location="bottom end">
                       <template #activator="{ props }">
-                        <v-btn icon size="small" variant="outlined" class="saas-overflow-btn" v-bind="props">
-                          <v-icon icon="mdi-dots-horizontal" size="18" />
-                        </v-btn>
+                        <v-btn icon="mdi-dots-horizontal" size="small" variant="outlined" class="saas-overflow-btn" v-bind="props" aria-label="More actions" />
                       </template>
                       <v-list density="compact" class="saas-overflow-menu">
                         <v-list-item @click="openWorkspace(visit)"><v-list-item-title>Open Workspace</v-list-item-title></v-list-item>
@@ -408,6 +414,8 @@ onBeforeUnmount(() => {
         </v-card-text>
       </v-card>
     </div>
+
+    <ModuleActivityLogs module="checkup" title="Module Activity Logs" :per-page="8" />
 
     <v-dialog v-model="workspaceOpen" max-width="1100" transition="dialog-bottom-transition" scrollable>
       <v-card v-if="selectedVisit" class="workspace-card">

@@ -4,6 +4,8 @@ import VerticalSidebarVue from './vertical-sidebar/VerticalSidebar.vue';
 import VerticalHeaderVue from './vertical-header/VerticalHeader.vue';
 import Customizer from './customizer/CustomizerPanel.vue';
 import FooterPanel from './footer/FooterPanel.vue';
+import GlobalSuccessModal from '@/components/shared/GlobalSuccessModal.vue';
+import GlobalConfirmModal from '@/components/shared/GlobalConfirmModal.vue';
 import { useCustomizerStore } from '../../stores/customizer';
 const customizer = useCustomizerStore();
 </script>
@@ -44,6 +46,8 @@ const customizer = useCustomizerStore();
           </div>
         </v-container>
       </v-main>
+      <GlobalSuccessModal />
+      <GlobalConfirmModal />
     </v-app>
   </v-locale-provider>
 </template>

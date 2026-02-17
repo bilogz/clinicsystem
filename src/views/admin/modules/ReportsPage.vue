@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { fetchReportsSnapshot, type ReportsActivityRow, type ReportsModuleTotal, type ReportsSnapshot, type ReportsTrendRow } from '@/services/reports';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
+import { emitSuccessModal } from '@/composables/useSuccessModal';
 
 const loading = ref(true);
 const fromDate = ref('');
@@ -31,6 +33,10 @@ const kpiCards = computed(() => {
 });
 
 function showToast(text: string, color: 'success' | 'info' | 'warning' | 'error' = 'info'): void {
+  if (color === 'success') {
+    emitSuccessModal({ title: 'Success', message: text, tone: 'success' });
+    return;
+  }
   toast.text = text;
   toast.color = color;
   toast.open = true;
@@ -91,11 +97,6 @@ onUnmounted(() => {
           <h1 class="text-h4 font-weight-black mb-1">Clinic Reports</h1>
           <p class="text-medium-emphasis mb-0">Dynamic, Neon-backed analytics across appointments, walk-in, check-up, mental health, and pharmacy.</p>
         </div>
-        <div class="d-flex ga-2 align-center flex-wrap">
-          <SaasDateTimePickerField v-model="fromDate" mode="date" label="From" hide-details />
-          <SaasDateTimePickerField v-model="toDate" mode="date" label="To" hide-details />
-          <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-chart-line" :loading="loading" @click="load">Apply</v-btn>
-        </div>
       </v-card-text>
     </v-card>
 
@@ -148,7 +149,16 @@ onUnmounted(() => {
     </v-row>
 
     <v-card class="surface-card" variant="outlined">
-      <v-card-title>Daily Trend</v-card-title>
+      <v-card-item>
+        <v-card-title>Daily Trend</v-card-title>
+        <template #append>
+          <div class="d-flex ga-2 align-center flex-wrap">
+            <SaasDateTimePickerField v-model="fromDate" mode="date" label="From" hide-details />
+            <SaasDateTimePickerField v-model="toDate" mode="date" label="To" hide-details />
+            <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-chart-line" :loading="loading" @click="load">Apply</v-btn>
+          </div>
+        </template>
+      </v-card-item>
       <v-divider />
       <v-card-text class="pt-2">
         <v-progress-linear v-if="loading" color="primary" indeterminate class="mb-2" />
@@ -181,6 +191,8 @@ onUnmounted(() => {
         </v-table>
       </v-card-text>
     </v-card>
+
+    <ModuleActivityLogs module="all" title="All Module Activity Logs" :per-page="12" />
 
     <v-snackbar v-model="toast.open" :color="toast.color" timeout="2800">{{ toast.text }}</v-snackbar>
   </div>

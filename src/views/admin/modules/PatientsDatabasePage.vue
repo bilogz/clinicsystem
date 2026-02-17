@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { fetchPatientsSnapshot, syncPatientsProfiles, type PatientRecord } from '@/services/patientsDatabase';
+import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
+import { emitSuccessModal } from '@/composables/useSuccessModal';
 
 const loading = ref(true);
 const syncing = ref(false);
@@ -38,6 +40,10 @@ const totalText = computed(() => {
 });
 
 function showToast(text: string, color: 'success' | 'info' | 'warning' | 'error' = 'info'): void {
+  if (color === 'success') {
+    emitSuccessModal({ title: 'Success', message: text, tone: 'success' });
+    return;
+  }
   toast.text = text;
   toast.color = color;
   toast.open = true;
@@ -141,10 +147,6 @@ onUnmounted(() => {
           <h1 class="text-h4 font-weight-black mb-1">Patients Database</h1>
           <p class="text-medium-emphasis mb-0">Centralized patient profiles synced across Appointments, Walk-In, Check-Up, Mental Health, and Pharmacy.</p>
         </div>
-        <div class="d-flex ga-2 align-center flex-wrap">
-          <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="loading" @click="load">Refresh</v-btn>
-          <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-sync" :loading="syncing" @click="syncNow">Sync Modules</v-btn>
-        </div>
       </v-card-text>
     </v-card>
 
@@ -156,6 +158,16 @@ onUnmounted(() => {
     </v-row>
 
     <v-card class="surface-card" variant="outlined">
+      <v-card-item>
+        <v-card-title>Patient Registry</v-card-title>
+        <template #append>
+          <div class="d-flex ga-2 align-center flex-wrap">
+            <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="loading" @click="load">Refresh</v-btn>
+            <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-sync" :loading="syncing" @click="syncNow">Sync Modules</v-btn>
+          </div>
+        </template>
+      </v-card-item>
+      <v-divider />
       <v-card-text>
         <v-row class="mb-2">
           <v-col cols="12" md="6"><v-text-field v-model="search" prepend-inner-icon="mdi-magnify" label="Search patient, code, contact" density="comfortable" variant="outlined" hide-details /></v-col>
@@ -202,6 +214,8 @@ onUnmounted(() => {
         </div>
       </v-card-text>
     </v-card>
+
+    <ModuleActivityLogs module="patients" title="Module Activity Logs" :per-page="8" />
 
     <v-navigation-drawer v-model="drawer" location="right" temporary width="460">
       <v-card v-if="selected" flat>

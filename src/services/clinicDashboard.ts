@@ -1,3 +1,5 @@
+import { fetchApiData } from '@/services/apiClient';
+
 export type ClinicSummary = {
   totalPatients: number;
   totalAppointments: number;
@@ -45,12 +47,6 @@ export type ClinicDashboardPayload = {
   recentPatients: RecentPatient[];
 };
 
-type ApiResponse<T> = {
-  ok: boolean;
-  message?: string;
-  data?: T;
-};
-
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '');
 }
@@ -61,15 +57,6 @@ function resolveApiUrl(): string {
   const configured = import.meta.env.VITE_BACKEND_API_BASE_URL?.trim();
   if (configured) return `${trimTrailingSlashes(configured)}/dashboard`;
   return '/api/dashboard';
-}
-
-async function parseResponse<T>(response: Response): Promise<ApiResponse<T>> {
-  const text = await response.text();
-  const payload = text ? (JSON.parse(text) as ApiResponse<T>) : ({ ok: false } as ApiResponse<T>);
-  if (!response.ok || !payload.ok) {
-    throw payload.message || `Request failed (${response.status})`;
-  }
-  return payload;
 }
 
 function fallbackPayload(): ClinicDashboardPayload {
@@ -94,9 +81,8 @@ function fallbackPayload(): ClinicDashboardPayload {
 
 export async function fetchClinicDashboard(): Promise<ClinicDashboardPayload> {
   try {
-    const response = await fetch(resolveApiUrl(), { credentials: 'include' });
-    const parsed = await parseResponse<ClinicDashboardPayload>(response);
-    return parsed.data || fallbackPayload();
+    const data = await fetchApiData<ClinicDashboardPayload>(resolveApiUrl(), { ttlMs: 12_000 });
+    return data || fallbackPayload();
   } catch {
     return fallbackPayload();
   }

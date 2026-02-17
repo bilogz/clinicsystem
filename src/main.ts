@@ -12,9 +12,9 @@ import VueTablerIcons from 'vue-tabler-icons';
 import print from 'vue3-print-nb';
 
 const app = createApp(App);
+app.use(createPinia());
 app.use(router);
 app.use(PerfectScrollbarPlugin);
-app.use(createPinia());
 app.use(VueTablerIcons);
 app.use(print);
 app.use(VueApexCharts);

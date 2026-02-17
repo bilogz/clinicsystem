@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router';
 import MainRoutes from './MainRoutes';
 import PublicRoutes from './PublicRoutes';
 import { useAuthStore } from '@/stores/auth';
+import { canAccessPath } from '@/config/accessControl';
 
 export const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL || '/'),
@@ -28,8 +29,13 @@ router.beforeEach(async (to, from, next) => {
     return;
   }
 
+  if (authRequired && auth.user && !canAccessPath(auth.user, to.path)) {
+    next('/access-denied');
+    return;
+  }
+
   if (auth.user && isAdminAuthPage) {
-    next(auth.returnUrl || '/dashboard/default');
+    next(auth.returnUrl || auth.defaultRouteForUser(auth.user));
     return;
   }
 
@@ -40,7 +46,7 @@ router.beforeEach(async (to, from, next) => {
   }
 
   if (isRegisterPage && auth.user && !auth.user.isSuperAdmin) {
-    next('/dashboard/default');
+    next(auth.defaultRouteForUser(auth.user));
     return;
   }
 

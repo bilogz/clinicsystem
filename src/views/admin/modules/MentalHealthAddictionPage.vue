@@ -1,9 +1,11 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
 import { dispatchMentalHealthAction, fetchMentalHealthSnapshot, type MentalHealthActivity, type MentalHealthNote, type MentalHealthPatient, type MentalHealthSession, type MentalHealthStatus } from '@/services/mentalHealth';
+import { emitSuccessModal } from '@/composables/useSuccessModal';
 
 type SessionRole = 'Admin' | 'Counselor' | 'Nurse' | 'Doctor' | 'Receptionist';
 type SessionAction = 'create' | 'edit' | 'note' | 'followup' | 'complete' | 'escalate' | 'archive' | 'activate' | 'draft';
@@ -89,7 +91,15 @@ function can(action: SessionAction): boolean { return rolePermissions[role.value
 function statusLabel(status: MentalHealthStatus): string { return status.replace('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase()); }
 function statusColor(status: MentalHealthStatus): string { if (status === 'active') return 'primary'; if (status === 'follow_up') return 'info'; if (status === 'completed') return 'success'; if (status === 'at_risk') return 'warning'; if (status === 'escalated') return 'error'; if (status === 'archived') return 'secondary'; return 'grey'; }
 function formatDateTime(value: string | null): string { if (!value) return '--'; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(); }
-function showToast(text: string, color: 'success' | 'info' | 'warning' | 'error' = 'info'): void { toast.text = text; toast.color = color; toast.open = true; }
+function showToast(text: string, color: 'success' | 'info' | 'warning' | 'error' = 'info'): void {
+  if (color === 'success') {
+    emitSuccessModal({ title: 'Success', message: text, tone: 'success' });
+    return;
+  }
+  toast.text = text;
+  toast.color = color;
+  toast.open = true;
+}
 function clearErrors(): void { Object.keys(errors).forEach((k) => delete errors[k]); }
 function reloadDashboard(): void { pageLoading.value = true; loadData().finally(() => { pageLoading.value = false; }); }
 
@@ -315,9 +325,7 @@ onUnmounted(() => {
           <p class="text-medium-emphasis mb-0">Workflow: Create -> Active -> Follow-Up -> At-Risk -> Completed -> Escalated -> Archived</p>
         </div>
         <div class="d-flex ga-2 align-center flex-wrap">
-          <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="pageLoading" @click="reloadDashboard">Refresh</v-btn>
           <v-select v-model="role" :items="['Admin', 'Counselor', 'Nurse', 'Doctor', 'Receptionist']" label="Session Role" variant="outlined" density="compact" hide-details class="role-select" />
-          <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-plus" :disabled="!can('create')" @click="openCreate">New Session</v-btn>
         </div>
       </v-card-text>
     </v-card>
@@ -344,7 +352,15 @@ onUnmounted(() => {
     <v-row>
       <v-col cols="12" lg="8">
         <v-card class="table-card" variant="outlined">
-          <v-card-item><v-card-title>Sessions</v-card-title></v-card-item>
+          <v-card-item>
+            <v-card-title>Sessions</v-card-title>
+            <template #append>
+              <div class="d-flex ga-2 align-center flex-wrap">
+                <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="pageLoading" @click="reloadDashboard">Refresh</v-btn>
+                <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-plus" :disabled="!can('create')" @click="openCreate">New Session</v-btn>
+              </div>
+            </template>
+          </v-card-item>
           <v-divider />
           <v-card-text>
             <v-progress-linear v-if="pageLoading" indeterminate color="primary" class="mb-3" />
@@ -429,6 +445,8 @@ onUnmounted(() => {
         </v-card>
       </v-col>
     </v-row>
+
+    <ModuleActivityLogs module="mental_health" title="Module Activity Logs" :per-page="8" />
 
     <v-dialog v-model="sessionDialog" max-width="980">
       <v-card>
