@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { fetchPatientsSnapshot, syncPatientsProfiles, type PatientRecord } from '@/services/patientsDatabase';
+import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
@@ -39,6 +40,13 @@ const totalText = computed(() => {
   return `Showing ${start}-${end} of ${meta.value.total} patients`;
 });
 
+const analyticsCards = computed(() => [
+  { title: 'Total Patients', value: analytics.value.total_patients, subtitle: 'Unified patient records', className: 'analytics-card-blue', icon: 'mdi-account-group-outline' },
+  { title: 'High Risk', value: analytics.value.high_risk, subtitle: 'Require closer monitoring', className: 'analytics-card-red', icon: 'mdi-alert-circle-outline' },
+  { title: 'Active Profiles', value: analytics.value.active_profiles, subtitle: 'With linked module activity', className: 'analytics-card-green', icon: 'mdi-account-check-outline' },
+  { title: 'Seen (30 Days)', value: analytics.value.active_30_days, subtitle: 'Recent patient engagement', className: 'analytics-card-purple', icon: 'mdi-calendar-clock-outline' }
+]);
+
 function showToast(text: string, color: 'success' | 'info' | 'warning' | 'error' = 'info'): void {
   if (color === 'success') {
     emitSuccessModal({ title: 'Success', message: text, tone: 'success' });
@@ -53,6 +61,14 @@ function riskColor(risk: string): string {
   if (risk === 'high') return 'error';
   if (risk === 'medium') return 'warning';
   return 'success';
+}
+
+function patientTypeLabel(value: string): string {
+  return value === 'student' ? 'Student' : value === 'teacher' ? 'Teacher' : 'Unknown';
+}
+
+function patientTypeColor(value: string): string {
+  return value === 'student' ? 'primary' : value === 'teacher' ? 'deep-orange' : 'secondary';
 }
 
 function formatDate(value: string | null): string {
@@ -141,79 +157,98 @@ onUnmounted(() => {
 
 <template>
   <div class="patients-db-page">
-    <v-card class="hero-card" variant="outlined">
-      <v-card-text class="d-flex justify-space-between align-center flex-wrap ga-3">
-        <div>
-          <h1 class="text-h4 font-weight-black mb-1">Patients Database</h1>
-          <p class="text-medium-emphasis mb-0">Centralized patient profiles synced across Appointments, Walk-In, Check-Up, Mental Health, and Pharmacy.</p>
-        </div>
-      </v-card-text>
-    </v-card>
+    <template v-if="loading && !records.length">
+      <v-card class="hero-card" variant="outlined">
+        <v-card-text>
+          <v-skeleton-loader type="heading, text" />
+        </v-card-text>
+      </v-card>
 
-    <v-row>
-      <v-col cols="12" sm="6" md="3"><v-card class="metric-card metric-total" elevation="0"><v-card-text><div class="metric-label">Total Patients</div><div class="metric-value">{{ analytics.total_patients }}</div></v-card-text></v-card></v-col>
-      <v-col cols="12" sm="6" md="3"><v-card class="metric-card metric-risk" elevation="0"><v-card-text><div class="metric-label">High Risk</div><div class="metric-value">{{ analytics.high_risk }}</div></v-card-text></v-card></v-col>
-      <v-col cols="12" sm="6" md="3"><v-card class="metric-card metric-active" elevation="0"><v-card-text><div class="metric-label">Active Profiles</div><div class="metric-value">{{ analytics.active_profiles }}</div></v-card-text></v-card></v-col>
-      <v-col cols="12" sm="6" md="3"><v-card class="metric-card metric-recent" elevation="0"><v-card-text><div class="metric-label">Seen (30 days)</div><div class="metric-value">{{ analytics.active_30_days }}</div></v-card-text></v-card></v-col>
-    </v-row>
+      <v-row>
+        <v-col v-for="index in 4" :key="`patients-skeleton-card-${index}`" cols="12" sm="6" lg="3">
+          <v-skeleton-loader type="image, article" class="rounded-lg" />
+        </v-col>
+      </v-row>
 
-    <v-card class="surface-card" variant="outlined">
-      <v-card-item>
-        <v-card-title>Patient Registry</v-card-title>
-        <template #append>
-          <div class="d-flex ga-2 align-center flex-wrap">
-            <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="loading" @click="load">Refresh</v-btn>
-            <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-sync" :loading="syncing" @click="syncNow">Sync Modules</v-btn>
+      <v-card class="surface-card" variant="outlined">
+        <v-card-text>
+          <v-skeleton-loader type="heading, text, actions, table-heading, table-row-divider@6" />
+        </v-card-text>
+      </v-card>
+    </template>
+
+    <template v-else>
+      <v-card class="hero-card" variant="outlined">
+        <v-card-text class="d-flex justify-space-between align-center flex-wrap ga-3">
+          <div>
+            <h1 class="text-h4 font-weight-black mb-1">Patients Database</h1>
+            <p class="text-medium-emphasis mb-0">Centralized patient profiles synced across Appointments, Walk-In, Check-Up, Mental Health, and Pharmacy.</p>
           </div>
-        </template>
-      </v-card-item>
-      <v-divider />
-      <v-card-text>
-        <v-row class="mb-2">
-          <v-col cols="12" md="6"><v-text-field v-model="search" prepend-inner-icon="mdi-magnify" label="Search patient, code, contact" density="comfortable" variant="outlined" hide-details /></v-col>
-          <v-col cols="12" md="3"><v-select v-model="moduleFilter" :items="filters" label="Module" density="comfortable" variant="outlined" hide-details /></v-col>
-          <v-col cols="12" md="3"><v-select v-model="perPage" :items="[10,20,30,50]" label="Rows" density="comfortable" variant="outlined" hide-details /></v-col>
-        </v-row>
+        </v-card-text>
+      </v-card>
 
-        <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-2" />
-        <v-table density="comfortable">
-          <thead>
-            <tr>
-              <th>PATIENT</th>
-              <th>CODE</th>
-              <th>CONTACT</th>
-              <th>RISK</th>
-              <th>STATUS</th>
-              <th>MODULE LOAD</th>
-              <th>LAST SEEN</th>
-              <th class="text-right">ACTION</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="item in records" :key="item.id" class="db-row">
-              <td>
-                <div class="font-weight-bold">{{ item.patient_name }}</div>
-                <div class="text-caption text-medium-emphasis">{{ item.sex || '--' }} | age {{ item.age ?? '--' }}</div>
-              </td>
-              <td>{{ item.patient_code }}</td>
-              <td>{{ item.contact || item.email || '--' }}</td>
-              <td><v-chip size="small" :color="riskColor(item.risk_level)" variant="tonal">{{ item.risk_level }}</v-chip></td>
-              <td>{{ item.latest_status }}</td>
-              <td>{{ moduleCount(item) }}</td>
-              <td>{{ formatDate(item.last_seen_at) }}</td>
-              <td class="text-right"><v-btn size="small" class="saas-btn saas-btn-primary" @click="openProfile(item)">Open Profile</v-btn></td>
-            </tr>
-            <tr v-if="!loading && !records.length"><td colspan="8" class="text-center text-medium-emphasis py-6">No patient profiles found for current filters.</td></tr>
-          </tbody>
-        </v-table>
+      <AnalyticsCardGrid :items="analyticsCards" />
 
-        <div class="d-flex align-center mt-3 text-caption text-medium-emphasis">
-          <span>{{ totalText }}</span>
-          <v-spacer />
-          <v-pagination v-model="page" :length="meta.totalPages" density="comfortable" total-visible="7" />
-        </div>
-      </v-card-text>
-    </v-card>
+      <v-card class="surface-card" variant="outlined">
+        <v-card-item>
+          <v-card-title>Patient Registry</v-card-title>
+          <template #append>
+            <div class="d-flex ga-2 align-center flex-wrap">
+              <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="loading" @click="load">Refresh</v-btn>
+              <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-sync" :loading="syncing" @click="syncNow">Sync Modules</v-btn>
+            </div>
+          </template>
+        </v-card-item>
+        <v-divider />
+        <v-card-text>
+          <v-row class="mb-2">
+            <v-col cols="12" md="6"><v-text-field v-model="search" prepend-inner-icon="mdi-magnify" label="Search patient, code, contact" density="comfortable" variant="outlined" hide-details /></v-col>
+            <v-col cols="12" md="3"><v-select v-model="moduleFilter" :items="filters" label="Module" density="comfortable" variant="outlined" hide-details /></v-col>
+            <v-col cols="12" md="3"><v-select v-model="perPage" :items="[10,20,30,50]" label="Rows" density="comfortable" variant="outlined" hide-details /></v-col>
+          </v-row>
+
+          <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-2" />
+          <v-table density="comfortable">
+            <thead>
+              <tr>
+                <th>PATIENT</th>
+                <th>TYPE</th>
+                <th>CODE</th>
+                <th>CONTACT</th>
+                <th>RISK</th>
+                <th>STATUS</th>
+                <th>MODULE LOAD</th>
+                <th>LAST SEEN</th>
+                <th class="text-right">ACTION</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in records" :key="item.id" class="db-row">
+                <td>
+                  <div class="font-weight-bold">{{ item.patient_name }}</div>
+                  <div class="text-caption text-medium-emphasis">{{ item.sex || '--' }} | age {{ item.age ?? '--' }}</div>
+                </td>
+                <td><v-chip size="small" :color="patientTypeColor(item.patient_type)" variant="tonal">{{ patientTypeLabel(item.patient_type) }}</v-chip></td>
+                <td>{{ item.patient_code }}</td>
+                <td>{{ item.contact || item.email || '--' }}</td>
+                <td><v-chip size="small" :color="riskColor(item.risk_level)" variant="tonal">{{ item.risk_level }}</v-chip></td>
+                <td>{{ item.latest_status }}</td>
+                <td>{{ moduleCount(item) }}</td>
+                <td>{{ formatDate(item.last_seen_at) }}</td>
+                <td class="text-right"><v-btn size="small" class="saas-btn saas-btn-primary" @click="openProfile(item)">Open Profile</v-btn></td>
+              </tr>
+              <tr v-if="!loading && !records.length"><td colspan="9" class="text-center text-medium-emphasis py-6">No patient profiles found for current filters.</td></tr>
+            </tbody>
+          </v-table>
+
+          <div class="d-flex align-center mt-3 text-caption text-medium-emphasis">
+            <span>{{ totalText }}</span>
+            <v-spacer />
+            <v-pagination v-model="page" :length="meta.totalPages" density="comfortable" total-visible="7" />
+          </div>
+        </v-card-text>
+      </v-card>
+    </template>
 
     <ModuleActivityLogs module="patients" title="Module Activity Logs" :per-page="8" />
 
@@ -226,6 +261,7 @@ onUnmounted(() => {
         <v-divider />
         <v-card-text>
           <div class="summary-pair"><span>Risk</span><v-chip size="small" :color="riskColor(selected.risk_level)" variant="tonal">{{ selected.risk_level }}</v-chip></div>
+          <div class="summary-pair"><span>Patient Type</span><v-chip size="small" :color="patientTypeColor(selected.patient_type)" variant="tonal">{{ patientTypeLabel(selected.patient_type) }}</v-chip></div>
           <div class="summary-pair"><span>Latest Status</span><strong>{{ selected.latest_status }}</strong></div>
           <div class="summary-pair"><span>Contact</span><strong>{{ selected.contact || '--' }}</strong></div>
           <div class="summary-pair"><span>Email</span><strong>{{ selected.email || '--' }}</strong></div>

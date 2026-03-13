@@ -2,6 +2,7 @@
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { CheckIcon } from 'vue-tabler-icons';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { createWalkIn, fetchWalkIns, runWalkInAction, type Severity, type WalkInCase, type WalkInStatus, type WalkInAnalytics } from '@/services/walkInAdmin';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
@@ -156,6 +157,13 @@ const dialogActionIcon = computed(() => {
   return 'mdi-alert-circle-outline';
 });
 
+const analyticsCards = computed(() => [
+  { title: 'Total Queue', value: totals.value.all, subtitle: 'All active and completed', className: 'analytics-card-blue', icon: 'mdi-account-group-outline' },
+  { title: 'Triage Pending', value: totals.value.triage, subtitle: 'Needs intake assessment', className: 'analytics-card-indigo', icon: 'mdi-clipboard-pulse-outline' },
+  { title: 'Waiting / Consult', value: totals.value.doctor, subtitle: 'Doctor assignment in progress', className: 'analytics-card-orange', icon: 'mdi-stethoscope' },
+  { title: 'Emergency', value: totals.value.emergency, subtitle: 'Immediate priority queue', className: 'analytics-card-red', icon: 'mdi-alert-outline' }
+]);
+
 function statusColor(status: WalkInStatus): string {
   if (status === 'completed') return 'success';
   if (status === 'emergency') return 'error';
@@ -246,6 +254,14 @@ function rowPriorityClass(item: WalkInCase): string {
   if (item.severity === 'Emergency') return 'priority-emergency';
   if (item.severity === 'Moderate') return 'priority-moderate';
   return 'priority-low';
+}
+
+function patientTypeLabel(value: string): string {
+  return value === 'student' ? 'Student' : value === 'teacher' ? 'Teacher' : 'Unknown';
+}
+
+function patientTypeColor(value: string): string {
+  return value === 'student' ? 'primary' : value === 'teacher' ? 'deep-orange' : 'secondary';
 }
 
 function resetForm(): void {
@@ -603,20 +619,7 @@ onBeforeUnmount(() => {
         </v-card-text>
       </v-card>
 
-      <v-row class="mb-4">
-        <v-col cols="12" sm="6" lg="3">
-          <v-card class="metric-card metric-blue" elevation="0"><v-card-text><div class="metric-label">Total Queue</div><div class="metric-value">{{ totals.all }}</div><div class="metric-subtitle">All active and completed</div></v-card-text></v-card>
-        </v-col>
-        <v-col cols="12" sm="6" lg="3">
-          <v-card class="metric-card metric-indigo" elevation="0"><v-card-text><div class="metric-label">Triage Pending</div><div class="metric-value">{{ totals.triage }}</div><div class="metric-subtitle">Needs intake assessment</div></v-card-text></v-card>
-        </v-col>
-        <v-col cols="12" sm="6" lg="3">
-          <v-card class="metric-card metric-orange" elevation="0"><v-card-text><div class="metric-label">Waiting / Consult</div><div class="metric-value">{{ totals.doctor }}</div><div class="metric-subtitle">Doctor assignment in progress</div></v-card-text></v-card>
-        </v-col>
-        <v-col cols="12" sm="6" lg="3">
-          <v-card class="metric-card metric-red" elevation="0"><v-card-text><div class="metric-label">Emergency</div><div class="metric-value">{{ totals.emergency }}</div><div class="metric-subtitle">Immediate priority queue</div></v-card-text></v-card>
-        </v-col>
-      </v-row>
+      <AnalyticsCardGrid :items="analyticsCards" />
 
       <v-card variant="outlined">
         <v-card-item>
@@ -650,6 +653,7 @@ onBeforeUnmount(() => {
               <tr>
                 <th>CASE ID</th>
                 <th>PATIENT</th>
+                <th>TYPE</th>
                 <th>COMPLAINT</th>
                 <th>SEVERITY</th>
                 <th>STATUS</th>
@@ -670,6 +674,7 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                 </td>
+                <td><v-chip size="small" variant="tonal" :color="patientTypeColor(item.patient_type)">{{ patientTypeLabel(item.patient_type) }}</v-chip></td>
                 <td>{{ item.chief_complaint }}</td>
                 <td><v-chip size="small" variant="tonal" :color="severityColor(item.severity)">{{ item.severity }}</v-chip></td>
                 <td><v-chip size="small" variant="tonal" :color="statusColor(item.status)">{{ statusLabel(item.status) }}</v-chip></td>
@@ -703,7 +708,7 @@ onBeforeUnmount(() => {
                   </div>
                 </td>
               </tr>
-              <tr v-if="pagedCases.length === 0"><td colspan="8" class="text-center text-medium-emphasis py-5">No walk-in cases found for the selected filters.</td></tr>
+              <tr v-if="pagedCases.length === 0"><td colspan="9" class="text-center text-medium-emphasis py-5">No walk-in cases found for the selected filters.</td></tr>
             </tbody>
           </v-table>
 
@@ -897,6 +902,7 @@ onBeforeUnmount(() => {
           <v-list density="comfortable" lines="one">
             <v-list-item title="Case ID" :subtitle="selectedCase.case_id" />
             <v-list-item title="Patient" :subtitle="`${selectedCase.patient_name}, ${selectedCase.age}`" />
+            <v-list-item title="Patient Type" :subtitle="patientTypeLabel(selectedCase.patient_type)" />
             <v-list-item title="Contact" :subtitle="selectedCase.contact || '--'" />
             <v-list-item title="Complaint" :subtitle="selectedCase.chief_complaint || '--'" />
             <v-list-item title="Severity" :subtitle="selectedCase.severity" />

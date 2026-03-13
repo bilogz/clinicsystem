@@ -64,7 +64,7 @@ function seedPayload(): AdminProfilePayload {
   const now = nowIso();
   return {
     profile: {
-      fullName: 'Nexora Admin',
+      fullName: 'BCP Clinic Admin',
       username: 'joecelgarcia1@gmail.com',
       email: 'joecelgarcia1@gmail.com',
       role: 'admin',

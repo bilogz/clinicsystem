@@ -4,6 +4,7 @@ export type PatientRecord = {
   id: number;
   patient_code: string;
   patient_name: string;
+  patient_type: 'student' | 'teacher' | 'unknown';
   email: string | null;
   contact: string | null;
   sex: string | null;

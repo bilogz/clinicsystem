@@ -1,5 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { dispatchPharmacyAction, fetchPharmacySnapshot } from '@/services/pharmacyInventory';
@@ -484,6 +485,13 @@ const totals = computed(() => {
   const pending = dispenseRequests.value.filter((req) => req.status === 'Pending').length;
   return { total, low, out, pending };
 });
+
+const analyticsCards = computed(() => [
+  { title: 'Total Medicines', value: totals.value.total, subtitle: 'Inventory catalog entries', className: 'analytics-card-blue', icon: 'mdi-pill' },
+  { title: 'Low Stock Alerts', value: totals.value.low, subtitle: 'Needs replenishment soon', className: 'analytics-card-orange', icon: 'mdi-bell-alert' },
+  { title: 'Out Of Stock', value: totals.value.out, subtitle: 'Unavailable items', className: 'analytics-card-red', icon: 'mdi-close-octagon-outline' },
+  { title: 'Pending Dispense', value: totals.value.pending, subtitle: 'Waiting for fulfillment', className: 'analytics-card-purple', icon: 'mdi-clipboard-clock-outline' }
+]);
 
 const lowStockList = computed(() => medicines.value.filter((item) => stockState(item) !== 'Healthy'));
 
@@ -1010,40 +1018,7 @@ async function submitAction(): Promise<void> {
         </v-card-text>
       </v-card>
 
-      <v-row class="mb-4">
-        <v-col cols="12" sm="6" lg="3">
-          <v-card class="metric-card metric-total" elevation="0">
-            <v-card-text>
-              <div class="metric-title">Total Medicines</div>
-              <div class="metric-value">{{ totals.total }}</div>
-            </v-card-text>
-          </v-card>
-        </v-col>
-        <v-col cols="12" sm="6" lg="3">
-          <v-card class="metric-card metric-low" elevation="0">
-            <v-card-text>
-              <div class="metric-title">Low Stock Alerts</div>
-              <div class="metric-value">{{ totals.low }}</div>
-            </v-card-text>
-          </v-card>
-        </v-col>
-        <v-col cols="12" sm="6" lg="3">
-          <v-card class="metric-card metric-out" elevation="0">
-            <v-card-text>
-              <div class="metric-title">Out Of Stock</div>
-              <div class="metric-value">{{ totals.out }}</div>
-            </v-card-text>
-          </v-card>
-        </v-col>
-        <v-col cols="12" sm="6" lg="3">
-          <v-card class="metric-card metric-pending" elevation="0">
-            <v-card-text>
-              <div class="metric-title">Pending Dispense</div>
-              <div class="metric-value">{{ totals.pending }}</div>
-            </v-card-text>
-          </v-card>
-        </v-col>
-      </v-row>
+      <AnalyticsCardGrid :items="analyticsCards" />
 
       <v-card class="surface-card mb-4" variant="outlined">
         <v-card-item>

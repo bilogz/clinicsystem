@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { useAuthStore } from '@/stores/auth';
@@ -61,14 +62,14 @@ const totalCountText = computed(() => {
 });
 
 const metrics = computed(() => [
-  { label: 'Intake', value: workflowStore.analytics.intake, subtitle: 'New triage-ready visits', className: 'metric-intake' },
-  { label: 'Queue', value: workflowStore.analytics.queue, subtitle: 'Waiting assignment', className: 'metric-queue' },
-  { label: 'Assigned', value: workflowStore.analytics.doctorAssigned, subtitle: 'Doctor assigned', className: 'metric-assigned' },
-  { label: 'In Consultation', value: workflowStore.analytics.inConsultation, subtitle: 'Active consultations', className: 'metric-consult' },
-  { label: 'Lab', value: workflowStore.analytics.labRequested, subtitle: 'Lab workflow pending', className: 'metric-lab' },
-  { label: 'Pharmacy', value: workflowStore.analytics.pharmacy, subtitle: 'Prescription stage', className: 'metric-pharmacy' },
-  { label: 'Completed', value: workflowStore.analytics.completed, subtitle: 'Ready for archive', className: 'metric-complete' },
-  { label: 'Emergency', value: workflowStore.analytics.emergency, subtitle: 'Escalated priority', className: 'metric-emergency' }
+  { title: 'Intake', value: workflowStore.analytics.intake, subtitle: 'New triage-ready visits', className: 'analytics-card-blue', icon: 'mdi-clipboard-text-outline' },
+  { title: 'Queue', value: workflowStore.analytics.queue, subtitle: 'Waiting assignment', className: 'analytics-card-indigo', icon: 'mdi-timer-sand' },
+  { title: 'Assigned', value: workflowStore.analytics.doctorAssigned, subtitle: 'Doctor assigned', className: 'analytics-card-green', icon: 'mdi-account-check-outline' },
+  { title: 'In Consultation', value: workflowStore.analytics.inConsultation, subtitle: 'Active consultations', className: 'analytics-card-orange', icon: 'mdi-stethoscope' },
+  { title: 'Lab', value: workflowStore.analytics.labRequested, subtitle: 'Lab workflow pending', className: 'analytics-card-cyan', icon: 'mdi-flask-outline' },
+  { title: 'Pharmacy', value: workflowStore.analytics.pharmacy, subtitle: 'Prescription stage', className: 'analytics-card-purple', icon: 'mdi-pill' },
+  { title: 'Completed', value: workflowStore.analytics.completed, subtitle: 'Ready for archive', className: 'analytics-card-green', icon: 'mdi-check-decagram-outline' },
+  { title: 'Emergency', value: workflowStore.analytics.emergency, subtitle: 'Escalated priority', className: 'analytics-card-red', icon: 'mdi-alert-octagon-outline' }
 ]);
 
 const workspaceFlags = computed(() => {
@@ -113,6 +114,14 @@ function statusColor(status: CheckupState): string {
 
 function sourceLabel(source: string): string {
   return source.replace(/_/g, ' ');
+}
+
+function patientTypeLabel(value: string): string {
+  return value === 'student' ? 'Student' : value === 'teacher' ? 'Teacher' : 'Unknown';
+}
+
+function patientTypeColor(value: string): string {
+  return value === 'student' ? 'primary' : value === 'teacher' ? 'deep-orange' : 'secondary';
 }
 
 function canEditConsultation(visit: CheckupVisit): boolean {
@@ -285,7 +294,27 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="checkup-v2-page">
-    <div class="checkup-v2-content" :class="{ 'is-visible': pageVisible }">
+    <template v-if="workflowStore.loading && !workflowStore.visits.length">
+      <v-card class="hero-card mb-4" elevation="0">
+        <v-card-text class="pa-5">
+          <v-skeleton-loader type="heading, text, actions" />
+        </v-card-text>
+      </v-card>
+
+      <v-row class="mb-4">
+        <v-col v-for="index in 8" :key="`checkup-skeleton-card-${index}`" cols="12" sm="6" lg="3">
+          <v-skeleton-loader type="image, article" class="rounded-lg" />
+        </v-col>
+      </v-row>
+
+      <v-card variant="outlined" class="surface-card mb-4">
+        <v-card-text>
+          <v-skeleton-loader type="heading, actions, table-heading, table-row-divider@6" />
+        </v-card-text>
+      </v-card>
+    </template>
+
+    <div v-else class="checkup-v2-content" :class="{ 'is-visible': pageVisible }">
       <v-alert v-if="workflowStore.lastError" type="warning" variant="tonal" class="mb-3">
         Live check-up API is unavailable. Showing fallback queue data.
       </v-alert>
@@ -309,17 +338,7 @@ onBeforeUnmount(() => {
         </v-card-text>
       </v-card>
 
-      <v-row class="mb-4">
-        <v-col v-for="metric in metrics" :key="metric.label" cols="12" sm="6" md="3" lg="3" xl="3">
-          <v-card :class="['metric-card', metric.className]" elevation="0">
-            <v-card-text>
-              <div class="metric-label">{{ metric.label }}</div>
-              <div class="metric-value">{{ metric.value }}</div>
-              <div class="metric-subtitle">{{ metric.subtitle }}</div>
-            </v-card-text>
-          </v-card>
-        </v-col>
-      </v-row>
+      <AnalyticsCardGrid :items="metrics" md="3" lg="3" xl="3" />
 
       <v-card variant="outlined" class="surface-card mb-4">
         <v-card-item>
@@ -352,6 +371,7 @@ onBeforeUnmount(() => {
               <tr>
                 <th>VISIT</th>
                 <th>PATIENT</th>
+                <th>TYPE</th>
                 <th>STATUS</th>
                 <th>DOCTOR</th>
                 <th>SOURCE</th>
@@ -365,6 +385,7 @@ onBeforeUnmount(() => {
                   <div class="text-caption text-medium-emphasis">{{ visit.chief_complaint || '--' }}</div>
                 </td>
                 <td>{{ visit.patient_name }}</td>
+                <td><v-chip size="small" :color="patientTypeColor(visit.patient_type)" variant="tonal">{{ patientTypeLabel(visit.patient_type) }}</v-chip></td>
                 <td>
                   <v-chip size="small" :color="statusColor(visit.status)" variant="tonal">{{ statusLabel(visit.status) }}</v-chip>
                 </td>
@@ -401,7 +422,7 @@ onBeforeUnmount(() => {
                 </td>
               </tr>
               <tr v-if="!workflowStore.loading && workflowStore.visits.length === 0">
-                <td colspan="6" class="text-center text-medium-emphasis py-5">No consultation visits match current filters.</td>
+                <td colspan="7" class="text-center text-medium-emphasis py-5">No consultation visits match current filters.</td>
               </tr>
             </tbody>
           </v-table>
@@ -432,6 +453,7 @@ onBeforeUnmount(() => {
               <div class="text-medium-emphasis">{{ selectedVisit.chief_complaint || '--' }}</div>
               <div class="d-flex flex-wrap ga-2 mt-3">
                 <v-chip size="small" :color="statusColor(selectedVisit.status)" variant="tonal">{{ statusLabel(selectedVisit.status) }}</v-chip>
+                <v-chip size="small" :color="patientTypeColor(selectedVisit.patient_type)" variant="tonal">{{ patientTypeLabel(selectedVisit.patient_type) }}</v-chip>
                 <v-chip size="small" color="secondary" variant="tonal">Doctor: {{ selectedVisit.assigned_doctor }}</v-chip>
                 <v-chip size="small" :color="selectedVisit.is_emergency ? 'error' : 'default'" variant="tonal">
                   {{ selectedVisit.is_emergency ? 'Emergency' : 'Routine' }}

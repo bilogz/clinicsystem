@@ -7,6 +7,7 @@ export type MentalHealthRisk = 'low' | 'medium' | 'high';
 export type MentalHealthPatient = {
   patient_id: string;
   patient_name: string;
+  patient_type: 'student' | 'teacher' | 'unknown';
   previous_sessions: number;
   latest_case_reference: string | null;
 };
@@ -16,6 +17,7 @@ export type MentalHealthSession = {
   case_reference: string;
   patient_id: string;
   patient_name: string;
+  patient_type: 'student' | 'teacher' | 'unknown';
   counselor: string;
   session_type: string;
   status: MentalHealthStatus;

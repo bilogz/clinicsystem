@@ -87,8 +87,12 @@ onMounted(() => {
     <v-divider />
     <v-card-text>
       <v-alert v-if="error" type="error" variant="tonal" density="comfortable" class="mb-3">{{ error }}</v-alert>
-      <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-2" />
-      <v-table density="comfortable" class="module-log-table">
+      <template v-if="loading && !rows.length">
+        <v-skeleton-loader type="text, table-heading, table-row-divider@6" />
+      </template>
+      <template v-else>
+        <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-2" />
+        <v-table density="comfortable" class="module-log-table">
         <thead>
           <tr>
             <th>ACTION</th>
@@ -110,10 +114,11 @@ onMounted(() => {
             <td colspan="5" class="text-center text-medium-emphasis py-5">No activity logs found.</td>
           </tr>
         </tbody>
-      </v-table>
-      <div class="d-flex justify-end mt-3" v-if="totalPages > 1">
-        <v-pagination v-model="page" :length="totalPages" total-visible="6" density="comfortable" />
-      </div>
+        </v-table>
+        <div class="d-flex justify-end mt-3" v-if="totalPages > 1">
+          <v-pagination v-model="page" :length="totalPages" total-visible="6" density="comfortable" />
+        </div>
+      </template>
     </v-card-text>
   </v-card>
 </template>

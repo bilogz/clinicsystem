@@ -1,7 +1,7 @@
 import { emitRealtimeRefresh } from '@/composables/useRealtimeListSync';
 import { fetchApiData, invalidateApiCache } from '@/services/apiClient';
 
-export type AppointmentStatus = 'New' | 'Confirmed' | 'Pending' | 'Canceled' | 'Accepted' | 'Awaiting';
+export type AppointmentStatus = 'New' | 'Confirmed' | 'Pending' | 'Canceled' | 'Accepted' | 'Awaiting' | 'Appointed';
 
 export type AppointmentRow = {
   id: number;
@@ -23,6 +23,8 @@ export type AppointmentRow = {
   symptomsSummary: string;
   doctorNotes: string;
   visitReason: string;
+  patientType: 'student' | 'teacher' | 'unknown';
+  actorRole: 'student' | 'teacher' | 'admin' | 'unknown';
   createdAt: string;
   updatedAt: string;
 };
@@ -59,6 +61,8 @@ type UpdateAppointmentPayload = {
   booking_id: string;
   status?: string;
   patient_id?: string;
+  patient_name?: string;
+  patient_email?: string;
   emergency_contact?: string;
   insurance_provider?: string;
   payment_method?: string;
@@ -66,16 +70,20 @@ type UpdateAppointmentPayload = {
   symptoms_summary?: string;
   doctor_notes?: string;
   doctor_name?: string;
+  teacher_name?: string;
   department_name?: string;
   visit_type?: string;
   appointment_date?: string;
   preferred_time?: string;
   visit_reason?: string;
+  patient_type?: 'student' | 'teacher';
+  actor_role?: 'student' | 'teacher' | 'admin';
 };
 
 export type CreateAppointmentPayload = {
   patient_id?: string;
   patient_name: string;
+  student_name?: string;
   patient_email?: string;
   guardian_name?: string;
   phone_number: string;
@@ -84,6 +92,7 @@ export type CreateAppointmentPayload = {
   payment_method?: string;
   appointment_priority?: 'Urgent' | 'Routine';
   doctor_name: string;
+  teacher_name?: string;
   department_name: string;
   visit_type: string;
   appointment_date: string;
@@ -95,6 +104,8 @@ export type CreateAppointmentPayload = {
   patient_sex?: string;
   patient_gender?: string;
   status?: AppointmentStatus;
+  patient_type?: 'student' | 'teacher';
+  actor_role?: 'student' | 'teacher' | 'admin';
 };
 
 function trimTrailingSlashes(value: string): string {
@@ -131,6 +142,7 @@ function buildUrl(query: AppointmentQuery = {}): string {
 function toStatus(value: string): AppointmentStatus {
   const lowered = value.trim().toLowerCase();
   if (lowered === 'new') return 'New';
+  if (lowered === 'appointed') return 'Appointed';
   if (lowered === 'confirmed') return 'Confirmed';
   if (lowered === 'pending') return 'Pending';
   if (lowered === 'accepted') return 'Accepted';
@@ -142,23 +154,40 @@ function normalizeRow(item: Record<string, unknown>): AppointmentRow {
   return {
     id: Number(item.id || 0),
     bookingId: String(item.booking_id || ''),
-    patientId: String(item.patient_id || ''),
-    patientName: String(item.patient_name || ''),
-    patientEmail: String(item.patient_email || ''),
+    patientId: String(item.patient_id || item.student_id || ''),
+    patientName: String(item.patient_name || item.student_name || ''),
+    patientEmail: String(item.patient_email || item.student_email || ''),
     phoneNumber: String(item.phone_number || ''),
     emergencyContact: String(item.emergency_contact || ''),
     insuranceProvider: String(item.insurance_provider || ''),
     paymentMethod: String(item.payment_method || ''),
     appointmentPriority: (String(item.appointment_priority || 'Routine') as 'Urgent' | 'Routine'),
-    service: String(item.service_name || ''),
+    service: String(item.service_name || item.visit_type || ''),
     department: String(item.department_name || ''),
-    doctor: String(item.doctor_name || ''),
+    doctor: String(item.doctor_name || item.teacher_name || ''),
     scheduleDate: String(item.appointment_date || ''),
     scheduleTime: String(item.preferred_time || ''),
     status: toStatus(String(item.status || 'Pending')),
     symptomsSummary: String(item.symptoms_summary || ''),
     doctorNotes: String(item.doctor_notes || ''),
     visitReason: String(item.visit_reason || ''),
+    patientType: ((): 'student' | 'teacher' | 'unknown' => {
+      const type = String(item.patient_type || item.booker_type || '')
+        .trim()
+        .toLowerCase();
+      if (type === 'student') return 'student';
+      if (type === 'teacher') return 'teacher';
+      return 'unknown';
+    })(),
+    actorRole: ((): 'student' | 'teacher' | 'admin' | 'unknown' => {
+      const role = String(item.actor_role || item.appointed_by_role || item.booked_by_role || '')
+        .trim()
+        .toLowerCase();
+      if (role === 'student') return 'student';
+      if (role === 'teacher') return 'teacher';
+      if (role === 'admin') return 'admin';
+      return 'unknown';
+    })(),
     createdAt: String(item.created_at || ''),
     updatedAt: String(item.updated_at || '')
   };
@@ -190,6 +219,7 @@ export async function updateAppointment(payload: UpdateAppointmentPayload): Prom
     method: 'POST',
     body: {
       action: 'update',
+      workflow_scope: 'student_teacher',
       ...payload
     }
   });
@@ -204,6 +234,9 @@ export async function createAppointment(payload: CreateAppointmentPayload): Prom
     method: 'POST',
     body: {
       action: 'create',
+      workflow_scope: 'student_teacher',
+      student_name: payload.student_name || payload.patient_name,
+      teacher_name: payload.teacher_name || payload.doctor_name,
       ...payload
     }
   });

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import {
@@ -258,6 +259,14 @@ const doctorItems = computed(() => {
   return ['All', ...dynamic];
 });
 const doctorRequestItems = computed(() => doctorItems.value.filter((item) => item !== 'All'));
+
+function patientTypeLabel(value: string): string {
+  return value === 'student' ? 'Student' : value === 'teacher' ? 'Teacher' : 'Unknown';
+}
+
+function patientTypeColor(value: string): string {
+  return value === 'student' ? 'primary' : value === 'teacher' ? 'deep-orange' : 'secondary';
+}
 const patientLookupItems = computed(() => {
   return queueRows.value.map((row) => ({
     title: `${row.patientName} (${row.patientId})`,
@@ -299,6 +308,14 @@ const metrics = computed(() => {
 
   return { totalRequests, pending, inProgress, completedToday, urgent };
 });
+
+const analyticsCards = computed(() => [
+  { title: 'Total Requests', value: metrics.value.totalRequests, subtitle: 'All queued laboratory requests', className: 'analytics-card-blue', icon: 'mdi-flask-outline' },
+  { title: 'Pending', value: metrics.value.pending, subtitle: 'Awaiting lab processing', className: 'analytics-card-orange', icon: 'mdi-timer-sand' },
+  { title: 'In Progress', value: metrics.value.inProgress, subtitle: 'Currently being processed', className: 'analytics-card-indigo', icon: 'mdi-progress-clock' },
+  { title: 'Completed Today', value: metrics.value.completedToday, subtitle: 'Released in today`s workflow', className: 'analytics-card-green', icon: 'mdi-check-decagram-outline' },
+  { title: 'Urgent', value: metrics.value.urgent, subtitle: 'Priority requests needing attention', className: 'analytics-card-red', icon: 'mdi-alert-circle-outline' }
+]);
 
 const filteredRows = computed(() => {
   const query = searchQuery.value.trim().toLowerCase();
@@ -585,6 +602,7 @@ function createFallbackWorkflows(): WorkflowRecord[] {
       visitId: 'VISIT-2026-2001',
       patientId: 'PAT-3401',
       patientName: 'Maria Santos',
+      patientType: 'teacher',
       age: 34,
       sex: 'Female',
       category: 'Blood Test',
@@ -624,6 +642,7 @@ function createFallbackWorkflows(): WorkflowRecord[] {
       visitId: 'VISIT-2026-1998',
       patientId: 'PAT-3188',
       patientName: 'John Doe',
+      patientType: 'teacher',
       age: 39,
       sex: 'Male',
       category: 'X-Ray',
@@ -661,6 +680,7 @@ function createFallbackWorkflows(): WorkflowRecord[] {
       visitId: 'VISIT-2026-1983',
       patientId: 'PAT-2977',
       patientName: 'Emma Tan',
+      patientType: 'teacher',
       age: 29,
       sex: 'Female',
       category: 'Urinalysis',
@@ -701,6 +721,7 @@ function createFallbackWorkflows(): WorkflowRecord[] {
       visitId: 'VISIT-2026-1967',
       patientId: 'PAT-2844',
       patientName: 'Mark Reyes',
+      patientType: 'teacher',
       age: 45,
       sex: 'Male',
       category: 'COVID Test',
@@ -741,6 +762,7 @@ function createFallbackWorkflows(): WorkflowRecord[] {
       visitId: 'VISIT-2026-1948',
       patientId: 'PAT-2674',
       patientName: 'Alex Chua',
+      patientType: 'teacher',
       age: 31,
       sex: 'Male',
       category: 'Blood Test',
@@ -782,6 +804,7 @@ function createFallbackWorkflows(): WorkflowRecord[] {
       visitId: 'VISIT-2026-1932',
       patientId: 'PAT-2509',
       patientName: 'Lara Gomez',
+      patientType: 'teacher',
       age: 53,
       sex: 'Female',
       category: 'ECG',
@@ -828,6 +851,7 @@ function toQueueRow(record: WorkflowRecord): LabQueueRequest {
     visitId: record.visitId,
     patientId: record.patientId,
     patientName: record.patientName,
+    patientType: record.patientType,
     category: record.category,
     priority: record.priority,
     status: record.status,
@@ -842,6 +866,7 @@ function createWorkflowFromQueue(row: LabQueueRequest): WorkflowRecord {
     visitId: row.visitId,
     patientId: row.patientId,
     patientName: row.patientName,
+    patientType: row.patientType,
     age: null,
     sex: '',
     category: row.category,
@@ -902,6 +927,7 @@ function upsertQueueFromWorkflow(record: WorkflowRecord): void {
   const existing = queueRows.value.find((row) => row.requestId === record.requestId);
   if (existing) {
     existing.patientName = record.patientName;
+    existing.patientType = record.patientType;
     existing.category = record.category;
     existing.priority = record.priority;
     existing.status = record.status;
@@ -921,6 +947,7 @@ function upsertWorkflowFromBackend(detail: LabRequestDetail, logs: LabActivityLo
     visitId: detail.visitId,
     patientId: detail.patientId,
     patientName: detail.patientName,
+    patientType: detail.patientType,
     category: detail.category,
     priority: detail.priority,
     status: detail.status,
@@ -1873,7 +1900,7 @@ function buildReportMarkup(record: WorkflowRecord): string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Nexora Lab Report ${escapeHtml(reportNumber)}</title>
+  <title>BCP Clinic Lab Report ${escapeHtml(reportNumber)}</title>
   <style>
     :root {
       --brand: #1f4fa9;
@@ -1977,7 +2004,7 @@ function buildReportMarkup(record: WorkflowRecord): string {
   <article class="sheet">
     <header class="header">
       <div>
-        <div class="brand">Nexora Medical Center</div>
+        <div class="brand">BCP Clinic</div>
         <div class="sub">Laboratory Diagnostic Report</div>
       </div>
       <div class="chip">Result Ready</div>
@@ -2137,13 +2164,7 @@ function formatAutosavedAt(value: string | null): string {
         </v-card-text>
       </v-card>
 
-      <v-row class="mb-4">
-        <v-col cols="12" sm="6" lg="2"><v-card class="metric-card metric-total" elevation="0"><v-card-text><div class="metric-title">Total Requests</div><div class="metric-value">{{ metrics.totalRequests }}</div></v-card-text></v-card></v-col>
-        <v-col cols="12" sm="6" lg="2"><v-card class="metric-card metric-pending" elevation="0"><v-card-text><div class="metric-title">Pending</div><div class="metric-value">{{ metrics.pending }}</div></v-card-text></v-card></v-col>
-        <v-col cols="12" sm="6" lg="2"><v-card class="metric-card metric-progress" elevation="0"><v-card-text><div class="metric-title">In Progress</div><div class="metric-value">{{ metrics.inProgress }}</div></v-card-text></v-card></v-col>
-        <v-col cols="12" sm="6" lg="3"><v-card class="metric-card metric-completed" elevation="0"><v-card-text><div class="metric-title">Completed Today</div><div class="metric-value">{{ metrics.completedToday }}</div></v-card-text></v-card></v-col>
-        <v-col cols="12" sm="6" lg="3"><v-card class="metric-card metric-urgent" elevation="0"><v-card-text><div class="metric-title">Urgent</div><div class="metric-value">{{ metrics.urgent }}</div></v-card-text></v-card></v-col>
-      </v-row>
+      <AnalyticsCardGrid :items="analyticsCards" lg="3" />
 
       <v-card class="lab-surface-card" variant="outlined">
         <v-card-item>
@@ -2186,6 +2207,7 @@ function formatAutosavedAt(value: string | null): string {
                 <tr>
                   <th>REQUEST ID</th>
                   <th>PATIENT</th>
+                  <th>TYPE</th>
                   <th>CATEGORY</th>
                   <th>PRIORITY</th>
                   <th>STATUS</th>
@@ -2197,6 +2219,7 @@ function formatAutosavedAt(value: string | null): string {
                 <tr v-for="row in pagedRows" :key="row.requestId" class="queue-row" @click="openWorkflow(row.requestId, rowPrimaryAction(row))">
                   <td class="font-weight-bold">#{{ row.requestId }}</td>
                   <td><div class="font-weight-bold">{{ row.patientName }}</div><div class="text-caption text-medium-emphasis">{{ row.patientId }} | {{ row.visitId }}</div></td>
+                  <td><v-chip size="small" variant="tonal" :color="patientTypeColor(row.patientType)">{{ patientTypeLabel(row.patientType) }}</v-chip></td>
                   <td>{{ row.category }}</td>
                   <td><v-chip size="small" variant="tonal" :color="priorityChipColor(row.priority)">{{ row.priority }}</v-chip></td>
                   <td><v-chip size="small" variant="tonal" :color="statusChipColor(row.status)">{{ row.status }}</v-chip></td>
@@ -2207,7 +2230,7 @@ function formatAutosavedAt(value: string | null): string {
                     </v-btn>
                   </td>
                 </tr>
-                <tr v-if="pagedRows.length === 0"><td colspan="7" class="text-center py-8"><div class="text-h6 mb-1">{{ emptyStateTitle }}</div><div class="text-body-2 text-medium-emphasis">{{ emptyStateDescription }}</div></td></tr>
+                <tr v-if="pagedRows.length === 0"><td colspan="8" class="text-center py-8"><div class="text-h6 mb-1">{{ emptyStateTitle }}</div><div class="text-body-2 text-medium-emphasis">{{ emptyStateDescription }}</div></td></tr>
               </tbody>
             </v-table>
           </div>
@@ -2255,6 +2278,7 @@ function formatAutosavedAt(value: string | null): string {
                     <div class="summary-pair"><span>Request ID</span><strong>#{{ activeWorkflow.requestId }}</strong></div>
                     <div class="summary-pair"><span>Category</span><strong>{{ activeWorkflow.category }}</strong></div>
                     <div class="summary-pair"><span>Priority</span><v-chip size="small" :color="priorityChipColor(activeWorkflow.priority)" variant="tonal">{{ activeWorkflow.priority }}</v-chip></div>
+                    <div class="summary-pair"><span>Patient Type</span><v-chip size="small" :color="patientTypeColor(activeWorkflow.patientType)" variant="tonal">{{ patientTypeLabel(activeWorkflow.patientType) }}</v-chip></div>
                     <div class="summary-pair"><span>Doctor</span><strong>{{ activeWorkflow.requestedByDoctor || '--' }}</strong></div>
                     <div class="summary-pair"><span>Requested At</span><strong>{{ formatDateTime(activeWorkflow.requestedAt) }}</strong></div>
                     <v-divider class="my-3" />

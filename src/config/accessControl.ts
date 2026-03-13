@@ -14,17 +14,18 @@ type ModuleKey =
 
 const MODULE_ROUTE_MAP: Record<ModuleKey, string> = {
   appointments: '/appointments',
-  patients: '/modules/patients-database',
+  patients: '/modules/patients',
   registration: '/modules/registration',
   walkin: '/modules/walk-in',
   checkup: '/modules/check-up',
   laboratory: '/modules/laboratory',
-  pharmacy: '/modules/pharmacy-inventory',
-  mental_health: '/modules/mental-health-addiction',
+  pharmacy: '/modules/pharmacy',
+  mental_health: '/modules/mental-health',
   reports: '/modules/reports'
 };
 
 const DEPARTMENT_MODULE_MAP: Array<{ matcher: RegExp; module: ModuleKey }> = [
+  { matcher: /teacher|student|faculty|adviser/i, module: 'appointments' },
   { matcher: /appoint/i, module: 'appointments' },
   { matcher: /patient/i, module: 'patients' },
   { matcher: /registr/i, module: 'registration' },
@@ -37,6 +38,7 @@ const DEPARTMENT_MODULE_MAP: Array<{ matcher: RegExp; module: ModuleKey }> = [
 ];
 
 const ROLE_MODULE_MAP: Array<{ matcher: RegExp; module: ModuleKey }> = [
+  { matcher: /teacher|student|faculty|adviser/i, module: 'appointments' },
   { matcher: /appoint/i, module: 'appointments' },
   { matcher: /records|patient/i, module: 'patients' },
   { matcher: /registr/i, module: 'registration' },
@@ -102,7 +104,7 @@ export function resolveAllowedModulesForUser(user: AdminUser | null): ModuleKey[
     if (normalized) allowed.add(normalized);
   });
 
-  if (!allowed.size) return [];
+  if (!allowed.size) return ['appointments'];
   return Array.from(allowed);
 }
 
@@ -110,7 +112,7 @@ export function defaultRouteForUser(user: AdminUser | null): string {
   if (!user) return '/admin/login';
   if (isSuperAdmin(user)) return '/dashboard/default';
   const modules = resolveAllowedModulesForUser(user);
-  if (!modules.length) return '/dashboard/default';
+  if (!modules.length) return '/appointments';
   return MODULE_ROUTE_MAP[modules[0]];
 }
 

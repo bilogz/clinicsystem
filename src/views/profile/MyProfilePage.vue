@@ -56,7 +56,7 @@ const loginHistory = computed(() => payload.value.loginHistory);
 const initials = computed(() => {
   const name = profile.value.fullName.trim();
   if (!name) {
-    return 'AD';
+    return 'TC';
   }
 
   const parts = name.split(/\s+/).filter(Boolean);

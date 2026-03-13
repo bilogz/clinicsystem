@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import nexoraLogo from '@/assets/images/logos/nexora-logo.svg';
+import bcpClinicLogo from '@/assets/images/logos/bcp-olp-logo-mini2.png';
 import PatientBookingModal from '@/views/patient/components/PatientBookingModal.vue';
 import PatientAuthModal from '@/views/patient/components/PatientAuthModal.vue';
 import PatientProfileModal from '@/views/patient/components/PatientProfileModal.vue';
@@ -19,7 +19,7 @@ const navLinks: NavLink[] = [
   { id: 'treatment', label: 'Treatment' },
   { id: 'doctors', label: 'Doctors' },
   { id: 'contact', label: 'Contact Us' },
-  { id: 'portal', label: 'My Portal' }
+  { id: 'portal', label: 'Clinic Portal' }
 ];
 
 const doctorDirectory = ref(['Dr. Humour', 'Dr. Jenni', 'Dr. Rivera', 'Dr. Morco', 'Dr. Molina', 'Dr. B. Martinez']);
@@ -55,7 +55,7 @@ function scrollToSection(id: string, pushHash = true): void {
   target.scrollIntoView({ behavior: 'smooth', block: 'start' });
   activeSection.value = id;
   if (pushHash) {
-    void router.replace({ path: '/patient/', hash: id === 'home' ? '' : `#${id}` });
+    void router.replace({ path: '/student/', hash: id === 'home' ? '' : `#${id}` });
   }
 }
 
@@ -167,7 +167,7 @@ onBeforeUnmount(() => {
         <div class="topbar-meta">
           <span><v-icon icon="mdi-phone" size="14" class="mr-1" /> Call: +01 1234567890</span>
           <span><v-icon icon="mdi-email" size="14" class="mr-1" /> demo@gmail.com</span>
-          <span><v-icon icon="mdi-map-marker" size="14" class="mr-1" /> Nexora Medical Center</span>
+          <span><v-icon icon="mdi-map-marker" size="14" class="mr-1" /> Bestlink College Campus Clinic</span>
         </div>
         <div class="topbar-auth">
           <template v-if="!isAuthenticated">
@@ -186,7 +186,7 @@ onBeforeUnmount(() => {
     <section class="patient-hero">
       <div class="patient-hero-overlay"></div>
       <div class="patient-hero-content">
-        <img :src="nexoraLogo" alt="Nexora Medical Center" class="patient-logo" />
+        <img :src="bcpClinicLogo" alt="BCP Clinic" class="patient-logo" />
 
         <nav class="patient-nav">
           <button v-for="link in navLinks" :key="link.id" type="button" class="nav-btn" :class="{ active: activeSection === link.id }" @click="scrollToSection(link.id)">
@@ -194,18 +194,18 @@ onBeforeUnmount(() => {
           </button>
         </nav>
 
-        <h1>WE CARE FOR YOU</h1>
-        <p>Book ahead and confirm your details to skip the physical queue.</p>
+        <h1>BCP CLINIC SYSTEM</h1>
+        <p>Patients can book ahead and monitor appointment assignment in real time.</p>
         <button type="button" class="book-now-btn" @click="openBookingModal">BOOK NOW</button>
       </div>
     </section>
 
     <section id="about" class="section-card">
-      <h2>About Nexora</h2>
-      <p>Digital-first patient services with fast booking, intelligent routing, and connected care modules.</p>
+      <h2>About the System</h2>
+      <p>Digital-first school clinic scheduling with fast booking, assignment tracking, and status monitoring.</p>
       <div class="stats-grid">
         <article><strong>24/7</strong><span>Priority Triage</span></article>
-        <article><strong>20+</strong><span>Specialists</span></article>
+        <article><strong>20+</strong><span>Faculty Advisors</span></article>
         <article><strong>5</strong><span>Connected Care Modules</span></article>
       </div>
     </section>
@@ -241,7 +241,7 @@ onBeforeUnmount(() => {
 
     <section id="portal" class="section-card portal-card">
       <div class="portal-header">
-        <h2>My Patient Portal</h2>
+        <h2>My Clinic Portal</h2>
         <div class="portal-actions">
           <v-btn v-if="isAuthenticated" variant="outlined" size="small" :loading="loadingPortal" @click="loadPatientPortal">Refresh</v-btn>
           <v-btn v-else color="primary" size="small" @click="openAuth('login')">Login to Continue</v-btn>
@@ -250,17 +250,17 @@ onBeforeUnmount(() => {
 
       <v-alert v-if="portalError" type="error" variant="tonal" class="mb-4">{{ portalError }}</v-alert>
 
-      <div v-if="loadingSession" class="portal-empty">Checking patient session...</div>
+      <div v-if="loadingSession" class="portal-empty">Checking clinic session...</div>
       <div v-else-if="!isAuthenticated" class="portal-empty">
-        <p>Create an optional patient account to track your bookings, history, and status securely.</p>
+        <p>Create an optional account to track clinic bookings and status securely.</p>
         <div class="portal-cta">
-          <v-btn color="primary" @click="openAuth('signup')">Create Patient Account</v-btn>
+          <v-btn color="primary" @click="openAuth('signup')">Create Clinic Account</v-btn>
           <v-btn variant="outlined" @click="openAuth('login')">I Already Have an Account</v-btn>
         </div>
       </div>
       <div v-else>
         <div class="portal-profile">
-          <article><label>Patient Code</label><strong>{{ patientAccount?.patientCode }}</strong></article>
+            <article><label>Patient Code</label><strong>{{ patientAccount?.patientCode }}</strong></article>
           <article><label>Name</label><strong>{{ patientAccount?.fullName }}</strong></article>
           <article><label>Email</label><strong>{{ patientAccount?.email }}</strong></article>
           <article><label>Phone</label><strong>{{ patientAccount?.phoneNumber }}</strong></article>
@@ -291,14 +291,14 @@ onBeforeUnmount(() => {
                   <small>{{ item.reason }}</small>
                 </td>
                 <td>{{ item.appointmentDate }} {{ item.preferredTime }}</td>
-                <td>{{ item.doctorName }}</td>
+                <td>{{ item.teacherName || item.doctorName }}</td>
                 <td>{{ item.department }}</td>
                 <td><span class="status-pill">{{ item.status }}</span></td>
               </tr>
             </tbody>
           </table>
         </div>
-        <div v-else class="portal-empty">No appointment history yet for this patient account.</div>
+        <div v-else class="portal-empty">No appointment history yet for this clinic account.</div>
       </div>
     </section>
 
@@ -310,17 +310,17 @@ onBeforeUnmount(() => {
 
 <style scoped lang="scss">
 .patient-page {
-  --nexora-primary-dark: #0f66e8;
-  --nexora-primary: #1bbaff;
-  --nexora-bg: #eef2f4;
-  --nexora-border: #d4dde2;
+  --clinic-primary-dark: #0f66e8;
+  --clinic-primary: #1bbaff;
+  --clinic-bg: #eef2f4;
+  --clinic-border: #d4dde2;
   min-height: 100vh;
-  background: var(--nexora-bg);
+  background: var(--clinic-bg);
   padding-bottom: 56px;
 }
 
 .patient-topbar {
-  background: linear-gradient(90deg, var(--nexora-primary-dark) 0%, var(--nexora-primary) 100%);
+  background: linear-gradient(90deg, var(--clinic-primary-dark) 0%, var(--clinic-primary) 100%);
   color: #fff;
   font-size: 14px;
   font-weight: 600;
@@ -423,7 +423,7 @@ onBeforeUnmount(() => {
 .nav-btn:hover,
 .nav-link:hover,
 .nav-btn.active {
-  color: var(--nexora-primary);
+  color: var(--clinic-primary);
 }
 
 .patient-hero h1 {
@@ -442,7 +442,7 @@ onBeforeUnmount(() => {
   border: 0;
   border-radius: 8px;
   padding: 12px 30px;
-  background: var(--nexora-primary);
+  background: var(--clinic-primary);
   color: #fff;
   font-size: 17px;
   font-weight: 700;
@@ -457,7 +457,7 @@ onBeforeUnmount(() => {
   width: min(1200px, 94vw);
   margin: 16px auto;
   background: #fff;
-  border: 1px solid var(--nexora-border);
+  border: 1px solid var(--clinic-border);
   border-radius: 14px;
   padding: 24px;
 }

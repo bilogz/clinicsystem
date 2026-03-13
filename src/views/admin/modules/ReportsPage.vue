@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
+import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
@@ -22,13 +23,13 @@ let lastRequestId = 0;
 const kpiCards = computed(() => {
   const base = snapshot.value?.kpis;
   return [
-    { title: 'Total Patients', value: base?.totalPatients ?? 0, subtitle: 'Unified patient registry', className: 'metric-blue' },
-    { title: 'Total Visits', value: base?.totalVisits ?? 0, subtitle: 'Cross-module traffic', className: 'metric-indigo' },
-    { title: 'Pending Queue', value: base?.pendingQueue ?? 0, subtitle: 'Needs action', className: 'metric-amber' },
-    { title: 'Emergency Cases', value: base?.emergencyCases ?? 0, subtitle: 'Escalated priority', className: 'metric-red' },
-    { title: 'Active Profiles', value: base?.activeProfiles ?? 0, subtitle: 'With module activity', className: 'metric-green' },
-    { title: 'High Risk', value: base?.highRiskPatients ?? 0, subtitle: 'Clinical monitoring', className: 'metric-orange' },
-    { title: 'Dispensed Items', value: base?.dispensedItems ?? 0, subtitle: 'Pharmacy output', className: 'metric-cyan' }
+    { title: 'Total Patients', value: base?.totalPatients ?? 0, subtitle: 'Unified patient registry', className: 'analytics-card-blue', icon: 'mdi-account-group-outline' },
+    { title: 'Total Visits', value: base?.totalVisits ?? 0, subtitle: 'Cross-module traffic', className: 'analytics-card-indigo', icon: 'mdi-chart-line' },
+    { title: 'Pending Queue', value: base?.pendingQueue ?? 0, subtitle: 'Needs action', className: 'analytics-card-orange', icon: 'mdi-timer-sand' },
+    { title: 'Emergency Cases', value: base?.emergencyCases ?? 0, subtitle: 'Escalated priority', className: 'analytics-card-red', icon: 'mdi-alert-octagon-outline' },
+    { title: 'Active Profiles', value: base?.activeProfiles ?? 0, subtitle: 'With module activity', className: 'analytics-card-green', icon: 'mdi-account-check-outline' },
+    { title: 'High Risk', value: base?.highRiskPatients ?? 0, subtitle: 'Clinical monitoring', className: 'analytics-card-purple', icon: 'mdi-heart-pulse' },
+    { title: 'Dispensed Items', value: base?.dispensedItems ?? 0, subtitle: 'Pharmacy output', className: 'analytics-card-cyan', icon: 'mdi-pill' }
   ];
 });
 
@@ -91,106 +92,135 @@ onUnmounted(() => {
 
 <template>
   <div class="reports-page">
-    <v-card class="hero-card" variant="outlined">
-      <v-card-text class="d-flex justify-space-between align-center flex-wrap ga-3">
-        <div>
-          <h1 class="text-h4 font-weight-black mb-1">Clinic Reports</h1>
-          <p class="text-medium-emphasis mb-0">Dynamic, Neon-backed analytics across appointments, walk-in, check-up, mental health, and pharmacy.</p>
-        </div>
-      </v-card-text>
-    </v-card>
+    <template v-if="loading && !snapshot">
+      <v-card class="hero-card" variant="outlined">
+        <v-card-text>
+          <v-skeleton-loader type="heading, text" />
+        </v-card-text>
+      </v-card>
 
-    <v-row>
-      <v-col v-for="card in kpiCards" :key="card.title" cols="12" sm="6" md="4" lg="3">
-        <v-card class="metric-card" :class="card.className" elevation="0">
-          <v-card-text>
-            <div class="metric-label">{{ card.title }}</div>
-            <div class="metric-value">{{ card.value }}</div>
-            <div class="metric-subtitle">{{ card.subtitle }}</div>
-          </v-card-text>
-        </v-card>
-      </v-col>
-    </v-row>
+      <v-row>
+        <v-col v-for="index in 6" :key="`reports-skeleton-card-${index}`" cols="12" sm="6" lg="4">
+          <v-skeleton-loader type="image, article" class="rounded-lg" />
+        </v-col>
+      </v-row>
 
-    <v-row>
-      <v-col cols="12" md="4">
-        <v-card class="surface-card" variant="outlined">
-          <v-card-title>Module Distribution</v-card-title>
-          <v-divider />
-          <v-list density="comfortable">
-            <v-list-item v-for="row in moduleTotals" :key="row.module">
-              <template #title>{{ row.module }}</template>
-              <template #append><strong>{{ row.total }}</strong></template>
-            </v-list-item>
-          </v-list>
-        </v-card>
-      </v-col>
-      <v-col cols="12" md="8">
-        <v-card class="surface-card" variant="outlined">
-          <v-card-title>Recent Activity</v-card-title>
-          <v-divider />
-          <v-list density="compact">
-            <v-list-item v-for="row in activity" :key="`${row.module}-${row.action}-${row.created_at}`">
-              <template #title>{{ row.action }}</template>
-              <template #subtitle>{{ row.detail }}</template>
-              <template #append>
-                <div class="text-right">
-                  <div class="text-caption">{{ row.module }}</div>
-                  <div class="text-caption text-medium-emphasis">{{ formatDate(row.created_at) }}</div>
-                </div>
-              </template>
-            </v-list-item>
-            <v-list-item v-if="!activity.length">
-              <template #title>No activity logs available.</template>
-            </v-list-item>
-          </v-list>
-        </v-card>
-      </v-col>
-    </v-row>
+      <v-row>
+        <v-col cols="12" md="4">
+          <v-card class="surface-card" variant="outlined">
+            <v-card-text>
+              <v-skeleton-loader type="heading, list-item-three-line@5" />
+            </v-card-text>
+          </v-card>
+        </v-col>
+        <v-col cols="12" md="8">
+          <v-card class="surface-card" variant="outlined">
+            <v-card-text>
+              <v-skeleton-loader type="heading, list-item-two-line@6" />
+            </v-card-text>
+          </v-card>
+        </v-col>
+      </v-row>
 
-    <v-card class="surface-card" variant="outlined">
-      <v-card-item>
-        <v-card-title>Daily Trend</v-card-title>
-        <template #append>
-          <div class="d-flex ga-2 align-center flex-wrap">
-            <SaasDateTimePickerField v-model="fromDate" mode="date" label="From" hide-details />
-            <SaasDateTimePickerField v-model="toDate" mode="date" label="To" hide-details />
-            <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-chart-line" :loading="loading" @click="load">Apply</v-btn>
+      <v-card class="surface-card" variant="outlined">
+        <v-card-text>
+          <v-skeleton-loader type="heading, actions, table-heading, table-row-divider@6" />
+        </v-card-text>
+      </v-card>
+    </template>
+
+    <template v-else>
+      <v-card class="hero-card" variant="outlined">
+        <v-card-text class="d-flex justify-space-between align-center flex-wrap ga-3">
+          <div>
+            <h1 class="text-h4 font-weight-black mb-1">Clinic Reports</h1>
+            <p class="text-medium-emphasis mb-0">Dynamic, MySQL-backed analytics across appointments, walk-in, check-up, mental health, and pharmacy.</p>
           </div>
-        </template>
-      </v-card-item>
-      <v-divider />
-      <v-card-text class="pt-2">
-        <v-progress-linear v-if="loading" color="primary" indeterminate class="mb-2" />
-        <v-table density="comfortable">
-          <thead>
-            <tr>
-              <th>DATE</th>
-              <th>APPOINTMENTS</th>
-              <th>WALK-IN</th>
-              <th>CHECK-UP</th>
-              <th>MENTAL</th>
-              <th>PHARMACY</th>
-              <th>TOTAL</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in trend" :key="row.day">
-              <td>{{ row.day }}</td>
-              <td>{{ row.appointments }}</td>
-              <td>{{ row.walkin }}</td>
-              <td>{{ row.checkup }}</td>
-              <td>{{ row.mental }}</td>
-              <td>{{ row.pharmacy }}</td>
-              <td class="font-weight-bold">{{ totalTrendRow(row) }}</td>
-            </tr>
-            <tr v-if="!loading && !trend.length">
-              <td colspan="7" class="text-center text-medium-emphasis py-6">No report data available for selected dates.</td>
-            </tr>
-          </tbody>
-        </v-table>
-      </v-card-text>
-    </v-card>
+        </v-card-text>
+      </v-card>
+
+      <AnalyticsCardGrid :items="kpiCards" md="4" lg="3" />
+
+      <v-row>
+        <v-col cols="12" md="4">
+          <v-card class="surface-card" variant="outlined">
+            <v-card-title>Module Distribution</v-card-title>
+            <v-divider />
+            <v-list density="comfortable">
+              <v-list-item v-for="row in moduleTotals" :key="row.module">
+                <template #title>{{ row.module }}</template>
+                <template #append><strong>{{ row.total }}</strong></template>
+              </v-list-item>
+            </v-list>
+          </v-card>
+        </v-col>
+        <v-col cols="12" md="8">
+          <v-card class="surface-card" variant="outlined">
+            <v-card-title>Recent Activity</v-card-title>
+            <v-divider />
+            <v-list density="compact">
+              <v-list-item v-for="row in activity" :key="`${row.module}-${row.action}-${row.created_at}`">
+                <template #title>{{ row.action }}</template>
+                <template #subtitle>{{ row.detail }}</template>
+                <template #append>
+                  <div class="text-right">
+                    <div class="text-caption">{{ row.module }}</div>
+                    <div class="text-caption text-medium-emphasis">{{ formatDate(row.created_at) }}</div>
+                  </div>
+                </template>
+              </v-list-item>
+              <v-list-item v-if="!activity.length">
+                <template #title>No activity logs available.</template>
+              </v-list-item>
+            </v-list>
+          </v-card>
+        </v-col>
+      </v-row>
+
+      <v-card class="surface-card" variant="outlined">
+        <v-card-item>
+          <v-card-title>Daily Trend</v-card-title>
+          <template #append>
+            <div class="d-flex ga-2 align-center flex-wrap">
+              <SaasDateTimePickerField v-model="fromDate" mode="date" label="From" hide-details />
+              <SaasDateTimePickerField v-model="toDate" mode="date" label="To" hide-details />
+              <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-chart-line" :loading="loading" @click="load">Apply</v-btn>
+            </div>
+          </template>
+        </v-card-item>
+        <v-divider />
+        <v-card-text class="pt-2">
+          <v-progress-linear v-if="loading" color="primary" indeterminate class="mb-2" />
+          <v-table density="comfortable">
+            <thead>
+              <tr>
+                <th>DATE</th>
+                <th>APPOINTMENTS</th>
+                <th>WALK-IN</th>
+                <th>CHECK-UP</th>
+                <th>MENTAL</th>
+                <th>PHARMACY</th>
+                <th>TOTAL</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in trend" :key="row.day">
+                <td>{{ row.day }}</td>
+                <td>{{ row.appointments }}</td>
+                <td>{{ row.walkin }}</td>
+                <td>{{ row.checkup }}</td>
+                <td>{{ row.mental }}</td>
+                <td>{{ row.pharmacy }}</td>
+                <td class="font-weight-bold">{{ totalTrendRow(row) }}</td>
+              </tr>
+              <tr v-if="!loading && !trend.length">
+                <td colspan="7" class="text-center text-medium-emphasis py-6">No report data available for selected dates.</td>
+              </tr>
+            </tbody>
+          </v-table>
+        </v-card-text>
+      </v-card>
+    </template>
 
     <ModuleActivityLogs module="all" title="All Module Activity Logs" :per-page="12" />
 

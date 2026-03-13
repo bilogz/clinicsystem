@@ -3,11 +3,26 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { fetchClinicDashboard, type ClinicDashboardPayload } from '@/services/clinicDashboard';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
+import {
+  appointmentBookingRoleColor,
+  appointmentBookingRoleLabel,
+  fetchAppointmentMonitor,
+  type AppointmentMonitorRow,
+  type AppointmentMonitorSummary
+} from '@/services/appointmentMonitor';
 
 const loading = ref(false);
 const loadError = ref('');
 const viewActive = ref(true);
 const realtime = useRealtimeListSync();
+const monitorSummary = ref<AppointmentMonitorSummary>({
+  totalAppointments: 0,
+  studentAppointed: 0,
+  teacherAppointed: 0,
+  fullyAppointed: 0,
+  unassigned: 0
+});
+const monitorByBookingId = ref<Record<string, AppointmentMonitorRow>>({});
 const dashboard = ref<ClinicDashboardPayload>({
   generatedAt: '',
   summary: {
@@ -28,34 +43,34 @@ const dashboard = ref<ClinicDashboardPayload>({
 const summaryCards = computed(() => {
   return [
     {
-      key: 'patients',
-      title: 'Total Patients',
-      subtitle: 'Registered records',
-      value: dashboard.value.summary.totalPatients,
-      icon: '$accountGroupOutline',
-      cardClass: 'analytics-card-green'
-    },
-    {
       key: 'appointments',
       title: 'Total Appointments',
       subtitle: 'All booking entries',
       value: dashboard.value.summary.totalAppointments,
+      icon: '$accountGroupOutline',
+      cardClass: 'analytics-card-green'
+    },
+    {
+      key: 'student-appointed',
+      title: 'Student Appointed',
+      subtitle: 'Student linked to booking',
+      value: monitorSummary.value.studentAppointed,
       icon: '$calendarCheckOutline',
       cardClass: 'analytics-card-blue'
     },
     {
-      key: 'today',
-      title: "Today's Appointments",
-      subtitle: 'Scheduled for today',
-      value: dashboard.value.summary.todayAppointments,
+      key: 'teacher-appointed',
+      title: 'Booked by Teacher',
+      subtitle: 'Appointments created by teachers',
+      value: monitorSummary.value.teacherAppointed,
       icon: '$calendarToday',
       cardClass: 'analytics-card-orange'
     },
     {
-      key: 'pending',
-      title: 'Pending Queue',
-      subtitle: 'Awaiting action',
-      value: dashboard.value.summary.pendingAppointments,
+      key: 'fully-appointed',
+      title: 'Doctor Assigned',
+      subtitle: 'Appointments with doctor assignment',
+      value: monitorSummary.value.fullyAppointed,
       icon: '$timerSand',
       cardClass: 'analytics-card-purple'
     }
@@ -195,15 +210,32 @@ function formatDateTime(value: string): string {
 function statusColor(status: string): string {
   const normalized = status.trim().toLowerCase();
   if (normalized.includes('complete')) return 'success';
+  if (normalized.includes('appoint')) return 'success';
   if (normalized.includes('accept') || normalized.includes('confirm')) return 'primary';
   if (normalized.includes('pending') || normalized.includes('await')) return 'warning';
   if (normalized.includes('cancel') || normalized.includes('reject') || normalized.includes('no show')) return 'error';
   return 'secondary';
 }
 
+function assignmentLabelForBooking(bookingId: string): string {
+  const row = monitorByBookingId.value[bookingId];
+  return row ? appointmentBookingRoleLabel(row.bookedByRole) : 'Booked by Unknown';
+}
+
+function assignmentColorForBooking(bookingId: string): string {
+  const row = monitorByBookingId.value[bookingId];
+  return appointmentBookingRoleColor(row?.bookedByRole || 'unknown');
+}
+
 async function loadDashboard(options: { silent?: boolean } = {}): Promise<void> {
   const payload = await realtime.runLatest(
-    async () => fetchClinicDashboard(),
+    async () => {
+      const [dashboardPayload, monitorPayload] = await Promise.all([
+        fetchClinicDashboard(),
+        fetchAppointmentMonitor({ period: 'Upcoming', page: 1, perPage: 100 })
+      ]);
+      return { dashboardPayload, monitorPayload };
+    },
     {
       silent: options.silent,
       onStart: () => {
@@ -221,7 +253,12 @@ async function loadDashboard(options: { silent?: boolean } = {}): Promise<void> 
     }
   );
   if (!payload || !viewActive.value) return;
-  dashboard.value = payload;
+  dashboard.value = payload.dashboardPayload;
+  monitorSummary.value = payload.monitorPayload.summary;
+  monitorByBookingId.value = payload.monitorPayload.items.reduce<Record<string, AppointmentMonitorRow>>((acc, item) => {
+    if (item.bookingId) acc[item.bookingId] = item;
+    return acc;
+  }, {});
 }
 
 onMounted(() => {
@@ -243,9 +280,9 @@ onBeforeUnmount(() => {
     <v-card-text class="pa-5">
       <div class="d-flex flex-wrap align-center justify-space-between ga-4">
         <div>
-          <div class="hero-kicker">Clinical Operations</div>
-          <h1 class="text-h4 font-weight-black mb-1">Clinic Operations Dashboard</h1>
-          <p class="hero-subtitle mb-0">Live summary of appointments and patients.</p>
+          <div class="hero-kicker">Clinic Operations</div>
+          <h1 class="text-h4 font-weight-black mb-1">Appointment Monitoring Dashboard</h1>
+          <p class="hero-subtitle mb-0">Live summary of appointments booked by students and teachers, with doctor assignment visibility.</p>
         </div>
         <div class="hero-side-card">
           <div class="hero-side-label">Latest Sync</div>
@@ -330,11 +367,12 @@ onBeforeUnmount(() => {
           <v-table v-else density="comfortable">
             <thead>
               <tr>
-                <th>Patient</th>
+                <th>Student</th>
                 <th>Doctor</th>
                 <th>Date</th>
                 <th>Time</th>
                 <th>Status</th>
+                <th>Booked By</th>
               </tr>
             </thead>
             <tbody>
@@ -351,9 +389,14 @@ onBeforeUnmount(() => {
                     {{ appointment.status }}
                   </v-chip>
                 </td>
+                <td>
+                  <v-chip size="small" :color="assignmentColorForBooking(appointment.bookingId)" variant="tonal">
+                    {{ assignmentLabelForBooking(appointment.bookingId) }}
+                  </v-chip>
+                </td>
               </tr>
               <tr v-if="dashboard.upcomingAppointments.length === 0">
-                <td colspan="5" class="text-center text-medium-emphasis py-4">No upcoming appointments found.</td>
+                <td colspan="6" class="text-center text-medium-emphasis py-4">No upcoming appointments found.</td>
               </tr>
             </tbody>
           </v-table>
@@ -364,8 +407,8 @@ onBeforeUnmount(() => {
     <v-col cols="12" lg="5">
       <v-card variant="outlined" class="h-100">
         <v-card-item>
-          <v-card-title>Recent Patients</v-card-title>
-          <v-card-subtitle>Latest patient records</v-card-subtitle>
+          <v-card-title>Recent Students</v-card-title>
+          <v-card-subtitle>Latest student records</v-card-subtitle>
         </v-card-item>
         <v-card-text class="pt-2">
           <v-skeleton-loader v-if="loading" type="table"></v-skeleton-loader>
@@ -384,7 +427,7 @@ onBeforeUnmount(() => {
                 <td>{{ formatDateTime(patient.createdAt) }}</td>
               </tr>
               <tr v-if="dashboard.recentPatients.length === 0">
-                <td colspan="3" class="text-center text-medium-emphasis py-4">No patient records found.</td>
+                <td colspan="3" class="text-center text-medium-emphasis py-4">No student records found.</td>
               </tr>
             </tbody>
           </v-table>

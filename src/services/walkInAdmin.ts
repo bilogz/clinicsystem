@@ -8,6 +8,7 @@ export type WalkInCase = {
   id: number;
   case_id: string;
   patient_name: string;
+  patient_type: 'student' | 'teacher' | 'unknown';
   age: number;
   sex?: 'Male' | 'Female' | 'Other' | '';
   date_of_birth?: string;
@@ -58,6 +59,7 @@ type WalkInQuery = {
 
 export type CreateWalkInPayload = {
   patient_name: string;
+  patient_type?: 'student' | 'teacher';
   age?: number;
   sex?: 'Male' | 'Female' | 'Other' | '';
   date_of_birth?: string;

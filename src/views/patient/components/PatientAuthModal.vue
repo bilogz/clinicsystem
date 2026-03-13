@@ -196,7 +196,7 @@ async function submitReset(): Promise<void> {
   <v-dialog v-model="model" max-width="700" :persistent="submitting">
     <v-card class="auth-modal">
       <v-card-title class="auth-title d-flex align-center justify-space-between">
-        <span>Patient Account Access</span>
+        <span>Student Account Access</span>
         <v-btn icon variant="text" :disabled="submitting" @click="closeModal">
           <v-icon>mdi-close</v-icon>
         </v-btn>

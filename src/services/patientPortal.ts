@@ -10,6 +10,7 @@ export type PatientPortalAnalytics = {
 export type PatientPortalAppointment = {
   bookingId: string;
   doctorName: string;
+  teacherName?: string;
   department: string;
   appointmentDate: string;
   preferredTime: string;
@@ -33,7 +34,27 @@ export type PatientPortalData = {
 };
 
 export async function fetchPatientPortal(): Promise<PatientPortalData> {
-  return await fetchApiData<PatientPortalData>('/api/patient-portal', { ttlMs: 10_000 });
+  const data = await fetchApiData<{
+    profile: PatientPortalData['profile'];
+    analytics: PatientPortalAnalytics;
+    appointments?: Array<Record<string, unknown>>;
+  }>('/api/patient-portal', { ttlMs: 10_000 });
+  const normalizedAppointments = Array.isArray(data.appointments)
+    ? data.appointments.map((item) => ({
+        bookingId: String(item.bookingId || item.booking_id || ''),
+        doctorName: String(item.doctorName || item.teacher_name || item.doctor_name || ''),
+        teacherName: String(item.teacherName || item.teacher_name || item.doctor_name || ''),
+        department: String(item.department || item.department_name || ''),
+        appointmentDate: String(item.appointmentDate || item.appointment_date || ''),
+        preferredTime: String(item.preferredTime || item.preferred_time || ''),
+        status: String(item.status || ''),
+        reason: String(item.reason || item.visit_reason || '')
+      }))
+    : [];
+  return {
+    ...data,
+    appointments: normalizedAppointments
+  };
 }
 
 export async function updatePatientProfile(payload: {

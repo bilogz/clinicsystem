@@ -6,26 +6,38 @@ const PublicRoutes = {
   },
   children: [
     {
-      name: 'Patient Home',
-      path: '/patient/',
+      name: 'Student Home',
+      path: '/student/',
       component: () => import('@/views/patient/pages/PatientBookingPage.vue')
     },
     {
-      name: 'Patient Booking',
-      path: '/patient/booking',
+      name: 'Student Booking',
+      path: '/student/booking',
       component: () => import('@/views/patient/pages/PatientBookingPage.vue')
     },
     {
       path: '/',
-      redirect: '/patient/'
+      redirect: '/student/'
     },
     {
-      path: '/patient',
-      redirect: '/patient/booking'
+      path: '/student',
+      redirect: '/student/booking'
     },
     {
       path: '/admin',
-      redirect: '/patient/'
+      redirect: '/student/'
+    },
+    {
+      path: '/patient',
+      redirect: '/student/booking'
+    },
+    {
+      path: '/patient/',
+      redirect: '/student/'
+    },
+    {
+      path: '/patient/booking',
+      redirect: '/student/booking'
     },
     {
       path: '/admin/:pathMatch(.*)*',

@@ -1,5 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
@@ -86,10 +87,20 @@ const sessionActivity = computed(() => (!selectedSession.value ? [] : activities
 const upcomingFollowups = computed(() => sessions.value.filter((s) => s.next_follow_up_at).sort((a, b) => String(a.next_follow_up_at).localeCompare(String(b.next_follow_up_at))).slice(0, 6));
 const riskAlerts = computed(() => sessions.value.filter((s) => s.status === 'at_risk' || s.status === 'escalated').slice(0, 6));
 const recentActivity = computed(() => activities.value.slice(0, 8));
+const analyticsCards = computed(() => [
+  { title: 'Active', value: analytics.value.active, subtitle: 'Ongoing sessions', className: 'analytics-card-blue', icon: 'mdi-account-heart-outline' },
+  { title: 'Follow-Up', value: analytics.value.follow_up, subtitle: 'Scheduled for review', className: 'analytics-card-cyan', icon: 'mdi-calendar-sync-outline' },
+  { title: 'At-Risk', value: analytics.value.at_risk, subtitle: 'Needs urgent monitoring', className: 'analytics-card-orange', icon: 'mdi-alert-circle-outline' },
+  { title: 'Completed', value: analytics.value.completed, subtitle: 'Finished care plans', className: 'analytics-card-green', icon: 'mdi-check-decagram-outline' },
+  { title: 'Escalated', value: analytics.value.escalated, subtitle: 'Escalated cases', className: 'analytics-card-red', icon: 'mdi-alert-octagon-outline' },
+  { title: 'Archived', value: analytics.value.archived, subtitle: 'Closed records', className: 'analytics-card-purple', icon: 'mdi-archive-outline' }
+]);
 
 function can(action: SessionAction): boolean { return rolePermissions[role.value]?.includes(action) || false; }
 function statusLabel(status: MentalHealthStatus): string { return status.replace('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase()); }
 function statusColor(status: MentalHealthStatus): string { if (status === 'active') return 'primary'; if (status === 'follow_up') return 'info'; if (status === 'completed') return 'success'; if (status === 'at_risk') return 'warning'; if (status === 'escalated') return 'error'; if (status === 'archived') return 'secondary'; return 'grey'; }
+function patientTypeLabel(value: string): string { return value === 'student' ? 'Student' : value === 'teacher' ? 'Teacher' : 'Unknown'; }
+function patientTypeColor(value: string): string { return value === 'student' ? 'primary' : value === 'teacher' ? 'deep-orange' : 'secondary'; }
 function formatDateTime(value: string | null): string { if (!value) return '--'; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(); }
 function showToast(text: string, color: 'success' | 'info' | 'warning' | 'error' = 'info'): void {
   if (color === 'success') {
@@ -318,133 +329,177 @@ onUnmounted(() => {
 
 <template>
   <div class="mental-health-page">
-    <v-card class="hero-card mb-4" variant="outlined">
-      <v-card-text class="d-flex flex-wrap justify-space-between align-center ga-3">
-        <div>
-          <h1 class="text-h4 font-weight-black mb-1 hero-title">Mental Health & Addiction</h1>
-          <p class="text-medium-emphasis mb-0">Workflow: Create -> Active -> Follow-Up -> At-Risk -> Completed -> Escalated -> Archived</p>
-        </div>
-        <div class="d-flex ga-2 align-center flex-wrap">
-          <v-select v-model="role" :items="['Admin', 'Counselor', 'Nurse', 'Doctor', 'Receptionist']" label="Session Role" variant="outlined" density="compact" hide-details class="role-select" />
-        </div>
-      </v-card-text>
-    </v-card>
+    <template v-if="pageLoading && !sessions.length && !patients.length">
+      <v-card class="hero-card mb-4" variant="outlined">
+        <v-card-text>
+          <v-skeleton-loader type="heading, text, actions" />
+        </v-card-text>
+      </v-card>
 
-    <v-row class="mb-4">
-      <v-col cols="12" sm="6" md="4" lg="2"><v-card class="kpi-card" color="primary" variant="flat"><v-card-text>Active<br /><strong class="text-h5">{{ analytics.active }}</strong></v-card-text></v-card></v-col>
-      <v-col cols="12" sm="6" md="4" lg="2"><v-card class="kpi-card" color="info" variant="flat"><v-card-text>Follow-Up<br /><strong class="text-h5">{{ analytics.follow_up }}</strong></v-card-text></v-card></v-col>
-      <v-col cols="12" sm="6" md="4" lg="2"><v-card class="kpi-card" color="warning" variant="flat"><v-card-text>At-Risk<br /><strong class="text-h5">{{ analytics.at_risk }}</strong></v-card-text></v-card></v-col>
-      <v-col cols="12" sm="6" md="4" lg="2"><v-card class="kpi-card" color="success" variant="flat"><v-card-text>Completed<br /><strong class="text-h5">{{ analytics.completed }}</strong></v-card-text></v-card></v-col>
-      <v-col cols="12" sm="6" md="4" lg="2"><v-card class="kpi-card" color="error" variant="flat"><v-card-text>Escalated<br /><strong class="text-h5">{{ analytics.escalated }}</strong></v-card-text></v-card></v-col>
-      <v-col cols="12" sm="6" md="4" lg="2"><v-card class="kpi-card" color="secondary" variant="flat"><v-card-text>Archived<br /><strong class="text-h5">{{ analytics.archived }}</strong></v-card-text></v-card></v-col>
-    </v-row>
+      <v-row>
+        <v-col v-for="index in 6" :key="`mental-skeleton-card-${index}`" cols="12" sm="6" lg="4">
+          <v-skeleton-loader type="image, article" class="rounded-lg" />
+        </v-col>
+      </v-row>
 
-    <v-card class="filter-card mb-4" variant="outlined">
-      <v-card-text>
-        <v-row>
-          <v-col cols="12" md="6"><v-text-field v-model="search" prepend-inner-icon="mdi-magnify" label="Search case, patient, counselor" density="compact" variant="outlined" hide-details /></v-col>
-          <v-col cols="6" md="3"><v-select v-model="statusFilter" :items="statusItems" label="Status" density="compact" variant="outlined" hide-details /></v-col>
-          <v-col cols="6" md="3"><v-select v-model="riskFilter" :items="[{title:'All',value:'all'},{title:'Low',value:'low'},{title:'Medium',value:'medium'},{title:'High',value:'high'}]" label="Risk" density="compact" variant="outlined" hide-details /></v-col>
-        </v-row>
-      </v-card-text>
-    </v-card>
+      <v-card class="filter-card mb-4" variant="outlined">
+        <v-card-text>
+          <v-skeleton-loader type="actions" />
+        </v-card-text>
+      </v-card>
 
-    <v-row>
-      <v-col cols="12" lg="8">
-        <v-card class="table-card" variant="outlined">
-          <v-card-item>
-            <v-card-title>Sessions</v-card-title>
-            <template #append>
-              <div class="d-flex ga-2 align-center flex-wrap">
-                <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="pageLoading" @click="reloadDashboard">Refresh</v-btn>
-                <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-plus" :disabled="!can('create')" @click="openCreate">New Session</v-btn>
-              </div>
-            </template>
-          </v-card-item>
-          <v-divider />
-          <v-card-text>
-            <v-progress-linear v-if="pageLoading" indeterminate color="primary" class="mb-3" />
-            <v-table v-else density="comfortable">
-              <thead>
-                <tr>
-                  <th>Case</th>
-                  <th>Patient</th>
-                  <th>Status</th>
-                  <th>Risk</th>
-                  <th>Counselor</th>
-                  <th>Follow-Up</th>
-                  <th class="text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="item in filteredSessions" :key="item.id" class="session-row">
-                  <td>{{ item.case_reference }}</td>
-                  <td><div class="font-weight-bold">{{ item.patient_name }}</div><div class="text-caption text-medium-emphasis">{{ item.patient_id }}</div></td>
-                  <td><v-chip size="small" :color="statusColor(item.status)" variant="tonal">{{ statusLabel(item.status) }}</v-chip></td>
-                  <td><v-chip size="x-small" :color="item.risk_level === 'high' ? 'error' : item.risk_level === 'medium' ? 'warning' : 'success'" variant="tonal">{{ item.risk_level }}</v-chip></td>
-                  <td>{{ item.counselor }}</td>
-                  <td>{{ formatDateTime(item.next_follow_up_at) }}</td>
-                  <td class="text-right">
-                    <v-btn
-                      size="small"
-                      class="action-primary-btn mr-1"
-                      :color="primaryAction(item).tone"
-                      :disabled="primaryAction(item).disabled"
-                      :loading="actionLoading && (item.status === 'create' || item.status === 'completed' || item.status === 'escalated')"
-                      @click="runPrimaryAction(item)"
-                    >
-                      {{ primaryAction(item).label }}
-                    </v-btn>
-                    <v-btn size="small" class="mr-1 action-open-btn" variant="text" @click="openDetails(item)">Open</v-btn>
-                    <v-menu>
-                      <template #activator="{ props }"><v-btn v-bind="props" size="small" icon="mdi-dots-horizontal" variant="tonal" class="action-menu-btn" /></template>
-                      <v-list density="compact" class="action-menu">
-                        <v-list-item prepend-icon="mdi-pencil-outline" title="Edit" :disabled="!can('edit')" @click="openEdit(item)" />
-                        <v-list-item prepend-icon="mdi-notebook-edit-outline" title="Record Notes" :disabled="!can('note')" @click="openNote(item)" />
-                        <v-list-item prepend-icon="mdi-calendar-sync-outline" title="Plan Follow-Up" :disabled="!can('followup')" @click="openFollowup(item)" />
-                        <v-list-item prepend-icon="mdi-check-decagram-outline" title="Complete" :disabled="!can('complete')" @click="openComplete(item)" />
-                        <v-list-item prepend-icon="mdi-alert-octagon-outline" title="Escalate" :disabled="!can('escalate')" @click="openEscalate(item)" />
-                        <v-list-item :title="item.status === 'create' ? 'Activate' : 'Archive'" :disabled="item.status === 'create' ? !can('activate') : !(can('archive') && (item.status === 'completed' || item.status === 'escalated'))" @click="activateOrArchive(item)" />
-                      </v-list>
-                    </v-menu>
-                  </td>
-                </tr>
-                <tr v-if="!filteredSessions.length"><td colspan="7" class="text-center text-medium-emphasis py-6">No sessions matched the current filters.</td></tr>
-              </tbody>
-            </v-table>
-          </v-card-text>
-        </v-card>
-      </v-col>
+      <v-row>
+        <v-col cols="12" lg="8">
+          <v-card class="table-card" variant="outlined">
+            <v-card-text>
+              <v-skeleton-loader type="heading, actions, table-heading, table-row-divider@6" />
+            </v-card-text>
+          </v-card>
+        </v-col>
+        <v-col cols="12" lg="4">
+          <v-card variant="outlined" class="mb-3">
+            <v-card-text>
+              <v-skeleton-loader type="heading, list-item-two-line@4" />
+            </v-card-text>
+          </v-card>
+          <v-card variant="outlined" class="mb-3">
+            <v-card-text>
+              <v-skeleton-loader type="heading, list-item-two-line@4" />
+            </v-card-text>
+          </v-card>
+          <v-card variant="outlined">
+            <v-card-text>
+              <v-skeleton-loader type="heading, list-item-two-line@4" />
+            </v-card-text>
+          </v-card>
+        </v-col>
+      </v-row>
+    </template>
 
-      <v-col cols="12" lg="4">
-        <v-card variant="outlined" class="mb-3">
-          <v-card-item><v-card-title>Upcoming Follow-Ups</v-card-title></v-card-item>
-          <v-divider />
-          <v-list density="compact">
-            <v-list-item v-for="item in upcomingFollowups" :key="`f-${item.id}`" :title="item.patient_name" :subtitle="`${item.case_reference} • ${formatDateTime(item.next_follow_up_at)}`" />
-            <v-list-item v-if="!upcomingFollowups.length" title="No follow-ups scheduled." />
-          </v-list>
-        </v-card>
+    <template v-else>
+      <v-card class="hero-card mb-4" variant="outlined">
+        <v-card-text class="d-flex flex-wrap justify-space-between align-center ga-3">
+          <div>
+            <h1 class="text-h4 font-weight-black mb-1 hero-title">Mental Health & Addiction</h1>
+            <p class="text-medium-emphasis mb-0">Workflow: Create -> Active -> Follow-Up -> At-Risk -> Completed -> Escalated -> Archived</p>
+          </div>
+          <div class="d-flex ga-2 align-center flex-wrap">
+            <v-select v-model="role" :items="['Admin', 'Counselor', 'Nurse', 'Doctor', 'Receptionist']" label="Session Role" variant="outlined" density="compact" hide-details class="role-select" />
+          </div>
+        </v-card-text>
+      </v-card>
 
-        <v-card variant="outlined" class="mb-3">
-          <v-card-item><v-card-title>Risk Alerts</v-card-title></v-card-item>
-          <v-divider />
-          <v-list density="compact">
-            <v-list-item v-for="item in riskAlerts" :key="`r-${item.id}`" :title="item.patient_name" :subtitle="item.escalation_reason || 'High risk, monitoring required.'" />
-            <v-list-item v-if="!riskAlerts.length" title="No active risk alerts." />
-          </v-list>
-        </v-card>
+      <AnalyticsCardGrid :items="analyticsCards" lg="2" />
 
-        <v-card variant="outlined">
-          <v-card-item><v-card-title>Activity Log</v-card-title></v-card-item>
-          <v-divider />
-          <v-list density="compact">
-            <v-list-item v-for="item in recentActivity" :key="`a-${item.id}`" :title="item.action" :subtitle="`${item.detail} • ${formatDateTime(item.created_at)}`" />
-            <v-list-item v-if="!recentActivity.length" title="No activity yet." />
-          </v-list>
-        </v-card>
-      </v-col>
-    </v-row>
+      <v-card class="filter-card mb-4" variant="outlined">
+        <v-card-text>
+          <v-row>
+            <v-col cols="12" md="6"><v-text-field v-model="search" prepend-inner-icon="mdi-magnify" label="Search case, patient, counselor" density="compact" variant="outlined" hide-details /></v-col>
+            <v-col cols="6" md="3"><v-select v-model="statusFilter" :items="statusItems" label="Status" density="compact" variant="outlined" hide-details /></v-col>
+            <v-col cols="6" md="3"><v-select v-model="riskFilter" :items="[{title:'All',value:'all'},{title:'Low',value:'low'},{title:'Medium',value:'medium'},{title:'High',value:'high'}]" label="Risk" density="compact" variant="outlined" hide-details /></v-col>
+          </v-row>
+        </v-card-text>
+      </v-card>
+
+      <v-row>
+        <v-col cols="12" lg="8">
+          <v-card class="table-card" variant="outlined">
+            <v-card-item>
+              <v-card-title>Sessions</v-card-title>
+              <template #append>
+                <div class="d-flex ga-2 align-center flex-wrap">
+                  <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="pageLoading" @click="reloadDashboard">Refresh</v-btn>
+                  <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-plus" :disabled="!can('create')" @click="openCreate">New Session</v-btn>
+                </div>
+              </template>
+            </v-card-item>
+            <v-divider />
+            <v-card-text>
+              <v-progress-linear v-if="pageLoading" indeterminate color="primary" class="mb-3" />
+              <v-table v-else density="comfortable">
+                <thead>
+                  <tr>
+                    <th>Case</th>
+                    <th>Patient</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Risk</th>
+                    <th>Counselor</th>
+                    <th>Follow-Up</th>
+                    <th class="text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in filteredSessions" :key="item.id" class="session-row">
+                    <td>{{ item.case_reference }}</td>
+                    <td><div class="font-weight-bold">{{ item.patient_name }}</div><div class="text-caption text-medium-emphasis">{{ item.patient_id }}</div></td>
+                    <td><v-chip size="small" :color="patientTypeColor(item.patient_type)" variant="tonal">{{ patientTypeLabel(item.patient_type) }}</v-chip></td>
+                    <td><v-chip size="small" :color="statusColor(item.status)" variant="tonal">{{ statusLabel(item.status) }}</v-chip></td>
+                    <td><v-chip size="x-small" :color="item.risk_level === 'high' ? 'error' : item.risk_level === 'medium' ? 'warning' : 'success'" variant="tonal">{{ item.risk_level }}</v-chip></td>
+                    <td>{{ item.counselor }}</td>
+                    <td>{{ formatDateTime(item.next_follow_up_at) }}</td>
+                    <td class="text-right">
+                      <v-btn
+                        size="small"
+                        class="action-primary-btn mr-1"
+                        :color="primaryAction(item).tone"
+                        :disabled="primaryAction(item).disabled"
+                        :loading="actionLoading && (item.status === 'create' || item.status === 'completed' || item.status === 'escalated')"
+                        @click="runPrimaryAction(item)"
+                      >
+                        {{ primaryAction(item).label }}
+                      </v-btn>
+                      <v-btn size="small" class="mr-1 action-open-btn" variant="text" @click="openDetails(item)">Open</v-btn>
+                      <v-menu>
+                        <template #activator="{ props }"><v-btn v-bind="props" size="small" icon="mdi-dots-horizontal" variant="tonal" class="action-menu-btn" /></template>
+                        <v-list density="compact" class="action-menu">
+                          <v-list-item prepend-icon="mdi-pencil-outline" title="Edit" :disabled="!can('edit')" @click="openEdit(item)" />
+                          <v-list-item prepend-icon="mdi-notebook-edit-outline" title="Record Notes" :disabled="!can('note')" @click="openNote(item)" />
+                          <v-list-item prepend-icon="mdi-calendar-sync-outline" title="Plan Follow-Up" :disabled="!can('followup')" @click="openFollowup(item)" />
+                          <v-list-item prepend-icon="mdi-check-decagram-outline" title="Complete" :disabled="!can('complete')" @click="openComplete(item)" />
+                          <v-list-item prepend-icon="mdi-alert-octagon-outline" title="Escalate" :disabled="!can('escalate')" @click="openEscalate(item)" />
+                          <v-list-item :title="item.status === 'create' ? 'Activate' : 'Archive'" :disabled="item.status === 'create' ? !can('activate') : !(can('archive') && (item.status === 'completed' || item.status === 'escalated'))" @click="activateOrArchive(item)" />
+                        </v-list>
+                      </v-menu>
+                    </td>
+                  </tr>
+                  <tr v-if="!filteredSessions.length"><td colspan="8" class="text-center text-medium-emphasis py-6">No sessions matched the current filters.</td></tr>
+                </tbody>
+              </v-table>
+            </v-card-text>
+          </v-card>
+        </v-col>
+
+        <v-col cols="12" lg="4">
+          <v-card variant="outlined" class="mb-3">
+            <v-card-item><v-card-title>Upcoming Follow-Ups</v-card-title></v-card-item>
+            <v-divider />
+            <v-list density="compact">
+              <v-list-item v-for="item in upcomingFollowups" :key="`f-${item.id}`" :title="item.patient_name" :subtitle="`${item.case_reference} • ${formatDateTime(item.next_follow_up_at)}`" />
+              <v-list-item v-if="!upcomingFollowups.length" title="No follow-ups scheduled." />
+            </v-list>
+          </v-card>
+
+          <v-card variant="outlined" class="mb-3">
+            <v-card-item><v-card-title>Risk Alerts</v-card-title></v-card-item>
+            <v-divider />
+            <v-list density="compact">
+              <v-list-item v-for="item in riskAlerts" :key="`r-${item.id}`" :title="item.patient_name" :subtitle="item.escalation_reason || 'High risk, monitoring required.'" />
+              <v-list-item v-if="!riskAlerts.length" title="No active risk alerts." />
+            </v-list>
+          </v-card>
+
+          <v-card variant="outlined">
+            <v-card-item><v-card-title>Activity Log</v-card-title></v-card-item>
+            <v-divider />
+            <v-list density="compact">
+              <v-list-item v-for="item in recentActivity" :key="`a-${item.id}`" :title="item.action" :subtitle="`${item.detail} • ${formatDateTime(item.created_at)}`" />
+              <v-list-item v-if="!recentActivity.length" title="No activity yet." />
+            </v-list>
+          </v-card>
+        </v-col>
+      </v-row>
+    </template>
 
     <ModuleActivityLogs module="mental_health" title="Module Activity Logs" :per-page="8" />
 
@@ -495,6 +550,7 @@ onUnmounted(() => {
           <v-row>
             <v-col cols="12" md="4">
               <div class="summary-line"><span>Status</span><v-chip :color="statusColor(selectedSession.status)" variant="tonal" size="small">{{ statusLabel(selectedSession.status) }}</v-chip></div>
+              <div class="summary-line"><span>Patient Type</span><v-chip :color="patientTypeColor(selectedSession.patient_type)" variant="tonal" size="small">{{ patientTypeLabel(selectedSession.patient_type) }}</v-chip></div>
               <div class="summary-line"><span>Risk</span><strong>{{ selectedSession.risk_level }}</strong></div>
               <div class="summary-line"><span>Type</span><strong>{{ selectedSession.session_type }}</strong></div>
               <div class="summary-line"><span>Counselor</span><strong>{{ selectedSession.counselor }}</strong></div>

@@ -1,21 +1,25 @@
 import {
-  DashboardIcon,
-  CircleIcon,
-  ClockIcon,
-  FileExportIcon,
-  SendIcon,
-  TemperatureIcon,
-  PhotoIcon,
-  BuildingStoreIcon,
-  HelpIcon,
-  ArchiveIcon
-} from 'vue-tabler-icons';
+  mdiAccountGroupOutline,
+  mdiAccountHeartOutline,
+  mdiAccountOutline,
+  mdiCogOutline,
+  mdiCalendarClockOutline,
+  mdiChartLine,
+  mdiClipboardTextOutline,
+  mdiFlaskOutline,
+  mdiLogout,
+  mdiPill,
+  mdiStethoscope,
+  mdiViewDashboardOutline,
+  mdiWalk
+} from '@mdi/js';
 
 export interface menu {
   header?: string;
   title?: string;
   icon?: object | string;
   to?: string;
+  action?: string;
   divider?: boolean;
   chip?: string;
   chipColor?: string;
@@ -28,58 +32,75 @@ export interface menu {
 }
 
 const sidebarItem: menu[] = [
-  { header: 'Clinic Overview' },
+  { header: 'Clinic System' },
   {
     title: 'Dashboard',
-    icon: DashboardIcon,
+    icon: mdiViewDashboardOutline,
     to: '/dashboard/default'
   },
   { divider: true },
-  { header: 'Clinic Modules' },
+  { header: 'Appointment Workflow' },
   {
     title: 'Appointments',
-    icon: ClockIcon,
+    icon: mdiCalendarClockOutline,
     to: '/appointments'
   },
   {
     title: 'Patients Database',
-    icon: CircleIcon,
-    to: '/modules/patients-database'
+    icon: mdiAccountGroupOutline,
+    to: '/modules/patients'
   },
   {
     title: 'Registration (Patient Management)',
-    icon: FileExportIcon,
+    icon: mdiClipboardTextOutline,
     to: '/modules/registration'
   },
   {
     title: 'Walk-In',
-    icon: SendIcon,
+    icon: mdiWalk,
     to: '/modules/walk-in'
   },
   {
     title: 'Check-Up',
-    icon: TemperatureIcon,
+    icon: mdiStethoscope,
     to: '/modules/check-up'
   },
   {
     title: 'Laboratory',
-    icon: PhotoIcon,
+    icon: mdiFlaskOutline,
     to: '/modules/laboratory'
   },
   {
     title: 'Pharmacy & Inventory',
-    icon: BuildingStoreIcon,
-    to: '/modules/pharmacy-inventory'
+    icon: mdiPill,
+    to: '/modules/pharmacy'
   },
   {
     title: 'Mental Health & Addiction',
-    icon: HelpIcon,
-    to: '/modules/mental-health-addiction'
+    icon: mdiAccountHeartOutline,
+    to: '/modules/mental-health'
   },
   {
     title: 'Reports',
-    icon: ArchiveIcon,
+    icon: mdiChartLine,
     to: '/modules/reports'
+  },
+  { divider: true },
+  { header: 'Account' },
+  {
+    title: 'My Profile',
+    icon: mdiAccountOutline,
+    to: '/profile'
+  },
+  {
+    title: 'Settings',
+    icon: mdiCogOutline,
+    to: '/profile?tab=preferences'
+  },
+  {
+    title: 'Logout',
+    icon: mdiLogout,
+    action: 'logout'
   }
 ];
 

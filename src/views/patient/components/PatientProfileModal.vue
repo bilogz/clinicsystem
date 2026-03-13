@@ -80,7 +80,7 @@ async function submitProfile(): Promise<void> {
 <template>
   <v-dialog v-model="model" max-width="680" persistent>
     <v-card class="profile-modal">
-      <v-card-title class="profile-title">Edit My Profile</v-card-title>
+      <v-card-title class="profile-title">Edit Student Profile</v-card-title>
       <v-card-text>
         <v-alert v-if="errorMessage" type="error" variant="tonal" class="mb-3">{{ errorMessage }}</v-alert>
         <div class="profile-grid">

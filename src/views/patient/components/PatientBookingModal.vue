@@ -13,6 +13,7 @@ import { listDoctors, type DoctorRow } from '@/services/doctors';
 import { deleteCookie, getCookie, setCookie } from '@/utils/cookies';
 
 type CreateStep = 1 | 2 | 3;
+type AppointedRole = 'student' | 'teacher';
 
 const model = defineModel<boolean>({ default: false });
 const props = defineProps<{
@@ -49,6 +50,10 @@ const staticDepartmentOptions = Object.keys(serviceByDepartment);
 const priorityOptions: Array<'Routine' | 'Urgent'> = ['Routine', 'Urgent'];
 const paymentOptions = ['Cash', 'Card', 'HMO', 'Online'];
 const sexOptions = ['Male', 'Female', 'Other'];
+const appointedRoleOptions = [
+  { title: 'Student', value: 'student' as AppointedRole },
+  { title: 'Teacher', value: 'teacher' as AppointedRole }
+];
 
 const doctorsCatalog = ref<DoctorRow[]>([]);
 const availabilityLoading = ref(false);
@@ -66,11 +71,13 @@ const isInitializing = ref(false);
 const submitting = ref(false);
 const step = ref<CreateStep>(1);
 const stepError = ref('');
+const appointedRole = ref<AppointedRole>('student');
 const submitSuccess = ref<null | { bookingId: string; patientName: string; date: string; time: string }>(null);
 const errors = reactive<Record<string, string>>({});
 const PATIENT_BOOKING_COOKIE = 'patient_booking_draft';
 
 type PatientBookingCookieDraft = {
+  appointed_role?: AppointedRole;
   patient_name?: string;
   patient_email?: string;
   phone_number?: string;
@@ -117,7 +124,7 @@ const form = reactive<
   consent_acknowledged: false
 });
 
-const modalTitle = computed(() => (submitSuccess.value ? 'Booking Submitted' : 'Book Appointment'));
+const modalTitle = computed(() => (submitSuccess.value ? 'Booking Submitted' : 'Book Student Appointment'));
 const stepStatus = computed(() => ({ patient: step.value >= 1, schedule: step.value >= 2, review: step.value >= 3 }));
 const isMinor = computed(() => Number(form.patient_age || 0) > 0 && Number(form.patient_age || 0) < 18);
 
@@ -202,7 +209,8 @@ const visitTypeOptions = computed(() => {
 });
 
 const reviewRows = computed(() => [
-  { label: 'Patient', value: form.patient_name || '--' },
+  { label: 'Booked By', value: appointedRole.value === 'teacher' ? 'Teacher' : 'Student' },
+  { label: 'Booker', value: form.patient_name || '--' },
   { label: 'Phone', value: form.phone_number || '--' },
   { label: 'Department', value: form.department_name || '--' },
   { label: 'Doctor', value: selectedDoctorName.value || '--' },
@@ -325,6 +333,7 @@ function readBookingDraftCookie(): PatientBookingCookieDraft | null {
 
 function writeBookingDraftCookie(): void {
   const payload: PatientBookingCookieDraft = {
+    appointed_role: appointedRole.value,
     patient_name: String(form.patient_name || '').trim(),
     patient_email: String(form.patient_email || '').trim(),
     phone_number: String(form.phone_number || '').trim(),
@@ -348,6 +357,7 @@ function applyBookingDraftCookie(): void {
   const draft = readBookingDraftCookie();
   if (!draft) return;
 
+  appointedRole.value = draft.appointed_role === 'teacher' ? 'teacher' : 'student';
   if (!props.patientContext?.fullName) form.patient_name = String(draft.patient_name || '').trim();
   if (!props.patientContext?.email) form.patient_email = String(draft.patient_email || '').trim();
   if (!props.patientContext?.phoneNumber) form.phone_number = String(draft.phone_number || '').trim();
@@ -369,6 +379,7 @@ function resetForm(): void {
   clearErrors();
   submitSuccess.value = null;
   step.value = 1;
+  appointedRole.value = 'student';
   form.patient_id = '';
   form.patient_name = props.patientContext?.fullName || '';
   form.patient_email = props.patientContext?.email || '';
@@ -591,7 +602,7 @@ function validateStepOne(): boolean {
   clearErrors();
   const phone = String(form.phone_number || '').trim();
   const phoneValid = /^[0-9+\-\s()]{7,20}$/.test(phone);
-  if (!String(form.patient_name || '').trim()) errors.patient_name = 'Patient name is required.';
+  if (!String(form.patient_name || '').trim()) errors.patient_name = 'Student name is required.';
   if (!phone) errors.phone_number = 'Phone number is required.';
   else if (!phoneValid) errors.phone_number = 'Enter a valid phone number.';
   if (!String(form.patient_sex || '').trim()) errors.patient_sex = 'Please select sex.';
@@ -667,6 +678,7 @@ async function submitBooking(): Promise<void> {
       payment_method: String(form.payment_method || '').trim() || undefined,
       appointment_priority: form.appointment_priority || 'Routine',
       doctor_name: selectedDoctorName.value,
+      student_name: String(form.patient_name || '').trim(),
       department_name: String(form.department_name || '').trim(),
       visit_type: String(form.visit_type || '').trim(),
       appointment_date: String(form.appointment_date || '').trim(),
@@ -675,10 +687,12 @@ async function submitBooking(): Promise<void> {
       doctor_notes: String(form.doctor_notes || '').trim() || undefined,
       visit_reason: String(form.visit_reason || '').trim(),
       patient_age: Number(form.patient_age || 0) || null,
-      patient_sex: String(form.patient_sex || '').trim() || undefined,
-      guardian_name: String(form.guardian_name || '').trim() || undefined,
-      status: 'New'
-    });
+        patient_sex: String(form.patient_sex || '').trim() || undefined,
+        guardian_name: String(form.guardian_name || '').trim() || undefined,
+        status: 'New',
+        patient_type: appointedRole.value,
+        actor_role: appointedRole.value
+      });
 
     submitSuccess.value = {
       bookingId: created.bookingId,
@@ -784,6 +798,7 @@ watch(
     form.emergency_contact,
     form.insurance_provider,
     form.payment_method,
+    appointedRole.value,
     form.appointment_priority,
     form.department_name,
     selectedDoctorName.value,
@@ -810,7 +825,7 @@ watch(
       <v-card-text>
         <template v-if="!submitSuccess">
           <div class="modal-stepper" role="group" aria-label="Booking steps">
-            <div class="step" :class="{ active: stepStatus.patient, current: step === 1 }"><span>1</span><label>Patient Info</label></div>
+            <div class="step" :class="{ active: stepStatus.patient, current: step === 1 }"><span>1</span><label>Student Info</label></div>
             <div class="line"></div>
             <div class="step" :class="{ active: stepStatus.schedule, current: step === 2 }"><span>2</span><label>Schedule</label></div>
             <div class="line"></div>
@@ -823,15 +838,27 @@ watch(
             <div class="grid-col span-12">
               <v-text-field
                 v-model="form.patient_id"
-                label="Patient ID (optional)"
+                label="Student ID (optional)"
                 variant="outlined"
                 density="comfortable"
-                hint="If you already have a patient ID, enter it here."
+                hint="If you already have a student ID, enter it here."
                 persistent-hint
                 hide-details="auto"
               />
             </div>
-            <div class="grid-col span-6"><v-text-field v-model="form.patient_name" label="Patient Name *" variant="outlined" density="comfortable" :error-messages="errors.patient_name" /></div>
+            <div class="grid-col span-6">
+              <v-select
+                v-model="appointedRole"
+                :items="appointedRoleOptions"
+                item-title="title"
+                item-value="value"
+                label="Booked By *"
+                variant="outlined"
+                density="comfortable"
+                hide-details
+              />
+            </div>
+            <div class="grid-col span-6"><v-text-field v-model="form.patient_name" label="Student Name *" variant="outlined" density="comfortable" :error-messages="errors.patient_name" /></div>
             <div class="grid-col span-6"><v-text-field v-model="form.patient_email" label="Email" variant="outlined" density="comfortable" hide-details /></div>
             <div class="grid-col span-6"><v-text-field v-model="form.phone_number" label="Phone Number *" variant="outlined" density="comfortable" :error-messages="errors.phone_number" /></div>
             <div class="grid-col span-3"><v-text-field v-model.number="form.patient_age" label="Age *" type="number" min="0" variant="outlined" density="comfortable" :error-messages="errors.patient_age" /></div>
@@ -843,7 +870,7 @@ watch(
                 variant="outlined"
                 density="comfortable"
                 :error-messages="errors.guardian_name"
-                hint="Required for patients below 18"
+                hint="Required for students below 18"
                 persistent-hint
               />
             </div>
@@ -1001,7 +1028,7 @@ watch(
 
         <div v-else class="success-state">
           <v-icon icon="mdi-check-decagram" color="success" size="52" />
-          <h3>Booking Confirmed</h3>
+          <h3>Appointment Confirmed</h3>
           <p>{{ submitSuccess.patientName }} has been queued with booking ID <strong>{{ submitSuccess.bookingId }}</strong>.</p>
           <p>Schedule: {{ submitSuccess.date }} {{ submitSuccess.time }}</p>
         </div>
@@ -1161,3 +1188,4 @@ watch(
   .review-grid { grid-template-columns: 1fr; }
 }
 </style>
+

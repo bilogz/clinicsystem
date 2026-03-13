@@ -7,6 +7,7 @@ export type RegistrationRow = {
   id: number;
   case_id: string;
   patient_name: string;
+  patient_type: 'student' | 'teacher' | 'unknown';
   patient_email: string;
   age: number;
   concern: string;
@@ -45,6 +46,7 @@ type RegistrationQuery = {
 export type RegistrationUpsertPayload = {
   id?: number;
   patient_name?: string;
+  patient_type?: 'student' | 'teacher';
   patient_email?: string;
   age?: number;
   concern?: string;

@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { ArchiveIcon, CheckIcon, DotsIcon, EditIcon } from 'vue-tabler-icons';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
+import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { useAuthStore } from '@/stores/auth';
 import { createAppointment } from '@/services/appointmentsAdmin';
@@ -116,25 +117,29 @@ const statCards = computed(() => [
     title: 'Pending',
     value: String(analytics.value.pending),
     subtitle: 'Awaiting review',
-    className: 'stat-pending'
+    className: 'analytics-card-orange',
+    icon: 'mdi-clock-alert-outline'
   },
   {
     title: 'Active',
     value: String(analytics.value.active),
     subtitle: 'In active care',
-    className: 'stat-active'
+    className: 'analytics-card-green',
+    icon: 'mdi-check-decagram-outline'
   },
   {
     title: 'Concerns',
     value: String(analytics.value.concerns),
     subtitle: 'Need triage attention',
-    className: 'stat-concern'
+    className: 'analytics-card-red',
+    icon: 'mdi-alert-circle-outline'
   },
   {
     title: 'Approval Rate',
     value: `${analytics.value.approvalRate}%`,
     subtitle: `Across ${totalItems.value} registrations`,
-    className: 'stat-rate'
+    className: 'analytics-card-blue',
+    icon: 'mdi-chart-donut'
   }
 ]);
 
@@ -257,6 +262,14 @@ function priorityColor(priority: PatientDraft['priority']): string {
   if (priority === 'High') return 'warning';
   if (priority === 'Moderate') return 'info';
   return 'success';
+}
+
+function patientTypeLabel(value: string): string {
+  return value === 'student' ? 'Student' : value === 'teacher' ? 'Teacher' : 'Unknown';
+}
+
+function patientTypeColor(value: string): string {
+  return value === 'student' ? 'primary' : value === 'teacher' ? 'deep-orange' : 'secondary';
 }
 
 function initials(name: string): string {
@@ -618,17 +631,7 @@ onUnmounted(() => {
         </v-card-text>
       </v-card>
 
-      <v-row class="mb-4">
-        <v-col v-for="card in statCards" :key="card.title" cols="12" sm="6" lg="3">
-          <v-card :class="['metric-card', card.className]" elevation="0">
-            <v-card-text>
-              <div class="text-caption text-uppercase font-weight-bold">{{ card.title }}</div>
-              <div class="metric-value">{{ card.value }}</div>
-              <div class="metric-subtitle">{{ card.subtitle }}</div>
-            </v-card-text>
-          </v-card>
-        </v-col>
-      </v-row>
+      <AnalyticsCardGrid :items="statCards" />
 
       <v-card variant="outlined" class="table-card">
         <v-card-item>
@@ -674,6 +677,7 @@ onUnmounted(() => {
               <thead>
                 <tr>
                   <th>PATIENT</th>
+                  <th>TYPE</th>
                   <th>CONCERN</th>
                   <th>INTAKE</th>
                   <th>STATUS</th>
@@ -692,6 +696,7 @@ onUnmounted(() => {
                       </div>
                     </div>
                   </td>
+                  <td><v-chip size="small" :color="patientTypeColor(record.patient_type)" variant="tonal">{{ patientTypeLabel(record.patient_type) }}</v-chip></td>
                   <td class="max-concern">{{ record.concern || '--' }}</td>
                   <td>{{ formatDateTime(record.intake_time) }}</td>
                   <td>
@@ -743,7 +748,7 @@ onUnmounted(() => {
                   </td>
                 </tr>
                 <tr v-if="!tableLoading && records.length === 0">
-                  <td colspan="6" class="text-center text-medium-emphasis py-5">No records match the current filters.</td>
+                  <td colspan="7" class="text-center text-medium-emphasis py-5">No records match the current filters.</td>
                 </tr>
               </tbody>
             </v-table>
@@ -775,6 +780,7 @@ onUnmounted(() => {
             <div class="text-caption text-medium-emphasis">{{ previewRecord.patient_email || 'No email on file' }}</div>
             <div class="mt-3 d-flex ga-2 flex-wrap">
               <v-chip size="small" :color="statusColor(previewRecord.status)" variant="tonal">{{ previewRecord.status }}</v-chip>
+              <v-chip size="small" :color="patientTypeColor(previewRecord.patient_type)" variant="tonal">{{ patientTypeLabel(previewRecord.patient_type) }}</v-chip>
               <v-chip size="small" color="info" variant="tonal">Assigned: {{ previewRecord.assigned_to }}</v-chip>
             </div>
           </v-card-text>

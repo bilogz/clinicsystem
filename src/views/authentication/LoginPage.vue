@@ -19,7 +19,7 @@ import AuthLogin from './authForms/AuthLogin.vue';
                       <v-col cols="12" class="text-center">
                         <Logo />
                         <h2 class="text-primary text-h2 mt-8">Admin Login</h2>
-                        <h4 class="text-h5 mt-3 login-subtitle">Sign in to the Nexora admin dashboard</h4>
+                        <h4 class="text-h5 mt-3 login-subtitle">Sign in to the appointment monitoring dashboard</h4>
                       </v-col>
                     </v-row>
                     <!---Left Part Logo -->

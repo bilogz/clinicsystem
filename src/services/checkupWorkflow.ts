@@ -17,6 +17,7 @@ export type CheckupVisit = {
   id: number;
   visit_id: string;
   patient_name: string;
+  patient_type: 'student' | 'teacher' | 'unknown';
   assigned_doctor: string;
   source: CheckupSource;
   status: CheckupState;
@@ -99,7 +100,7 @@ function resolveApiUrl(): string {
     if (!looksLikePhpBackend) return normalized;
   }
 
-  // Force local Vite middleware endpoint so check-up module stays Neon-only.
+  // Force the local Vite middleware endpoint so the check-up module stays on the app API.
   return '/api/checkups';
 }
 

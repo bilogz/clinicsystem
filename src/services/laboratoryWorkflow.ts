@@ -19,6 +19,7 @@ export type LabQueueRequest = {
   visitId: string;
   patientId: string;
   patientName: string;
+  patientType: 'student' | 'teacher' | 'unknown';
   category: string;
   priority: LabPriority;
   status: LabStatus;
@@ -31,6 +32,7 @@ export type LabRequestDetail = {
   visitId: string;
   patientId: string;
   patientName: string;
+  patientType: 'student' | 'teacher' | 'unknown';
   age: number | null;
   sex: string;
   category: string;
@@ -102,6 +104,7 @@ export type ReleaseReportPayload = {
 
 export type CreateLabRequestPayload = {
   patientName: string;
+  patientType?: 'student' | 'teacher';
   patientId?: string;
   visitId?: string;
   age?: number | null;
@@ -142,11 +145,13 @@ function resolveApiUrl(): string {
 }
 
 function toQueueFromApi(item: any): LabQueueRequest {
+  const patientType = String(item.patient_type || item.patientType || '').toLowerCase();
   return {
     requestId: Number(item.request_id || item.requestId || 0),
     visitId: String(item.visit_id || item.visitId || ''),
     patientId: String(item.patient_id || item.patientId || ''),
     patientName: String(item.patient_name || item.patientName || ''),
+    patientType: patientType === 'student' || patientType === 'teacher' ? patientType : 'unknown',
     category: String(item.category || ''),
     priority: String(item.priority || 'Normal') as LabPriority,
     status: String(item.status || 'Pending') as LabStatus,
@@ -156,11 +161,13 @@ function toQueueFromApi(item: any): LabQueueRequest {
 }
 
 function toDetailFromApi(item: any): LabRequestDetail {
+  const patientType = String(item.patient_type || item.patientType || '').toLowerCase();
   return {
     requestId: Number(item.request_id || item.requestId || 0),
     visitId: String(item.visit_id || item.visitId || ''),
     patientId: String(item.patient_id || item.patientId || ''),
     patientName: String(item.patient_name || item.patientName || ''),
+    patientType: patientType === 'student' || patientType === 'teacher' ? patientType : 'unknown',
     age: item.age == null ? null : Number(item.age),
     sex: String(item.sex || ''),
     category: String(item.category || ''),
@@ -212,6 +219,7 @@ function seedStore(): LabStore {
       visitId: 'VISIT-2026-2001',
       patientId: 'PAT-3401',
       patientName: 'Maria Santos',
+      patientType: 'teacher',
       age: 34,
       sex: 'Female',
       category: 'Blood Test',
@@ -248,6 +256,7 @@ function seedStore(): LabStore {
       visitId: 'VISIT-2026-1983',
       patientId: 'PAT-2977',
       patientName: 'Emma Tan',
+      patientType: 'teacher',
       age: 29,
       sex: 'Female',
       category: 'Urinalysis',
@@ -284,6 +293,7 @@ function seedStore(): LabStore {
       visitId: 'VISIT-2026-1948',
       patientId: 'PAT-2674',
       patientName: 'Alex Chua',
+      patientType: 'teacher',
       age: 31,
       sex: 'Male',
       category: 'Blood Test',
@@ -320,6 +330,7 @@ function seedStore(): LabStore {
       visitId: 'VISIT-2026-1908',
       patientId: 'PAT-2509',
       patientName: 'Lara Gomez',
+      patientType: 'teacher',
       age: 27,
       sex: 'Female',
       category: 'X-Ray',
@@ -356,6 +367,7 @@ function seedStore(): LabStore {
       visitId: 'VISIT-2026-1884',
       patientId: 'PAT-2401',
       patientName: 'Carlos Medina',
+      patientType: 'teacher',
       age: 36,
       sex: 'Male',
       category: 'Serology',
@@ -392,6 +404,7 @@ function seedStore(): LabStore {
       visitId: 'VISIT-2026-1869',
       patientId: 'PAT-2332',
       patientName: 'Rina Lopez',
+      patientType: 'teacher',
       age: 49,
       sex: 'Female',
       category: 'Microbiology',
@@ -489,6 +502,7 @@ function toQueueItem(item: LabRequestDetail): LabQueueRequest {
     visitId: item.visitId,
     patientId: item.patientId,
     patientName: item.patientName,
+    patientType: item.patientType,
     category: item.category,
     priority: item.priority,
     status: item.status,
@@ -526,6 +540,7 @@ export async function createLabRequest(payload: CreateLabRequestPayload): Promis
       body: {
         action: 'create',
         patient_name: payload.patientName,
+        patient_type: payload.patientType,
         patient_id: payload.patientId,
         visit_id: payload.visitId,
         age: payload.age,
@@ -563,6 +578,7 @@ export async function createLabRequest(payload: CreateLabRequestPayload): Promis
       visitId: payload.visitId || `VISIT-${new Date().getFullYear()}-${nextId}`,
       patientId: payload.patientId || `PAT-${nextId}`,
       patientName: payload.patientName,
+      patientType: payload.patientType || 'unknown',
       age: payload.age == null ? null : payload.age,
       sex: payload.sex || '',
       category: payload.category,

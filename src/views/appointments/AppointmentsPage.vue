@@ -23,6 +23,14 @@ import {
   type AppointmentRow,
   type AppointmentStatus
 } from '@/services/appointmentsAdmin';
+import {
+  appointmentBookingRoleColor,
+  appointmentBookingRoleLabel,
+  fetchAppointmentMonitor,
+  type AppointmentBookedByRole,
+  type AppointmentMonitorRow,
+  type AppointmentMonitorSummary
+} from '@/services/appointmentMonitor';
 
 const loading = ref(false);
 const saving = ref(false);
@@ -32,18 +40,24 @@ const realtime = useRealtimeListSync();
 const statusFilter = ref('All Statuses');
 const serviceFilter = ref('All Services');
 const doctorFilter = ref('Doctor: Any');
+const assignmentFilter = ref('Booked By: Any');
 const periodFilter = ref('Period: Upcoming');
 const searchValue = ref('');
 
 const page = ref(1);
 const perPage = 8;
 
-const statusOptions = ['All Statuses', 'New', 'Confirmed', 'Pending', 'Accepted', 'Awaiting', 'Canceled'];
+const statusOptions = ['All Statuses', 'New', 'Appointed', 'Confirmed', 'Pending', 'Accepted', 'Awaiting', 'Canceled'];
+const assignmentOptions = ['Booked By: Any', 'Booked By Student', 'Booked By Teacher', 'Booked By Admin', 'Booked By Unknown'];
 const periodOptions = ['Period: Upcoming', 'Today', 'This Week', 'This Month'];
-const appointmentStatusOptions: AppointmentStatus[] = ['New', 'Pending', 'Confirmed', 'Accepted', 'Awaiting', 'Canceled'];
+const appointmentStatusOptions: AppointmentStatus[] = ['New', 'Appointed', 'Pending', 'Confirmed', 'Accepted', 'Awaiting', 'Canceled'];
 const departmentOptions = ['General Medicine', 'Pediatrics', 'Orthopedic', 'Dental', 'Laboratory', 'Mental Health', 'Check-Up'];
 const paymentOptions = ['Cash', 'Card', 'HMO', 'Online'];
 const priorityOptions: Array<'Routine' | 'Urgent'> = ['Routine', 'Urgent'];
+const bookedByOptions = [
+  { title: 'Student', value: 'student' as const },
+  { title: 'Teacher', value: 'teacher' as const }
+];
 const symptomTags = ['Fever', 'Cough', 'Headache', 'Chest Pain', 'Abdominal Pain', 'Dizziness', 'Back Pain', 'Nausea'];
 const dayOfWeekOptions = [
   { title: 'Sunday', value: 0 },
@@ -63,6 +77,14 @@ const analytics = ref<AppointmentAnalytics>({
 });
 const totalItems = ref(0);
 const totalPages = ref(1);
+const monitorSummary = ref<AppointmentMonitorSummary>({
+  totalAppointments: 0,
+  studentAppointed: 0,
+  teacherAppointed: 0,
+  fullyAppointed: 0,
+  unassigned: 0
+});
+const monitorByBookingId = ref<Record<string, AppointmentMonitorRow>>({});
 
 const viewDialog = ref(false);
 const editDialog = ref(false);
@@ -138,6 +160,8 @@ const addFormErrors = reactive<Record<string, string>>({});
 const useExistingPatient = ref(false);
 const patientLookupKey = ref('');
 const selectedSymptomTags = ref<string[]>([]);
+const addBookedByRole = ref<'student' | 'teacher'>('student');
+const addBookerLabel = computed(() => (addBookedByRole.value === 'teacher' ? 'Teacher' : 'Student'));
 
 const serviceOptions = computed(() => {
   const dynamic = Array.from(new Set(rows.value.map((row) => row.service).filter(Boolean))).sort();
@@ -156,16 +180,48 @@ const activeQuickFilters = computed(() => {
   if (statusFilter.value !== 'All Statuses') chips.push(statusFilter.value);
   if (serviceFilter.value !== 'All Services') chips.push(serviceFilter.value);
   if (doctorFilter.value !== 'Doctor: Any') chips.push(doctorFilter.value);
+  if (assignmentFilter.value !== 'Booked By: Any') chips.push(assignmentFilter.value);
   if (periodFilter.value !== 'Period: Upcoming') chips.push(periodFilter.value);
   return chips;
 });
 
 const cardData = computed(() => [
-  { title: 'TOTAL PATIENTS', value: analytics.value.totalPatients, subtitle: 'Registered records', className: 'analytics-card-green', icon: 'mdi-account-group-outline' },
-  { title: 'TOTAL APPOINTMENTS', value: analytics.value.totalAppointments, subtitle: 'All booking entries', className: 'analytics-card-blue', icon: 'mdi-calendar-check-outline' },
-  { title: "TODAY'S APPOINTMENTS", value: analytics.value.todayAppointments, subtitle: 'Scheduled for today', className: 'analytics-card-orange', icon: 'mdi-calendar-today' },
-  { title: 'PENDING QUEUE', value: analytics.value.pendingQueue, subtitle: 'Awaiting action', className: 'analytics-card-purple', icon: 'mdi-timer-sand' }
+  { title: 'BOOKED BY STUDENT', value: monitorSummary.value.studentAppointed, subtitle: 'Appointments created by students', className: 'analytics-card-green', icon: 'mdi-account-school-outline' },
+  { title: 'BOOKED BY TEACHER', value: monitorSummary.value.teacherAppointed, subtitle: 'Appointments created by teachers', className: 'analytics-card-blue', icon: 'mdi-account-tie-outline' },
+  { title: 'DOCTOR ASSIGNED', value: monitorSummary.value.fullyAppointed, subtitle: 'Appointments with assigned doctor', className: 'analytics-card-orange', icon: 'mdi-check-decagram-outline' },
+  { title: 'NO DOCTOR YET', value: monitorSummary.value.unassigned, subtitle: 'Appointments missing doctor assignment', className: 'analytics-card-purple', icon: 'mdi-alert-circle-outline' }
 ]);
+
+function bookedByRole(item: AppointmentRow): AppointmentBookedByRole {
+  const mapped = monitorByBookingId.value[item.bookingId]?.bookedByRole;
+  if (mapped) return mapped;
+  return item.actorRole || 'unknown';
+}
+
+function appointeeType(item: AppointmentRow): 'student' | 'teacher' | 'unknown' {
+  if (item.patientType && item.patientType !== 'unknown') return item.patientType;
+  const role = bookedByRole(item);
+  return role === 'student' || role === 'teacher' ? role : 'unknown';
+}
+
+function assignmentLabel(item: AppointmentRow): string {
+  return appointmentBookingRoleLabel(bookedByRole(item));
+}
+
+function assignmentColor(item: AppointmentRow): string {
+  return appointmentBookingRoleColor(bookedByRole(item));
+}
+
+const displayRows = computed(() =>
+  rows.value.filter((item) => {
+    if (assignmentFilter.value === 'Booked By: Any') return true;
+    const role = bookedByRole(item);
+    if (assignmentFilter.value === 'Booked By Student') return role === 'student';
+    if (assignmentFilter.value === 'Booked By Teacher') return role === 'teacher';
+    if (assignmentFilter.value === 'Booked By Admin') return role === 'admin';
+    return role === 'unknown';
+  })
+);
 
 function toApiPeriod(value: string): string {
   const lowered = value.toLowerCase();
@@ -194,7 +250,7 @@ function toInputDate(dateValue: string): string {
 
 function statusColor(status: AppointmentStatus): string {
   const lowered = status.toLowerCase();
-  if (lowered === 'confirmed' || lowered === 'accepted') return 'success';
+  if (lowered === 'appointed' || lowered === 'confirmed' || lowered === 'accepted') return 'success';
   if (lowered === 'pending' || lowered === 'awaiting') return 'warning';
   return 'error';
 }
@@ -286,19 +342,25 @@ async function loadAppointments(options: { silent?: boolean } = {}): Promise<voi
     loading.value = true;
   }
   try {
-    const payload = await fetchAppointments({
+    const query = {
       search: searchValue.value.trim(),
-      status: statusFilter.value,
-      service: serviceFilter.value,
-      doctor: doctorFilter.value,
+      status: statusFilter.value === 'All Statuses' ? '' : statusFilter.value,
+      service: serviceFilter.value === 'All Services' ? '' : serviceFilter.value,
+      doctor: doctorFilter.value === 'Doctor: Any' ? '' : doctorFilter.value,
       period: toApiPeriod(periodFilter.value),
       page: page.value,
       perPage
-    });
+    };
+    const [payload, monitor] = await Promise.all([fetchAppointments(query), fetchAppointmentMonitor(query)]);
     rows.value = payload.items;
     analytics.value = payload.analytics;
     totalItems.value = payload.meta.total;
     totalPages.value = payload.meta.totalPages;
+    monitorSummary.value = monitor.summary;
+    monitorByBookingId.value = monitor.items.reduce<Record<string, AppointmentMonitorRow>>((acc, row) => {
+      if (row.bookingId) acc[row.bookingId] = row;
+      return acc;
+    }, {});
   } catch (error) {
     if (!options.silent) {
       showFeedback('error', 'Loading failed', error instanceof Error ? error.message : String(error));
@@ -533,6 +595,7 @@ function clearFilters(): void {
   statusFilter.value = 'All Statuses';
   serviceFilter.value = 'All Services';
   doctorFilter.value = 'Doctor: Any';
+  assignmentFilter.value = 'Booked By: Any';
   periodFilter.value = 'Period: Upcoming';
   searchValue.value = '';
   page.value = 1;
@@ -560,6 +623,7 @@ function openAddDialog(): void {
     addFormErrors[key] = '';
   });
   useExistingPatient.value = false;
+  addBookedByRole.value = 'student';
   patientLookupKey.value = '';
   selectedSymptomTags.value = [];
   addForm.patient_id = '';
@@ -592,11 +656,14 @@ async function saveEdit(): Promise<void> {
     await updateAppointment({
       booking_id: selected.value.bookingId,
       doctor_name: editForm.doctorName,
+      patient_name: selected.value.patientName,
+      patient_email: selected.value.patientEmail,
       visit_type: editForm.service,
       appointment_date: editForm.date,
       preferred_time: editForm.time,
       status: editForm.status,
-      visit_reason: editForm.reason
+      visit_reason: editForm.reason,
+      actor_role: 'admin'
     });
     showFeedback('success', 'Appointment updated', 'Appointment updated successfully.');
     editDialog.value = false;
@@ -613,7 +680,8 @@ async function markReschedule(item: AppointmentRow): Promise<void> {
   try {
     await updateAppointment({
       booking_id: item.bookingId,
-      status: 'Pending'
+      status: 'Pending',
+      actor_role: 'admin'
     });
     showFeedback('success', 'Reschedule queued', 'Appointment moved to pending queue for reschedule.');
     await loadAppointments();
@@ -631,7 +699,7 @@ async function saveAdd(): Promise<void> {
 
   const phone = String(addForm.phone_number || '').trim();
   const isPhoneValid = /^[0-9+\-\s()]{7,20}$/.test(phone);
-  if (!String(addForm.patient_name || '').trim()) addFormErrors.patient_name = 'Patient name is required.';
+  if (!String(addForm.patient_name || '').trim()) addFormErrors.patient_name = `${addBookerLabel.value} name is required.`;
   if (!phone) addFormErrors.phone_number = 'Phone number is required.';
   else if (!isPhoneValid) addFormErrors.phone_number = 'Enter a valid phone number.';
   if (!String(addForm.department_name || '').trim()) addFormErrors.department_name = 'Department is required.';
@@ -640,7 +708,9 @@ async function saveAdd(): Promise<void> {
   if (!String(addForm.visit_type || '').trim()) addFormErrors.visit_type = 'Visit type is required.';
   if (!String(addForm.appointment_date || '').trim()) addFormErrors.appointment_date = 'Appointment date is required.';
   if (!String(addForm.status || '').trim()) addFormErrors.status = 'Status is required.';
-  if (useExistingPatient.value && !String(addForm.patient_id || '').trim()) addFormErrors.patient_id = 'Patient ID is required for existing patient lookup.';
+  if (useExistingPatient.value && !String(addForm.patient_id || '').trim()) {
+    addFormErrors.patient_id = `${addBookerLabel.value} ID is required for existing ${addBookerLabel.value.toLowerCase()} lookup.`;
+  }
   if (addForm.appointment_priority === 'Urgent' && !String(addForm.emergency_contact || '').trim()) {
     addFormErrors.emergency_contact = 'Emergency contact is required for urgent appointments.';
   }
@@ -657,8 +727,13 @@ async function saveAdd(): Promise<void> {
 
   addForm.symptoms_summary = [selectedSymptomTags.value.join(', '), String(addForm.visit_reason || '').trim()].filter(Boolean).join(' | ');
   addSaving.value = true;
-  try {
-    await createAppointment(addForm);
+    try {
+      await createAppointment({
+        ...addForm,
+        student_name: addForm.patient_name,
+        patient_type: addBookedByRole.value,
+        actor_role: 'admin'
+      });
     addDialog.value = false;
     showFeedback('success', 'Appointment created', 'New appointment has been added successfully.');
     await loadAppointments();
@@ -710,7 +785,7 @@ watch(
   }
 );
 
-watch([statusFilter, serviceFilter, doctorFilter, periodFilter], () => {
+watch([statusFilter, serviceFilter, doctorFilter, assignmentFilter, periodFilter], () => {
   page.value = 1;
   void loadAppointments();
 });
@@ -736,13 +811,40 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="appointments-page">
+    <template v-if="loading && !rows.length">
+      <v-card class="hero-banner mb-4" elevation="0">
+        <v-card-text class="pa-5">
+          <v-skeleton-loader type="heading, text" />
+        </v-card-text>
+      </v-card>
+
+      <v-row class="mb-4">
+        <v-col v-for="index in 4" :key="`appointments-skeleton-card-${index}`" cols="12" sm="6" lg="3">
+          <v-skeleton-loader type="image, article" class="rounded-lg" />
+        </v-col>
+      </v-row>
+
+      <v-card rounded="xl" variant="flat">
+        <v-card-text class="pa-4 pa-md-5">
+          <v-skeleton-loader type="actions, table-heading, table-row-divider@6" />
+        </v-card-text>
+      </v-card>
+
+      <v-card rounded="xl" variant="flat" class="mt-5">
+        <v-card-text class="pa-4 pa-md-5">
+          <v-skeleton-loader type="heading, actions, table-heading, table-row-divider@5" />
+        </v-card-text>
+      </v-card>
+    </template>
+
+    <template v-else>
     <v-card class="hero-banner mb-4" elevation="0">
       <v-card-text class="pa-5">
         <div class="d-flex flex-wrap align-center justify-space-between ga-4">
           <div>
             <div class="hero-kicker">Clinical Operations</div>
-            <h1 class="text-h4 font-weight-black mb-1">Appointments</h1>
-            <p class="hero-subtitle mb-0">Manage and review all patient bookings.</p>
+            <h1 class="text-h4 font-weight-black mb-1">Appointment Monitoring</h1>
+            <p class="hero-subtitle mb-0">Students and teachers can book appointments; monitor booking source and doctor assignment end-to-end.</p>
           </div>
         </div>
       </v-card-text>
@@ -771,6 +873,7 @@ onBeforeUnmount(() => {
           <v-select v-model="statusFilter" :items="statusOptions" density="comfortable" variant="outlined" hide-details class="filter-field" />
           <v-select v-model="serviceFilter" :items="serviceOptions" density="comfortable" variant="outlined" hide-details class="filter-field" />
           <v-select v-model="doctorFilter" :items="doctorOptions" density="comfortable" variant="outlined" hide-details class="filter-field" />
+          <v-select v-model="assignmentFilter" :items="assignmentOptions" density="comfortable" variant="outlined" hide-details class="filter-field" />
           <v-select v-model="periodFilter" :items="periodOptions" density="comfortable" variant="outlined" hide-details class="filter-field" />
           <v-text-field
             v-model="searchValue"
@@ -778,7 +881,7 @@ onBeforeUnmount(() => {
             variant="outlined"
             hide-details
             prepend-inner-icon="mdi-magnify"
-            placeholder="Search patient name, email, phone..."
+            placeholder="Search student name, email, phone..."
             class="search-field"
             @keyup.enter="loadAppointments"
           />
@@ -807,37 +910,49 @@ onBeforeUnmount(() => {
         <div class="d-flex justify-space-between align-center mb-2 ga-2 flex-wrap">
           <h2 class="text-h5 font-weight-bold">Appointments</h2>
           <div class="d-flex align-center ga-2 flex-wrap">
-            <p class="text-body-2 text-medium-emphasis mb-0">Showing {{ rows.length }} of {{ totalItems }}</p>
+            <p class="text-body-2 text-medium-emphasis mb-0">Showing {{ displayRows.length }} of {{ totalItems }}</p>
             <v-btn color="primary" prepend-icon="mdi-plus" rounded="pill" class="saas-primary-btn" @click="openAddDialog">Add Appointment</v-btn>
           </div>
         </div>
 
         <v-table class="appointment-table" density="comfortable">
-          <thead>
-            <tr>
-              <th>PATIENT</th>
-              <th>SERVICE</th>
-              <th>DOCTOR</th>
-              <th>SCHEDULE</th>
-              <th>STATUS</th>
+            <thead>
+              <tr>
+                <th>BOOKER</th>
+                <th>TYPE</th>
+                <th>SERVICE</th>
+                <th>DOCTOR</th>
+                <th>SCHEDULE</th>
+                <th>STATUS</th>
+                <th>BOOKED BY</th>
               <th>ACTIONS</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="item in rows" :key="item.id">
-              <td>
-                <div class="d-flex align-center ga-3">
-                  <v-avatar color="blue-grey-lighten-4" size="38">
-                    <span class="text-caption font-weight-bold">{{ initials(item.patientName) }}</span>
-                  </v-avatar>
-                  <div>
-                    <div class="font-weight-bold text-body-2">{{ item.patientName }}</div>
-                    <div class="text-caption text-medium-emphasis">{{ item.patientEmail || item.phoneNumber }}</div>
+            <tr v-for="item in displayRows" :key="item.id">
+                <td>
+                  <div class="d-flex align-center ga-3">
+                    <v-avatar color="blue-grey-lighten-4" size="38">
+                      <span class="text-caption font-weight-bold">{{ initials(item.patientName) }}</span>
+                    </v-avatar>
+                    <div>
+                      <div class="font-weight-bold text-body-2 d-flex align-center ga-2 flex-wrap">
+                        <span>{{ item.patientName }}</span>
+                        <v-chip :color="appointeeType(item) === 'teacher' ? 'success' : appointeeType(item) === 'student' ? 'primary' : 'secondary'" variant="tonal" rounded="pill" size="x-small">
+                          {{ appointeeType(item) === 'teacher' ? 'Teacher' : appointeeType(item) === 'student' ? 'Student' : 'Unknown' }}
+                        </v-chip>
+                      </div>
+                      <div class="text-caption text-medium-emphasis">{{ item.patientEmail || item.phoneNumber }}</div>
+                    </div>
                   </div>
-                </div>
-              </td>
-              <td class="text-body-2">{{ item.service }}</td>
-              <td class="text-body-2">{{ item.doctor }}</td>
+                </td>
+                <td>
+                  <v-chip :color="appointeeType(item) === 'teacher' ? 'success' : appointeeType(item) === 'student' ? 'primary' : 'secondary'" variant="tonal" rounded="pill" size="small">
+                    {{ appointeeType(item) === 'teacher' ? 'Teacher' : appointeeType(item) === 'student' ? 'Student' : 'Unknown' }}
+                  </v-chip>
+                </td>
+                <td class="text-body-2">{{ item.service }}</td>
+                <td class="text-body-2">{{ item.doctor }}</td>
               <td>
                 <div class="text-body-2 font-weight-medium">{{ formatDate(item.scheduleDate) }}</div>
                 <div class="text-caption text-medium-emphasis">{{ item.scheduleTime || '--' }}</div>
@@ -845,6 +960,11 @@ onBeforeUnmount(() => {
               <td>
                 <v-chip :color="statusColor(item.status)" variant="tonal" rounded="pill" size="small">
                   {{ item.status }}
+                </v-chip>
+              </td>
+              <td>
+                <v-chip :color="assignmentColor(item)" variant="tonal" rounded="pill" size="small">
+                  {{ assignmentLabel(item) }}
                 </v-chip>
               </td>
               <td>
@@ -859,14 +979,14 @@ onBeforeUnmount(() => {
                 </div>
               </td>
             </tr>
-            <tr v-if="rows.length === 0">
-              <td colspan="6" class="text-center py-6 text-medium-emphasis">No appointments found for current filters.</td>
+            <tr v-if="displayRows.length === 0">
+              <td colspan="7" class="text-center py-6 text-medium-emphasis">No appointments found for current filters.</td>
             </tr>
           </tbody>
         </v-table>
 
         <div class="d-flex flex-wrap justify-space-between align-center ga-3 mt-4">
-          <p class="text-body-2 text-medium-emphasis">Showing {{ rows.length }} of {{ totalItems }}</p>
+          <p class="text-body-2 text-medium-emphasis">Showing {{ displayRows.length }} of {{ totalItems }}</p>
           <v-pagination v-model="page" :length="totalPages" :total-visible="7" rounded="circle" />
         </div>
       </v-card-text>
@@ -875,7 +995,7 @@ onBeforeUnmount(() => {
     <v-card rounded="xl" variant="flat" class="mt-5">
       <v-card-item>
         <v-card-title class="text-h6 font-weight-bold">Doctor Availability Management</v-card-title>
-        <v-card-subtitle>Configure weekly doctor schedules used by patient booking and appointment validation.</v-card-subtitle>
+        <v-card-subtitle>Configure weekly doctor schedules used by student and teacher booking validation.</v-card-subtitle>
         <template #append>
           <div class="d-flex ga-2">
             <v-btn variant="outlined" rounded="pill" class="saas-outline-btn" :loading="availabilityLoading" prepend-icon="mdi-refresh" @click="loadAvailabilityRows">Refresh</v-btn>
@@ -911,7 +1031,7 @@ onBeforeUnmount(() => {
         <v-table density="comfortable" class="availability-table">
           <thead>
             <tr>
-              <th>DOCTOR</th>
+              <th>TEACHER</th>
               <th>DEPARTMENT</th>
               <th>DAY</th>
               <th>TIME WINDOW</th>
@@ -948,29 +1068,33 @@ onBeforeUnmount(() => {
         </v-table>
       </v-card-text>
     </v-card>
+    </template>
 
     <ModuleActivityLogs module="appointments" title="Module Activity Logs" :per-page="8" />
 
     <v-dialog v-model="viewDialog" max-width="600">
-      <v-card class="saas-modal-card">
-        <v-card-title class="saas-modal-title text-h6 font-weight-bold">Appointment Details</v-card-title>
-        <v-card-text v-if="selected">
-          <div><strong>Booking ID:</strong> {{ selected.bookingId }}</div>
-          <div><strong>Patient ID:</strong> {{ selected.patientId || '--' }}</div>
-          <div><strong>Patient:</strong> {{ selected.patientName }}</div>
-          <div><strong>Email:</strong> {{ selected.patientEmail || '--' }}</div>
-          <div><strong>Phone:</strong> {{ selected.phoneNumber || '--' }}</div>
-          <div><strong>Emergency Contact:</strong> {{ selected.emergencyContact || '--' }}</div>
-          <div><strong>Service:</strong> {{ selected.service }}</div>
-          <div><strong>Doctor:</strong> {{ selected.doctor }}</div>
-          <div><strong>Priority:</strong> {{ selected.appointmentPriority || 'Routine' }}</div>
-          <div><strong>Date:</strong> {{ formatDate(selected.scheduleDate) }}</div>
-          <div><strong>Time:</strong> {{ selected.scheduleTime || '--' }}</div>
-          <div><strong>Status:</strong> {{ selected.status }}</div>
-          <div><strong>Symptoms:</strong> {{ selected.symptomsSummary || '--' }}</div>
-          <div><strong>Doctor Notes:</strong> {{ selected.doctorNotes || '--' }}</div>
-          <div><strong>Reason:</strong> {{ selected.visitReason || '--' }}</div>
-        </v-card-text>
+        <v-card class="saas-modal-card">
+          <v-card-title class="saas-modal-title text-h6 font-weight-bold">Appointment Details</v-card-title>
+          <v-card-text v-if="selected">
+            <div><strong>Booking ID:</strong> {{ selected.bookingId }}</div>
+              <div><strong>Booker ID:</strong> {{ selected.patientId || '--' }}</div>
+              <div><strong>Booker:</strong> {{ selected.patientName }}</div>
+              <div><strong>Appointee Type:</strong> {{ appointeeType(selected) === 'teacher' ? 'Teacher' : appointeeType(selected) === 'student' ? 'Student' : 'Unknown' }}</div>
+              <div><strong>Booked By:</strong> {{ bookedByRole(selected) === 'teacher' ? 'Teacher' : bookedByRole(selected) === 'student' ? 'Student' : bookedByRole(selected) === 'admin' ? 'Admin' : 'Unknown' }}</div>
+              <div><strong>Email:</strong> {{ selected.patientEmail || '--' }}</div>
+            <div><strong>Phone:</strong> {{ selected.phoneNumber || '--' }}</div>
+            <div><strong>Emergency Contact:</strong> {{ selected.emergencyContact || '--' }}</div>
+            <div><strong>Service:</strong> {{ selected.service }}</div>
+            <div><strong>Doctor:</strong> {{ selected.doctor }}</div>
+            <div><strong>Priority:</strong> {{ selected.appointmentPriority || 'Routine' }}</div>
+            <div><strong>Date:</strong> {{ formatDate(selected.scheduleDate) }}</div>
+            <div><strong>Time:</strong> {{ selected.scheduleTime || '--' }}</div>
+            <div><strong>Status:</strong> {{ selected.status }}</div>
+            <div><strong>Assignment:</strong> {{ assignmentLabel(selected) }}</div>
+            <div><strong>Symptoms:</strong> {{ selected.symptomsSummary || '--' }}</div>
+            <div><strong>Doctor Notes:</strong> {{ selected.doctorNotes || '--' }}</div>
+            <div><strong>Appointment Concern:</strong> {{ selected.visitReason || '--' }}</div>
+          </v-card-text>
         <v-card-actions class="justify-end">
           <v-btn variant="text" @click="viewDialog = false">Close</v-btn>
         </v-card-actions>
@@ -1002,9 +1126,20 @@ onBeforeUnmount(() => {
         <v-card-title class="saas-modal-title text-h6 font-weight-bold">Add Appointment</v-card-title>
         <v-card-text>
           <v-row>
-            <v-col cols="12"><div class="modal-section-title">Patient Info</div></v-col>
+            <v-col cols="12"><div class="modal-section-title">Booker Info</div></v-col>
+            <v-col cols="12" md="4">
+              <v-select
+                v-model="addBookedByRole"
+                :items="bookedByOptions"
+                item-title="title"
+                item-value="value"
+                label="Booked By *"
+                variant="outlined"
+                density="comfortable"
+              />
+            </v-col>
             <v-col cols="12" md="5">
-              <v-switch v-model="useExistingPatient" inset color="primary" label="Existing Patient Lookup" hide-details />
+              <v-switch v-model="useExistingPatient" inset color="primary" :label="`Existing ${addBookerLabel} Lookup`" hide-details />
             </v-col>
             <v-col cols="12" md="7" v-if="useExistingPatient">
               <v-select
@@ -1012,10 +1147,10 @@ onBeforeUnmount(() => {
                 item-title="title"
                 item-value="value"
                 :model-value="patientLookupKey"
-                label="Search Existing Patient"
+                :label="`Search Existing ${addBookerLabel}`"
                 variant="outlined"
                 density="comfortable"
-                hint="Select patient from previous appointment records"
+                :hint="`Select ${addBookerLabel.toLowerCase()} from previous appointment records`"
                 persistent-hint
                 @update:model-value="applyExistingPatientLookup"
               />
@@ -1023,16 +1158,16 @@ onBeforeUnmount(() => {
             <v-col cols="12" md="4">
               <v-text-field
                 v-model="addForm.patient_id"
-                label="Patient ID (MRN)"
+                :label="`${addBookerLabel} ID`"
                 variant="outlined"
                 density="comfortable"
                 :error-messages="addFormErrors.patient_id"
-                hint="Required if using existing patient flow"
+                :hint="`Required if using existing ${addBookerLabel.toLowerCase()} flow`"
                 persistent-hint
               />
             </v-col>
             <v-col cols="12" md="8">
-              <v-text-field v-model="addForm.patient_name" label="Patient Name *" variant="outlined" density="comfortable" :error-messages="addFormErrors.patient_name" />
+              <v-text-field v-model="addForm.patient_name" :label="`${addBookerLabel} Name *`" variant="outlined" density="comfortable" :error-messages="addFormErrors.patient_name" />
             </v-col>
             <v-col cols="12" md="6">
               <v-text-field v-model="addForm.phone_number" label="Phone Number *" variant="outlined" density="comfortable" :error-messages="addFormErrors.phone_number" />
@@ -1040,9 +1175,9 @@ onBeforeUnmount(() => {
             <v-col cols="12" md="6">
               <v-text-field v-model="addForm.emergency_contact" label="Emergency / Contact Person" variant="outlined" density="comfortable" :error-messages="addFormErrors.emergency_contact" />
             </v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="addForm.patient_email" label="Patient Email" variant="outlined" density="comfortable" /></v-col>
-            <v-col cols="12" md="3"><v-text-field v-model.number="addForm.patient_age" type="number" min="0" label="Patient Age" variant="outlined" density="comfortable" /></v-col>
-            <v-col cols="12" md="3"><v-select v-model="addForm.patient_gender" :items="['Male', 'Female', 'Other']" label="Patient Gender" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12" md="6"><v-text-field v-model="addForm.patient_email" :label="`${addBookerLabel} Email`" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12" md="3"><v-text-field v-model.number="addForm.patient_age" type="number" min="0" :label="`${addBookerLabel} Age`" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12" md="3"><v-select v-model="addForm.patient_gender" :items="['Male', 'Female', 'Other']" :label="`${addBookerLabel} Gender`" variant="outlined" density="comfortable" /></v-col>
 
             <v-col cols="12"><div class="modal-section-title">Appointment Details</div></v-col>
             <v-col cols="12" md="6">

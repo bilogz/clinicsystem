@@ -1,14 +1,14 @@
 ﻿<template>
   <div class="logo">
     <RouterLink to="/dashboard/default" class="logo-link">
-      <img :src="nexoraLogo" alt="Nexora Medical Center" class="logo-image" />
+      <img :src="bcpClinicLogo" alt="BCP Clinic" class="logo-image" />
     </RouterLink>
   </div>
 </template>
 
 <script setup lang="ts">
 import { RouterLink } from 'vue-router';
-import nexoraLogo from '@/assets/images/logos/nexora-logo.svg';
+import bcpClinicLogo from '@/assets/images/logos/bcp-olp-logo-mini2.png';
 </script>
 
 <style scoped>
@@ -22,5 +22,6 @@ import nexoraLogo from '@/assets/images/logos/nexora-logo.svg';
   max-width: 100%;
   height: auto;
   display: block;
+  object-fit: contain;
 }
 </style>
