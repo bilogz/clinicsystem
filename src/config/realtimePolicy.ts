@@ -4,6 +4,7 @@ export const REALTIME_POLICY = {
     walkInMs: 12000,
     checkupMs: 10000,
     laboratoryMs: 15000,
+    cashierMs: 15000,
     pharmacyMs: 20000,
     patientsMs: 15000,
     reportsMs: 20000

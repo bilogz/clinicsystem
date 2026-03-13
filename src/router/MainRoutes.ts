@@ -52,6 +52,11 @@ const MainRoutes = {
       component: () => import('@/views/admin/modules/ReportsPage.vue')
     },
     {
+      name: 'Cashier Integration',
+      path: '/modules/cashier',
+      component: () => import('@/views/admin/modules/CashierIntegrationPage.vue')
+    },
+    {
       name: 'My Profile',
       path: '/profile',
       component: () => import('@/views/profile/MyProfilePage.vue')

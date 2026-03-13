@@ -16,6 +16,9 @@ export type PatientPortalAppointment = {
   preferredTime: string;
   status: string;
   reason: string;
+  cashierPaymentStatus: string;
+  cashierPaymentMethod: string;
+  officialReceipt: string;
 };
 
 export type PatientPortalData = {
@@ -48,7 +51,10 @@ export async function fetchPatientPortal(): Promise<PatientPortalData> {
         appointmentDate: String(item.appointmentDate || item.appointment_date || ''),
         preferredTime: String(item.preferredTime || item.preferred_time || ''),
         status: String(item.status || ''),
-        reason: String(item.reason || item.visit_reason || '')
+        reason: String(item.reason || item.visit_reason || ''),
+        cashierPaymentStatus: String(item.cashierPaymentStatus || item.cashier_payment_status || 'unpaid'),
+        cashierPaymentMethod: String(item.cashierPaymentMethod || item.cashier_payment_method || item.payment_method || ''),
+        officialReceipt: String(item.officialReceipt || item.official_receipt || '')
       }))
     : [];
   return {

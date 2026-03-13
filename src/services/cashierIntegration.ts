@@ -48,44 +48,156 @@ export type CashierIntegrationStatus = {
   recentPayments: CashierPaymentLink[];
 };
 
-export async function fetchCashierIntegrationStatus(): Promise<CashierIntegrationStatus> {
-  const response = await fetchApiData<{ data: CashierIntegrationStatus }>('/api/integrations/cashier/status', { ttlMs: 5_000 });
-  return response.data;
+export type CashierQueueResult = {
+  items: CashierIntegrationQueueItem[];
+  meta: {
+    page: number;
+    perPage: number;
+    total: number;
+    totalPages: number;
+  };
+};
+
+export type CashierDepartmentRecord = {
+  id: number;
+  clearance_reference: string;
+  patient_id: string | null;
+  patient_code: string | null;
+  patient_name: string;
+  patient_type: string;
+  department_key: string;
+  department_name: string;
+  stage_order: number;
+  status: string;
+  remarks: string | null;
+  approver_name: string | null;
+  approver_role: string | null;
+  external_reference: string | null;
+  requested_by: string | null;
+  decided_at: string | null;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+};
+
+export type CashierDepartmentResult = {
+  items: CashierDepartmentRecord[];
+  meta: {
+    page: number;
+    perPage: number;
+    total: number;
+    totalPages: number;
+  };
+  departments?: Array<Record<string, unknown>>;
+};
+
+type PaginationParams = {
+  page?: number;
+  perPage?: number;
+};
+
+type CashierQueueParams = PaginationParams & {
+  syncStatus?: string;
+  sourceModule?: string;
+};
+
+type CashierDepartmentParams = PaginationParams & {
+  status?: string;
+  search?: string;
+};
+
+function trimTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, '');
 }
 
-export async function fetchCashierQueue(params: { page?: number; perPage?: number; syncStatus?: string; sourceModule?: string } = {}): Promise<{
-  items: CashierIntegrationQueueItem[];
-  meta: { page: number; perPage: number; total: number; totalPages: number };
-}> {
+function resolveCashierIntegrationBaseUrl(): string {
+  const directApi = import.meta.env.VITE_CASHIER_INTEGRATION_API_URL?.trim();
+  if (directApi) return trimTrailingSlashes(directApi);
+
+  const configured = import.meta.env.VITE_BACKEND_API_BASE_URL?.trim();
+  if (configured) return `${trimTrailingSlashes(configured)}/integrations/cashier`;
+
+  return '/api/integrations/cashier';
+}
+
+function resolveCashierDepartmentUrl(): string {
+  const configured = import.meta.env.VITE_BACKEND_API_BASE_URL?.trim();
+  if (configured) return `${trimTrailingSlashes(configured)}/integrations/departments/records`;
+  return '/api/integrations/departments/records';
+}
+
+function withQuery(url: string, params: Record<string, string | number | undefined>): string {
   const query = new URLSearchParams();
-  if (params.page) query.set('page', String(params.page));
-  if (params.perPage) query.set('per_page', String(params.perPage));
-  if (params.syncStatus) query.set('sync_status', params.syncStatus);
-  if (params.sourceModule) query.set('source_module', params.sourceModule);
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === '') return;
+    query.set(key, String(value));
+  });
+
   const suffix = query.toString();
-  const response = await fetchApiData<{ data: { items: CashierIntegrationQueueItem[]; meta: { page: number; perPage: number; total: number; totalPages: number } } }>(
-    `/api/integrations/cashier/queue${suffix ? `?${suffix}` : ''}`,
+  return suffix ? `${url}?${suffix}` : url;
+}
+
+export async function fetchCashierIntegrationStatus(): Promise<CashierIntegrationStatus> {
+  return await fetchApiData<CashierIntegrationStatus>(`${resolveCashierIntegrationBaseUrl()}/status`, { ttlMs: 5_000 });
+}
+
+export async function fetchCashierQueue(params: CashierQueueParams = {}): Promise<CashierQueueResult> {
+  return await fetchApiData<CashierQueueResult>(
+    withQuery(`${resolveCashierIntegrationBaseUrl()}/queue`, {
+      page: params.page,
+      per_page: params.perPage,
+      sync_status: params.syncStatus,
+      source_module: params.sourceModule
+    }),
     { ttlMs: 3_000 }
   );
-  return response.data;
+}
+
+export async function fetchCashierDepartmentRecords(params: CashierDepartmentParams = {}): Promise<CashierDepartmentResult> {
+  return await fetchApiData<CashierDepartmentResult>(
+    withQuery(resolveCashierDepartmentUrl(), {
+      department: 'cashier',
+      page: params.page,
+      per_page: params.perPage,
+      status: params.status,
+      search: params.search
+    }),
+    { ttlMs: 3_000 }
+  );
 }
 
 export async function dispatchPendingCashierEvents(limit = 10): Promise<void> {
-  await fetchApiData('/api/integrations/cashier/sync', {
+  await fetchApiData<unknown>(`${resolveCashierIntegrationBaseUrl()}/sync`, {
     method: 'POST',
     body: { action: 'dispatch_pending', limit }
   });
-  invalidateApiCache('/api/integrations/cashier/status');
-  invalidateApiCache('/api/integrations/cashier/queue');
+  invalidateCashierIntegrationCache();
 }
 
 export async function updateCashierPaymentStatus(payload: Record<string, unknown>): Promise<void> {
-  await fetchApiData('/api/integrations/cashier/payment-status', {
+  await fetchApiData<unknown>(`${resolveCashierIntegrationBaseUrl()}/payment-status`, {
     method: 'POST',
     body: payload
   });
-  invalidateApiCache('/api/integrations/cashier/status');
-  invalidateApiCache('/api/integrations/cashier/queue');
+  invalidateCashierIntegrationCache();
   invalidateApiCache('/api/dashboard');
   invalidateApiCache('/api/reports');
+}
+
+export async function submitCashierDepartmentDecision(payload: Record<string, unknown>): Promise<void> {
+  await fetchApiData<unknown>(resolveCashierDepartmentUrl(), {
+    method: 'POST',
+    body: {
+      action: 'submit_decision',
+      department_key: 'cashier',
+      ...payload
+    }
+  });
+  invalidateCashierIntegrationCache();
+}
+
+export function invalidateCashierIntegrationCache(): void {
+  invalidateApiCache('/api/integrations/cashier');
+  invalidateApiCache('/api/integrations/departments/records');
 }

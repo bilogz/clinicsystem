@@ -154,6 +154,7 @@ const addForm = reactive<CreateAppointmentPayload>({
   visit_reason: '',
   patient_age: null,
   patient_gender: '',
+  amount_due: 0,
   status: 'New'
 });
 const addFormErrors = reactive<Record<string, string>>({});
@@ -253,6 +254,61 @@ function statusColor(status: AppointmentStatus): string {
   if (lowered === 'appointed' || lowered === 'confirmed' || lowered === 'accepted') return 'success';
   if (lowered === 'pending' || lowered === 'awaiting') return 'warning';
   return 'error';
+}
+
+function cashierStatusColor(status: AppointmentRow['cashierPaymentStatus']): string {
+  if (status === 'paid') return 'success';
+  if (status === 'partial') return 'warning';
+  if (status === 'void') return 'error';
+  return 'secondary';
+}
+
+function cashierStatusLabel(item: AppointmentRow): string {
+  if (item.cashierPaymentStatus === 'paid') return 'Paid';
+  if (item.cashierPaymentStatus === 'partial') return 'Partial';
+  if (item.cashierPaymentStatus === 'void') return 'Voided';
+  if (item.cashierBillingId || item.cashierReference) return 'Unpaid';
+  if (item.cashierSyncStatus === 'sent' || item.cashierSyncStatus === 'acknowledged') return 'Synced to Cashier';
+  if (item.cashierSyncStatus === 'failed') return 'Sync Failed';
+  return 'Pending Sync';
+}
+
+function cashierChipColor(item: AppointmentRow): string {
+  if (item.cashierPaymentStatus === 'paid') return 'success';
+  if (item.cashierPaymentStatus === 'partial') return 'warning';
+  if (item.cashierPaymentStatus === 'void') return 'error';
+  if (item.cashierBillingId || item.cashierReference) return 'secondary';
+  if (item.cashierSyncStatus === 'sent' || item.cashierSyncStatus === 'acknowledged') return 'info';
+  if (item.cashierSyncStatus === 'failed') return 'error';
+  return 'secondary';
+}
+
+function cashierMethodLabel(item: AppointmentRow): string {
+  return item.cashierPaymentMethod || item.paymentMethod || '--';
+}
+
+function requiresCashierVerification(item: AppointmentRow): boolean {
+  return item.cashierBillingId !== null || Boolean(item.cashierReference) || item.amountDue > 0;
+}
+
+function canProceedAfterCashier(item: AppointmentRow): boolean {
+  if (!requiresCashierVerification(item)) return true;
+  return item.cashierPaymentStatus === 'paid';
+}
+
+function cashierVerificationBadge(item: AppointmentRow): { label: string; color: string } | null {
+  if (!requiresCashierVerification(item) || item.status === 'Canceled') return null;
+  if (canProceedAfterCashier(item)) {
+    return {
+      label: 'Cashier Verified',
+      color: 'success'
+    };
+  }
+
+  return {
+    label: 'Waiting for Cashier Verification',
+    color: 'warning'
+  };
 }
 
 function initials(name: string): string {
@@ -644,6 +700,7 @@ function openAddDialog(): void {
   addForm.visit_reason = '';
   addForm.patient_age = null;
   addForm.patient_gender = '';
+  addForm.amount_due = 0;
   addForm.status = 'New';
   addDialog.value = true;
   void loadAddDoctorAvailability();
@@ -651,6 +708,10 @@ function openAddDialog(): void {
 
 async function saveEdit(): Promise<void> {
   if (!selected.value) return;
+  if (!canProceedAfterCashier(selected.value) && ['Confirmed', 'Accepted', 'Appointed'].includes(editForm.status)) {
+    showFeedback('error', 'Cashier verification required', 'This appointment cannot proceed until cashier payment is verified as paid.');
+    return;
+  }
   saving.value = true;
   try {
     await updateAppointment({
@@ -924,9 +985,10 @@ onBeforeUnmount(() => {
                 <th>DOCTOR</th>
                 <th>SCHEDULE</th>
                 <th>STATUS</th>
+                <th>CASHIER</th>
                 <th>BOOKED BY</th>
-              <th>ACTIONS</th>
-            </tr>
+                <th>ACTIONS</th>
+              </tr>
           </thead>
           <tbody>
             <tr v-for="item in displayRows" :key="item.id">
@@ -958,9 +1020,31 @@ onBeforeUnmount(() => {
                 <div class="text-caption text-medium-emphasis">{{ item.scheduleTime || '--' }}</div>
               </td>
               <td>
-                <v-chip :color="statusColor(item.status)" variant="tonal" rounded="pill" size="small">
-                  {{ item.status }}
-                </v-chip>
+                <div class="d-flex flex-column ga-1 align-start">
+                  <v-chip :color="statusColor(item.status)" variant="tonal" rounded="pill" size="small">
+                    {{ item.status }}
+                  </v-chip>
+                  <v-chip
+                    v-if="cashierVerificationBadge(item)"
+                    :color="cashierVerificationBadge(item)?.color"
+                    variant="flat"
+                    rounded="pill"
+                    size="x-small"
+                  >
+                    {{ cashierVerificationBadge(item)?.label }}
+                  </v-chip>
+                </div>
+              </td>
+              <td>
+                <div class="d-flex flex-column ga-1">
+                  <v-chip :color="cashierChipColor(item)" variant="tonal" rounded="pill" size="small">
+                    {{ cashierStatusLabel(item) }}
+                  </v-chip>
+                  <div class="text-caption text-medium-emphasis">
+                    {{ cashierMethodLabel(item) }}
+                    <span v-if="item.officialReceipt"> - OR {{ item.officialReceipt }}</span>
+                  </div>
+                </div>
               </td>
               <td>
                 <v-chip :color="assignmentColor(item)" variant="tonal" rounded="pill" size="small">
@@ -980,7 +1064,7 @@ onBeforeUnmount(() => {
               </td>
             </tr>
             <tr v-if="displayRows.length === 0">
-              <td colspan="7" class="text-center py-6 text-medium-emphasis">No appointments found for current filters.</td>
+              <td colspan="9" class="text-center py-6 text-medium-emphasis">No appointments found for current filters.</td>
             </tr>
           </tbody>
         </v-table>
@@ -1076,6 +1160,20 @@ onBeforeUnmount(() => {
         <v-card class="saas-modal-card">
           <v-card-title class="saas-modal-title text-h6 font-weight-bold">Appointment Details</v-card-title>
           <v-card-text v-if="selected">
+            <v-alert
+              v-if="requiresCashierVerification(selected) && !canProceedAfterCashier(selected)"
+              type="warning"
+              variant="tonal"
+              density="comfortable"
+              class="mb-3"
+            >
+              This appointment is waiting for cashier payment verification before it can proceed.
+            </v-alert>
+            <div v-if="cashierVerificationBadge(selected)" class="mb-3">
+              <v-chip :color="cashierVerificationBadge(selected)?.color" variant="flat" rounded="pill" size="small">
+                {{ cashierVerificationBadge(selected)?.label }}
+              </v-chip>
+            </div>
             <div><strong>Booking ID:</strong> {{ selected.bookingId }}</div>
               <div><strong>Booker ID:</strong> {{ selected.patientId || '--' }}</div>
               <div><strong>Booker:</strong> {{ selected.patientName }}</div>
@@ -1091,6 +1189,12 @@ onBeforeUnmount(() => {
             <div><strong>Time:</strong> {{ selected.scheduleTime || '--' }}</div>
             <div><strong>Status:</strong> {{ selected.status }}</div>
             <div><strong>Assignment:</strong> {{ assignmentLabel(selected) }}</div>
+            <div><strong>Cashier Status:</strong> {{ cashierStatusLabel(selected) }}</div>
+            <div><strong>Cashier Payment Type:</strong> {{ cashierMethodLabel(selected) }}</div>
+            <div><strong>Cashier Billing No:</strong> {{ selected.cashierBillingNo || selected.cashierReference || '--' }}</div>
+            <div><strong>Official Receipt:</strong> {{ selected.officialReceipt || '--' }}</div>
+            <div><strong>Paid Amount:</strong> {{ selected.amountPaid || 0 }}</div>
+            <div><strong>Balance Due:</strong> {{ selected.balanceDue || 0 }}</div>
             <div><strong>Symptoms:</strong> {{ selected.symptomsSummary || '--' }}</div>
             <div><strong>Doctor Notes:</strong> {{ selected.doctorNotes || '--' }}</div>
             <div><strong>Appointment Concern:</strong> {{ selected.visitReason || '--' }}</div>
@@ -1105,6 +1209,15 @@ onBeforeUnmount(() => {
       <v-card class="saas-modal-card">
         <v-card-title class="saas-modal-title text-h6 font-weight-bold">Edit Appointment</v-card-title>
         <v-card-text>
+          <v-alert
+            v-if="selected && requiresCashierVerification(selected) && !canProceedAfterCashier(selected)"
+            type="warning"
+            variant="tonal"
+            density="comfortable"
+            class="mb-4"
+          >
+            Cashier payment must be verified as paid before this appointment can move to Confirmed, Accepted, or Appointed.
+          </v-alert>
           <v-row>
             <v-col cols="12" md="6"><v-text-field v-model="editForm.doctorName" label="Doctor" variant="outlined" density="comfortable" hide-details /></v-col>
             <v-col cols="12" md="6"><v-text-field v-model="editForm.service" label="Service" variant="outlined" density="comfortable" hide-details /></v-col>
@@ -1243,7 +1356,8 @@ onBeforeUnmount(() => {
 
             <v-col cols="12"><div class="modal-section-title">Medical Info</div></v-col>
             <v-col cols="12" md="6"><v-select v-model="addForm.payment_method" :items="paymentOptions" label="Payment Method" variant="outlined" density="comfortable" /></v-col>
-            <v-col cols="12" md="6"><v-text-field v-model="addForm.insurance_provider" label="Insurance Provider / Plan" variant="outlined" density="comfortable" /></v-col>
+            <v-col cols="12" md="3"><v-text-field v-model.number="addForm.amount_due" type="number" min="0" step="0.01" label="Amount Due" variant="outlined" density="comfortable" hint="If greater than 0, appointment waits for cashier verification." persistent-hint /></v-col>
+            <v-col cols="12" md="3"><v-text-field v-model="addForm.insurance_provider" label="Insurance Provider / Plan" variant="outlined" density="comfortable" /></v-col>
             <v-col cols="12">
               <v-combobox
                 v-model="selectedSymptomTags"

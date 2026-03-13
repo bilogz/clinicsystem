@@ -13,6 +13,17 @@ export type AppointmentRow = {
   emergencyContact: string;
   insuranceProvider: string;
   paymentMethod: string;
+  cashierBillingId: number | null;
+  cashierBillingNo: string;
+  cashierReference: string;
+  cashierSyncStatus: 'pending' | 'sent' | 'acknowledged' | 'failed' | '';
+  cashierPaymentStatus: 'unpaid' | 'partial' | 'paid' | 'void';
+  cashierPaymentMethod: string;
+  amountDue: number;
+  amountPaid: number;
+  balanceDue: number;
+  officialReceipt: string;
+  paidAt: string;
   appointmentPriority: 'Urgent' | 'Routine';
   service: string;
   department: string;
@@ -103,6 +114,7 @@ export type CreateAppointmentPayload = {
   patient_age?: number | null;
   patient_sex?: string;
   patient_gender?: string;
+  amount_due?: number;
   status?: AppointmentStatus;
   patient_type?: 'student' | 'teacher';
   actor_role?: 'student' | 'teacher' | 'admin';
@@ -150,7 +162,19 @@ function toStatus(value: string): AppointmentStatus {
   return 'Canceled';
 }
 
+function toCashierPaymentStatus(value: unknown): 'unpaid' | 'partial' | 'paid' | 'void' {
+  const lowered = String(value || '')
+    .trim()
+    .toLowerCase();
+  if (lowered === 'paid' || lowered === 'partial' || lowered === 'void') return lowered;
+  return 'unpaid';
+}
+
 function normalizeRow(item: Record<string, unknown>): AppointmentRow {
+  const syncStatus = String(item.cashier_sync_status || '')
+    .trim()
+    .toLowerCase();
+
   return {
     id: Number(item.id || 0),
     bookingId: String(item.booking_id || ''),
@@ -161,6 +185,20 @@ function normalizeRow(item: Record<string, unknown>): AppointmentRow {
     emergencyContact: String(item.emergency_contact || ''),
     insuranceProvider: String(item.insurance_provider || ''),
     paymentMethod: String(item.payment_method || ''),
+    cashierBillingId: item.cashier_billing_id == null ? null : Number(item.cashier_billing_id || 0),
+    cashierBillingNo: String(item.cashier_billing_no || ''),
+    cashierReference: String(item.cashier_reference || ''),
+    cashierSyncStatus:
+      syncStatus === 'pending' || syncStatus === 'sent' || syncStatus === 'acknowledged' || syncStatus === 'failed'
+        ? syncStatus
+        : '',
+    cashierPaymentStatus: toCashierPaymentStatus(item.cashier_payment_status),
+    cashierPaymentMethod: String(item.cashier_payment_method || ''),
+    amountDue: Number(item.amount_due || 0),
+    amountPaid: Number(item.amount_paid || 0),
+    balanceDue: Number(item.balance_due || 0),
+    officialReceipt: String(item.official_receipt || ''),
+    paidAt: String(item.paid_at || ''),
     appointmentPriority: (String(item.appointment_priority || 'Routine') as 'Urgent' | 'Routine'),
     service: String(item.service_name || item.visit_type || ''),
     department: String(item.department_name || ''),

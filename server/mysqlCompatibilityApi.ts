@@ -320,6 +320,36 @@ function normalizePaymentStatus(value: unknown): 'unpaid' | 'partial' | 'paid' |
   return 'unpaid';
 }
 
+function normalizeCashierPaymentMethod(value: unknown): string | null {
+  const normalized = toSafeText(value);
+  if (!normalized) return null;
+  const upper = normalized.toUpperCase();
+  if (upper === 'HMA') return 'HMA';
+  if (upper === 'HMO') return 'HMO';
+  if (upper === 'CASH') return 'Cash';
+  if (upper === 'CARD') return 'Card';
+  if (upper === 'ONLINE') return 'Online';
+  return normalized;
+}
+
+function appointmentRequiresCashierVerification(input: {
+  cashierBillingId?: unknown;
+  cashierReference?: unknown;
+  amountDue?: unknown;
+}): boolean {
+  return toSafeInt(input.cashierBillingId, 0) > 0 || toSafeText(input.cashierReference) !== '' || toSafeMoney(input.amountDue, 0) > 0;
+}
+
+function appointmentCanProceedByCashier(input: {
+  cashierBillingId?: unknown;
+  cashierReference?: unknown;
+  amountDue?: unknown;
+  cashierPaymentStatus?: unknown;
+}): boolean {
+  if (!appointmentRequiresCashierVerification(input)) return true;
+  return normalizePaymentStatus(input.cashierPaymentStatus) === 'paid';
+}
+
 function buildCashierEventKey(parts: Array<string | number | null | undefined>): string {
   return createHash('sha256')
     .update(parts.map((part) => toSafeText(part)).join('|'))
@@ -357,12 +387,14 @@ async function ensureCashierIntegrationTables(pool: Pool): Promise<void> {
       source_module VARCHAR(60) NOT NULL,
       source_key VARCHAR(120) NOT NULL,
       cashier_reference VARCHAR(120) NULL,
+      cashier_billing_id BIGINT NULL,
       invoice_number VARCHAR(120) NULL,
       official_receipt VARCHAR(120) NULL,
       amount_due DECIMAL(10,2) NOT NULL DEFAULT 0,
       amount_paid DECIMAL(10,2) NOT NULL DEFAULT 0,
       balance_due DECIMAL(10,2) NOT NULL DEFAULT 0,
       payment_status VARCHAR(20) NOT NULL DEFAULT 'unpaid',
+      latest_payment_method VARCHAR(40) NULL,
       paid_at DATETIME NULL,
       metadata JSON NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -371,6 +403,58 @@ async function ensureCashierIntegrationTables(pool: Pool): Promise<void> {
       KEY idx_cashier_reference (cashier_reference)
     )
   `);
+
+  try {
+    await pool.query(`ALTER TABLE cashier_payment_links ADD COLUMN cashier_billing_id BIGINT NULL AFTER cashier_reference`);
+  } catch {}
+  try {
+    await pool.query(`ALTER TABLE cashier_payment_links ADD COLUMN latest_payment_method VARCHAR(40) NULL AFTER payment_status`);
+  } catch {}
+  try {
+    await pool.query(`ALTER TABLE patient_appointments ADD COLUMN cashier_billing_id BIGINT NULL AFTER payment_method`);
+  } catch {}
+  try {
+    await pool.query(`ALTER TABLE patient_appointments ADD COLUMN cashier_billing_no VARCHAR(120) NULL AFTER cashier_billing_id`);
+  } catch {}
+  try {
+    await pool.query(`ALTER TABLE patient_appointments ADD COLUMN cashier_payment_status VARCHAR(20) NOT NULL DEFAULT 'unpaid' AFTER cashier_billing_no`);
+  } catch {}
+  try {
+    await pool.query(`ALTER TABLE patient_appointments ADD COLUMN cashier_can_proceed TINYINT(1) NOT NULL DEFAULT 0 AFTER cashier_payment_status`);
+  } catch {}
+  try {
+    await pool.query(`ALTER TABLE patient_appointments ADD COLUMN cashier_verified_at DATETIME NULL AFTER cashier_can_proceed`);
+  } catch {}
+}
+
+async function syncAppointmentCashierColumnsFromLinks(pool: Pool, bookingId?: string): Promise<void> {
+  await ensureCashierIntegrationTables(pool);
+
+  const filters = [`p.source_module = 'appointments'`];
+  const params: Array<string | number> = [];
+
+  if (bookingId && bookingId.trim() !== '') {
+    filters.push('a.booking_id = ?');
+    params.push(bookingId.trim());
+  }
+
+  await pool.query(
+    `UPDATE patient_appointments a
+     INNER JOIN cashier_payment_links p
+       ON p.source_module = 'appointments'
+      AND p.source_key = a.booking_id
+     SET a.cashier_billing_id = p.cashier_billing_id,
+         a.cashier_billing_no = COALESCE(NULLIF(p.invoice_number, ''), NULLIF(p.cashier_reference, ''), a.cashier_billing_no),
+         a.cashier_payment_status = COALESCE(NULLIF(p.payment_status, ''), a.cashier_payment_status),
+         a.cashier_can_proceed = CASE WHEN COALESCE(NULLIF(p.payment_status, ''), 'unpaid') = 'paid' THEN 1 ELSE 0 END,
+         a.cashier_verified_at = CASE
+           WHEN COALESCE(NULLIF(p.payment_status, ''), 'unpaid') = 'paid' THEN COALESCE(p.paid_at, a.cashier_verified_at, CURRENT_TIMESTAMP)
+           ELSE a.cashier_verified_at
+         END,
+         a.updated_at = CURRENT_TIMESTAMP
+     WHERE ${filters.join(' AND ')}`,
+    params
+  );
 }
 
 async function queueCashierIntegrationEvent(
@@ -420,6 +504,73 @@ async function queueCashierIntegrationEvent(
       JSON.stringify(params.payload || {})
     ]
   );
+}
+
+async function backfillAppointmentCashierEvents(pool: Pool, options: MysqlApiOptions, limit = 50): Promise<void> {
+  await ensureCashierIntegrationTables(pool);
+  const [missingRows] = await pool.query<RowDataPacket[]>(
+    `SELECT a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.doctor_name,
+            a.department_name, a.visit_type, a.appointment_date, a.preferred_time, a.payment_method, a.status
+     FROM patient_appointments a
+     LEFT JOIN cashier_integration_events e
+       ON e.source_module = 'appointments'
+      AND e.source_key = a.booking_id
+     WHERE e.id IS NULL
+     ORDER BY a.created_at ASC
+     LIMIT ?`,
+    [Math.max(1, limit)]
+  );
+
+  for (const row of missingRows) {
+    const bookingId = toSafeText(row.booking_id);
+    if (!bookingId) continue;
+
+    await queueCashierIntegrationEvent(pool, {
+      sourceModule: 'appointments',
+      sourceEntity: 'appointment',
+      sourceKey: bookingId,
+      patientName: toSafeText(row.patient_name) || null,
+      patientType: toSafeText(row.patient_type) || null,
+      referenceNo: bookingId,
+      amountDue: 0,
+      paymentStatus: normalizePaymentStatus(row.payment_status),
+      payload: {
+        bookingId,
+        student_id: toSafeText(row.patient_id) || null,
+        patient_id: toSafeText(row.patient_id) || null,
+        student_name: toSafeText(row.patient_name) || null,
+        patient_email: toSafeText(row.patient_email) || null,
+        phone_number: toSafeText(row.phone_number) || null,
+        due_date: formatDateCell(row.appointment_date) || currentDateString(),
+        created_by: 'Clinic System Backfill',
+        fee_type: toSafeText(row.visit_type) || toSafeText(row.department_name) || 'Appointment',
+        description: toSafeText(row.visit_type) || toSafeText(row.department_name) || 'Appointment',
+        doctorName: toSafeText(row.doctor_name) || null,
+        departmentName: toSafeText(row.department_name) || null,
+        department_name: toSafeText(row.department_name) || null,
+        visitType: toSafeText(row.visit_type) || null,
+        program: toSafeText(row.department_name) || null,
+        appointmentDate: formatDateCell(row.appointment_date) || null,
+        preferredTime: toSafeText(row.preferred_time) || null,
+        status: toSafeText(row.status) || null,
+        paymentMethod: toSafeText(row.payment_method) || null
+      }
+    });
+
+    if (cashierIntegrationEnabled(options) && cashierSyncMode(options) === 'auto') {
+      const [eventRows] = await pool.query<RowDataPacket[]>(
+        `SELECT *
+         FROM cashier_integration_events
+         WHERE source_module = 'appointments' AND source_key = ?
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [bookingId]
+      );
+      if (eventRows[0]) {
+        await dispatchCashierEvent(pool, options, eventRows[0]);
+      }
+    }
+  }
 }
 
 async function ensureDepartmentClearanceTables(pool: Pool): Promise<void> {
@@ -477,12 +628,14 @@ async function upsertCashierPaymentLink(
     sourceModule: string;
     sourceKey: string;
     cashierReference?: string | null;
+    cashierBillingId?: number | null;
     invoiceNumber?: string | null;
     officialReceipt?: string | null;
     amountDue?: number;
     amountPaid?: number;
     balanceDue?: number;
     paymentStatus?: string;
+    latestPaymentMethod?: string | null;
     paidAt?: string | null;
     metadata?: Record<string, unknown>;
   }
@@ -490,17 +643,19 @@ async function upsertCashierPaymentLink(
   await ensureCashierIntegrationTables(pool);
   await pool.query(
     `INSERT INTO cashier_payment_links (
-      source_module, source_key, cashier_reference, invoice_number, official_receipt,
-      amount_due, amount_paid, balance_due, payment_status, paid_at, metadata
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      source_module, source_key, cashier_reference, cashier_billing_id, invoice_number, official_receipt,
+      amount_due, amount_paid, balance_due, payment_status, latest_payment_method, paid_at, metadata
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       cashier_reference = VALUES(cashier_reference),
+      cashier_billing_id = VALUES(cashier_billing_id),
       invoice_number = VALUES(invoice_number),
       official_receipt = VALUES(official_receipt),
       amount_due = VALUES(amount_due),
       amount_paid = VALUES(amount_paid),
       balance_due = VALUES(balance_due),
       payment_status = VALUES(payment_status),
+      latest_payment_method = VALUES(latest_payment_method),
       paid_at = VALUES(paid_at),
       metadata = VALUES(metadata),
       updated_at = CURRENT_TIMESTAMP`,
@@ -508,12 +663,14 @@ async function upsertCashierPaymentLink(
       params.sourceModule,
       params.sourceKey,
       params.cashierReference || null,
+      params.cashierBillingId == null ? null : toSafeInt(params.cashierBillingId, 0),
       params.invoiceNumber || null,
       params.officialReceipt || null,
       toSafeMoney(params.amountDue, 0),
       toSafeMoney(params.amountPaid, 0),
       toSafeMoney(params.balanceDue, 0),
       normalizePaymentStatus(params.paymentStatus),
+      normalizeCashierPaymentMethod(params.latestPaymentMethod),
       toMysqlDateTime(params.paidAt),
       JSON.stringify(params.metadata || {})
     ]
@@ -529,47 +686,138 @@ async function dispatchCashierEvent(
   if (!cashierIntegrationEnabled(options) || !baseUrl) {
     return { ok: false, message: 'Cashier integration is disabled or missing base URL.' };
   }
-  const endpoint = `${baseUrl}${toSafeText(options.cashierInboundPath) || '/api/integrations/clinic-events'}`;
+  const eventPayload = parseJsonRecord(eventRow.payload);
+  const studentId = toSafeText(eventPayload.student_id || eventPayload.patient_id);
+  const studentName = toSafeText(eventPayload.student_name || eventRow.patient_name);
+  const studentSyncEndpoint = `${baseUrl}/clinic/student/sync`;
+  const billingEndpoint = `${baseUrl}/cashier/billing/create`;
+  await ensureCashierIntegrationTables(pool);
   try {
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(toSafeText(options.cashierSharedToken) ? { 'x-shared-token': toSafeText(options.cashierSharedToken) } : {})
-      },
-      body: JSON.stringify({
-        source: 'clinic_system',
-        event: {
-          id: Number(eventRow.id || 0),
-          source_module: String(eventRow.source_module || ''),
-          source_entity: String(eventRow.source_entity || ''),
-          source_key: String(eventRow.source_key || ''),
-          patient_name: String(eventRow.patient_name || ''),
-          patient_type: String(eventRow.patient_type || 'unknown'),
-          reference_no: String(eventRow.reference_no || ''),
-          amount_due: Number(eventRow.amount_due || 0),
-          currency_code: String(eventRow.currency_code || 'PHP'),
-          payment_status: String(eventRow.payment_status || 'unpaid'),
-          payload: parseJsonRecord(eventRow.payload),
-          created_at: formatDateTimeCell(eventRow.created_at)
-        }
-      })
-    });
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(toSafeText(options.cashierSharedToken) ? { 'X-Integration-Token': toSafeText(options.cashierSharedToken) } : {})
+    };
 
-    if (!response.ok) {
-      const message = `Cashier endpoint responded with ${response.status}.`;
-      await pool.query(
-        `UPDATE cashier_integration_events SET sync_status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-        [message, Number(eventRow.id || 0)]
-      );
-      return { ok: false, statusCode: response.status, message };
+    if (studentId && studentName) {
+      const studentResponse = await fetch(studentSyncEndpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          student_id: studentId,
+          full_name: studentName,
+          email: toSafeText(eventPayload.patient_email || ''),
+          phone: toSafeText(eventPayload.phone_number || ''),
+          course: toSafeText(eventPayload.program || eventPayload.department_name || ''),
+          year_level: toSafeText(eventPayload.year_level || ''),
+          status: 'active'
+        })
+      });
+
+      if (!studentResponse.ok) {
+        const message = `Cashier student sync responded with ${studentResponse.status}.`;
+        await pool.query(
+          `UPDATE cashier_integration_events SET sync_status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [message, Number(eventRow.id || 0)]
+        );
+        return { ok: false, statusCode: studentResponse.status, message };
+      }
+    }
+
+    const [existingLinkRows] = await pool.query<RowDataPacket[]>(
+      `SELECT cashier_billing_id, cashier_reference, amount_due, amount_paid, balance_due, payment_status, latest_payment_method, paid_at
+       FROM cashier_payment_links
+       WHERE source_module = ? AND source_key = ?
+       LIMIT 1`,
+      [String(eventRow.source_module || ''), String(eventRow.source_key || '')]
+    );
+    const existingLink = existingLinkRows[0];
+
+    let responseStatus = 200;
+    if (Number(eventRow.amount_due || 0) > 0 && studentId && studentName && !toSafeInt(existingLink?.cashier_billing_id, 0)) {
+      const billingResponse = await fetch(billingEndpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          student_id: studentId,
+          patient_id: toSafeText(eventPayload.patient_id || studentId),
+          source_type: String(eventRow.source_entity || 'record'),
+          source_module: String(eventRow.source_module || ''),
+          source_id: String(eventRow.source_key || ''),
+          fee_type: toSafeText(eventPayload.fee_type || eventPayload.visit_type || eventRow.source_entity || 'clinic_fee'),
+          description: toSafeText(eventPayload.description || eventPayload.visit_type || eventRow.reference_no || 'Clinic charge'),
+          amount: Number(eventRow.amount_due || 0),
+          due_date: toSafeText(eventPayload.due_date || formatDateCell(eventRow.created_at) || currentDateString()),
+          created_by: toSafeText(eventPayload.created_by || 'Clinic System'),
+          student_name: studentName,
+          program: toSafeText(eventPayload.program || eventPayload.department_name || ''),
+          year_level: toSafeText(eventPayload.year_level || ''),
+          metadata: {
+            booking_id: toSafeText(eventPayload.bookingId || eventRow.source_key),
+            patient_email: toSafeText(eventPayload.patient_email || ''),
+            phone_number: toSafeText(eventPayload.phone_number || ''),
+            doctor_name: toSafeText(eventPayload.doctorName || ''),
+            department_name: toSafeText(eventPayload.departmentName || '')
+          }
+        })
+      });
+
+      responseStatus = billingResponse.status;
+      if (!billingResponse.ok) {
+        const message = `Cashier billing sync responded with ${billingResponse.status}.`;
+        await pool.query(
+          `UPDATE cashier_integration_events SET sync_status = 'failed', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [message, Number(eventRow.id || 0)]
+        );
+        return { ok: false, statusCode: billingResponse.status, message };
+      }
+
+      const billingPayload = await billingResponse.json().catch(() => ({} as Record<string, unknown>));
+      const billingData = parseJsonRecord((billingPayload as Record<string, unknown>).data);
+      await upsertCashierPaymentLink(pool, {
+        sourceModule: String(eventRow.source_module || ''),
+        sourceKey: String(eventRow.source_key || ''),
+        cashierReference: toSafeText(billingData.billing_no) || null,
+        cashierBillingId: toSafeInt(billingData.billing_id, 0) || null,
+        amountDue: Number(eventRow.amount_due || 0),
+        amountPaid: 0,
+        balanceDue: Number(eventRow.amount_due || 0),
+        paymentStatus: 'unpaid',
+        latestPaymentMethod: null,
+        metadata: {
+          source: 'cashier_billing_create',
+          student_id: studentId,
+          student_name: studentName
+        }
+      });
+    } else if (existingLink) {
+      await upsertCashierPaymentLink(pool, {
+        sourceModule: String(eventRow.source_module || ''),
+        sourceKey: String(eventRow.source_key || ''),
+        cashierReference: toSafeText(existingLink.cashier_reference) || null,
+        cashierBillingId: toSafeInt(existingLink.cashier_billing_id, 0) || null,
+        amountDue: Number(eventRow.amount_due || existingLink.amount_due || 0),
+        amountPaid: Number(existingLink.amount_paid || 0),
+        balanceDue: Number(existingLink.balance_due || eventRow.amount_due || 0),
+        paymentStatus: toSafeText(existingLink.payment_status) || 'unpaid',
+        latestPaymentMethod: toSafeText(existingLink.latest_payment_method) || null,
+        paidAt: toSafeText(existingLink.paid_at) || null,
+        metadata: {
+          source: 'cashier_billing_existing',
+          student_id: studentId,
+          student_name: studentName
+        }
+      });
+    }
+
+    if (String(eventRow.source_module || '') === 'appointments') {
+      await syncAppointmentCashierColumnsFromLinks(pool, String(eventRow.source_key || ''));
     }
 
     await pool.query(
       `UPDATE cashier_integration_events SET sync_status = 'sent', synced_at = CURRENT_TIMESTAMP, last_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
       [Number(eventRow.id || 0)]
     );
-    return { ok: true, statusCode: response.status, message: 'Dispatched to cashier system.' };
+    return { ok: true, statusCode: responseStatus, message: 'Dispatched to cashier system.' };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Cashier dispatch failed.';
     await pool.query(
@@ -1152,6 +1400,19 @@ function mapAppointmentRow(row: RowDataPacket): Record<string, unknown> {
     emergency_contact: row.emergency_contact == null ? null : String(row.emergency_contact),
     insurance_provider: row.insurance_provider == null ? null : String(row.insurance_provider),
     payment_method: row.payment_method == null ? null : String(row.payment_method),
+    cashier_billing_id: row.cashier_billing_id == null ? null : Number(row.cashier_billing_id),
+    cashier_billing_no: row.cashier_billing_no == null ? (row.cashier_reference == null ? null : String(row.cashier_reference)) : String(row.cashier_billing_no),
+    cashier_reference: row.cashier_reference == null ? null : String(row.cashier_reference),
+    cashier_payment_status: normalizePaymentStatus(row.cashier_payment_status || row.payment_status),
+    cashier_payment_method: normalizeCashierPaymentMethod(row.cashier_payment_method || row.latest_payment_method),
+    cashier_can_proceed: toBooleanFlag(row.cashier_can_proceed),
+    cashier_verified_at: row.cashier_verified_at == null ? null : formatDateTimeCell(row.cashier_verified_at),
+    cashier_sync_status: row.cashier_sync_status == null ? '' : String(row.cashier_sync_status),
+    amount_due: Number(row.amount_due || 0),
+    amount_paid: Number(row.amount_paid || 0),
+    balance_due: Number(row.balance_due || 0),
+    official_receipt: row.official_receipt == null ? null : String(row.official_receipt),
+    paid_at: row.paid_at == null ? null : formatDateTimeCell(row.paid_at),
     actor_role: String(row.actor_role || 'unknown'),
     appointment_priority: String(row.appointment_priority || 'Routine'),
     doctor_name: String(row.doctor_name || ''),
@@ -1814,7 +2075,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                LIMIT 12`
             );
             const [recentPayments] = await pool.query<RowDataPacket[]>(
-              `SELECT id, source_module, source_key, cashier_reference, invoice_number, official_receipt, amount_due, amount_paid, balance_due, payment_status, paid_at, updated_at
+              `SELECT id, source_module, source_key, cashier_reference, cashier_billing_id, invoice_number, official_receipt, amount_due, amount_paid, balance_due, payment_status, latest_payment_method, paid_at, updated_at
                FROM cashier_payment_links
                ORDER BY updated_at DESC
                LIMIT 12`
@@ -1976,22 +2237,27 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               writeJson(res, 422, { ok: false, message: 'source_module and source_key are required.' });
               return;
             }
-            await upsertCashierPaymentLink(pool, {
-              sourceModule,
-              sourceKey,
-              cashierReference: toSafeText(body.cashier_reference) || null,
+              await upsertCashierPaymentLink(pool, {
+                sourceModule,
+                sourceKey,
+                cashierReference: toSafeText(body.cashier_reference) || null,
+                cashierBillingId: toSafeInt(body.cashier_billing_id, 0) || null,
               invoiceNumber: toSafeText(body.invoice_number) || null,
               officialReceipt: toSafeText(body.official_receipt) || null,
               amountDue: toSafeMoney(body.amount_due, 0),
               amountPaid: toSafeMoney(body.amount_paid, 0),
               balanceDue: toSafeMoney(body.balance_due, 0),
               paymentStatus: toSafeText(body.payment_status) || 'unpaid',
-              paidAt: toSafeText(body.paid_at) || null,
-              metadata: parseJsonRecord(body.metadata)
-            });
-            await pool.query(
-              `UPDATE cashier_integration_events
-               SET payment_status = ?, sync_status = ?, last_error = NULL, updated_at = CURRENT_TIMESTAMP
+              latestPaymentMethod: toSafeText(body.latest_payment_method || body.payment_method) || null,
+                paidAt: toSafeText(body.paid_at) || null,
+                metadata: parseJsonRecord(body.metadata)
+              });
+              if (sourceModule === 'appointments') {
+                await syncAppointmentCashierColumnsFromLinks(pool, sourceKey);
+              }
+              await pool.query(
+                `UPDATE cashier_integration_events
+                 SET payment_status = ?, sync_status = ?, last_error = NULL, updated_at = CURRENT_TIMESTAMP
                WHERE source_module = ? AND source_key = ?`,
               [
                 normalizePaymentStatus(body.payment_status),
@@ -3625,6 +3891,8 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
           if (url.pathname === '/api/appointments') {
             await ensurePatientAppointmentsTable(pool);
             await ensureDoctorAvailabilityTables(pool);
+            await ensureCashierIntegrationTables(pool);
+            await backfillAppointmentCashierEvents(pool, options, 100);
             if ((req.method || 'GET').toUpperCase() === 'GET') {
               const search = toSafeText(url.searchParams.get('search'));
               const status = toSafeText(url.searchParams.get('status'));
@@ -3639,37 +3907,59 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               const params: unknown[] = [];
               if (search) {
                 const pattern = `%${search.toLowerCase()}%`;
-                where.push(`(LOWER(patient_name) LIKE ? OR LOWER(COALESCE(patient_email, '')) LIKE ? OR LOWER(phone_number) LIKE ? OR LOWER(booking_id) LIKE ? OR LOWER(COALESCE(patient_id, '')) LIKE ? OR LOWER(COALESCE(symptoms_summary, '')) LIKE ?)`);
+                where.push(`(LOWER(a.patient_name) LIKE ? OR LOWER(COALESCE(a.patient_email, '')) LIKE ? OR LOWER(a.phone_number) LIKE ? OR LOWER(a.booking_id) LIKE ? OR LOWER(COALESCE(a.patient_id, '')) LIKE ? OR LOWER(COALESCE(a.symptoms_summary, '')) LIKE ?)`);
                 params.push(pattern, pattern, pattern, pattern, pattern, pattern);
               }
               if (status && status.toLowerCase() !== 'all statuses') {
-                where.push('LOWER(status) = ?');
+                where.push('LOWER(a.status) = ?');
                 params.push(status.toLowerCase());
               }
               if (service && service.toLowerCase() !== 'all services') {
-                where.push('(LOWER(COALESCE(visit_type, department_name, "")) = ? OR LOWER(department_name) = ?)');
+                where.push('(LOWER(COALESCE(a.visit_type, a.department_name, "")) = ? OR LOWER(a.department_name) = ?)');
                 params.push(service.toLowerCase(), service.toLowerCase());
               }
               if (doctor && doctor.toLowerCase() !== 'any') {
-                where.push('LOWER(doctor_name) = ?');
+                where.push('LOWER(a.doctor_name) = ?');
                 params.push(doctor.toLowerCase());
               }
               const periodRange = matchesDateRange(period);
               if (periodRange) {
-                where.push(periodRange.sql);
+                where.push(periodRange.sql
+                  .replaceAll('appointment_date', 'a.appointment_date')
+                  .replaceAll('status', 'a.status'));
                 params.push(...periodRange.params);
               }
 
               const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM patient_appointments${whereSql}`, params);
+              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM patient_appointments a${whereSql}`, params);
               const total = Number(countRows[0]?.total || 0);
               const [rows] = await pool.query<RowDataPacket[]>(
-                `SELECT id, booking_id, patient_id, patient_name, patient_email, patient_type, phone_number, emergency_contact, insurance_provider,
-                        payment_method, actor_role, appointment_priority, doctor_name,
-                        COALESCE(NULLIF(visit_type, ''), department_name, 'General Check-Up') AS service_name,
-                        department_name, appointment_date, preferred_time, status, symptoms_summary, doctor_notes, visit_reason, created_at, updated_at
-                 FROM patient_appointments${whereSql}
-                 ORDER BY appointment_date ASC, preferred_time ASC
+                `SELECT a.id, a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.emergency_contact, a.insurance_provider,
+                        a.payment_method, a.actor_role, a.appointment_priority, a.doctor_name,
+                        COALESCE(NULLIF(a.visit_type, ''), a.department_name, 'General Check-Up') AS service_name,
+                        a.department_name, a.appointment_date, a.preferred_time, a.status, a.symptoms_summary, a.doctor_notes, a.visit_reason, a.created_at, a.updated_at,
+                        p.cashier_billing_id, p.cashier_reference, p.official_receipt, COALESCE(p.amount_due, e.amount_due, 0) AS amount_due, p.amount_paid, p.balance_due, p.paid_at,
+                        p.cashier_reference AS cashier_billing_no,
+                        COALESCE(NULLIF(p.payment_status, ''), 'unpaid') AS cashier_payment_status,
+                        p.latest_payment_method AS cashier_payment_method,
+                        a.cashier_can_proceed, a.cashier_verified_at,
+                        COALESCE(e.sync_status, '') AS cashier_sync_status
+                 FROM patient_appointments a
+                 LEFT JOIN cashier_payment_links p
+                   ON p.source_module = 'appointments'
+                  AND p.source_key = a.booking_id
+                 LEFT JOIN (
+                   SELECT e1.source_key, e1.sync_status, e1.amount_due, e1.id
+                   FROM cashier_integration_events e1
+                   INNER JOIN (
+                     SELECT source_key, MAX(id) AS max_id
+                     FROM cashier_integration_events
+                     WHERE source_module = 'appointments'
+                     GROUP BY source_key
+                   ) latest_event ON latest_event.max_id = e1.id
+                 ) e
+                   ON e.source_key = a.booking_id${whereSql}
+                 ORDER BY a.appointment_date ASC, a.preferred_time ASC
                  LIMIT ? OFFSET ?`,
                 [...params, perPage, offset]
               );
@@ -3709,10 +3999,11 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 const visitType = toSafeText(body.visit_type);
                 const appointmentDate = toMysqlDate(body.appointment_date);
                 const preferredTime = toSafeText(body.preferred_time);
-                const status = toSafeText(body.status || 'Pending') || 'Pending';
+                const requestedStatus = toSafeText(body.status || 'Pending') || 'Pending';
                 const priority = toSafeText(body.appointment_priority || 'Routine') || 'Routine';
                 const patientId = toSafeText(body.patient_id);
                 const patientAge = Number(body.patient_age ?? 0);
+                const amountDue = toSafeMoney(body.amount_due, 0);
 
                 if (!patientName || !phoneNumber || !doctorName || !departmentName || !visitType || !appointmentDate) {
                   writeJson(res, 422, { ok: false, message: 'Missing required create fields.' });
@@ -3740,6 +4031,10 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                   patientId,
                   age: body.patient_age
                 });
+                const requiresCashierVerification = amountDue > 0;
+                const status = requiresCashierVerification && requestedStatus.toLowerCase() !== 'canceled'
+                  ? 'Awaiting'
+                  : requestedStatus;
 
                 await pool.query(
                   `INSERT INTO patient_appointments (
@@ -3775,11 +4070,32 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 );
 
                 const [rows] = await pool.query<RowDataPacket[]>(
-                  `SELECT id, booking_id, patient_id, patient_name, patient_email, patient_type, phone_number, emergency_contact, insurance_provider,
-                          payment_method, actor_role, appointment_priority, doctor_name,
-                          COALESCE(NULLIF(visit_type, ''), department_name, 'General Check-Up') AS service_name,
-                          department_name, appointment_date, preferred_time, status, symptoms_summary, doctor_notes, visit_reason, created_at, updated_at
-                   FROM patient_appointments WHERE booking_id = ? LIMIT 1`,
+                  `SELECT a.id, a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.emergency_contact, a.insurance_provider,
+                          a.payment_method, a.actor_role, a.appointment_priority, a.doctor_name,
+                          COALESCE(NULLIF(a.visit_type, ''), a.department_name, 'General Check-Up') AS service_name,
+                          a.department_name, a.appointment_date, a.preferred_time, a.status, a.symptoms_summary, a.doctor_notes, a.visit_reason, a.created_at, a.updated_at,
+                          p.cashier_billing_id, p.cashier_reference, p.official_receipt, COALESCE(p.amount_due, e.amount_due, 0) AS amount_due, p.amount_paid, p.balance_due, p.paid_at,
+                          p.cashier_reference AS cashier_billing_no,
+                          COALESCE(NULLIF(p.payment_status, ''), 'unpaid') AS cashier_payment_status,
+                          p.latest_payment_method AS cashier_payment_method,
+                          a.cashier_can_proceed, a.cashier_verified_at,
+                          COALESCE(e.sync_status, '') AS cashier_sync_status
+                   FROM patient_appointments a
+                   LEFT JOIN cashier_payment_links p
+                     ON p.source_module = 'appointments'
+                    AND p.source_key = a.booking_id
+                   LEFT JOIN (
+                     SELECT e1.source_key, e1.sync_status, e1.amount_due, e1.id
+                     FROM cashier_integration_events e1
+                     INNER JOIN (
+                       SELECT source_key, MAX(id) AS max_id
+                       FROM cashier_integration_events
+                       WHERE source_module = 'appointments'
+                       GROUP BY source_key
+                     ) latest_event ON latest_event.max_id = e1.id
+                   ) e
+                     ON e.source_key = a.booking_id
+                   WHERE a.booking_id = ? LIMIT 1`,
                   [bookingId]
                 );
 
@@ -3804,16 +4120,73 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                   paymentStatus: normalizePaymentStatus(body.payment_status),
                   payload: {
                     bookingId,
+                    student_id: patientId || null,
+                    patient_id: patientId || null,
+                    student_name: patientName,
+                    patient_email: toSafeText(body.patient_email) || null,
+                    phone_number: phoneNumber,
+                    year_level: toSafeText(body.year_level) || null,
+                    due_date: appointmentDate,
+                    created_by: toSafeText(body.actor) || 'Clinic System',
+                    fee_type: visitType,
+                    description: visitType,
                     doctorName,
                     departmentName,
+                    department_name: departmentName,
                     visitType,
+                    program: departmentName,
                     appointmentDate,
                     preferredTime: preferredTime || null,
                     paymentMethod: toSafeText(body.payment_method) || null
                   }
                 });
 
-                writeJson(res, 200, { ok: true, message: 'Appointment created.', data: rows[0] ? mapAppointmentRow(rows[0]) : null });
+                if (cashierIntegrationEnabled(options) && cashierSyncMode(options) === 'auto') {
+                  const [eventRows] = await pool.query<RowDataPacket[]>(
+                    `SELECT *
+                     FROM cashier_integration_events
+                     WHERE source_module = 'appointments' AND source_key = ?
+                     ORDER BY created_at DESC
+                     LIMIT 1`,
+                    [bookingId]
+                  );
+                  if (eventRows[0]) {
+                    await dispatchCashierEvent(pool, options, eventRows[0]);
+                    await syncAppointmentCashierColumnsFromLinks(pool, bookingId);
+                  }
+                }
+
+                const [syncedRows] = await pool.query<RowDataPacket[]>(
+                  `SELECT a.id, a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.emergency_contact, a.insurance_provider,
+                          a.payment_method, a.actor_role, a.appointment_priority, a.doctor_name,
+                          COALESCE(NULLIF(a.visit_type, ''), a.department_name, 'General Check-Up') AS service_name,
+                          a.department_name, a.appointment_date, a.preferred_time, a.status, a.symptoms_summary, a.doctor_notes, a.visit_reason, a.created_at, a.updated_at,
+                          p.cashier_billing_id, p.cashier_reference, p.official_receipt, COALESCE(p.amount_due, e.amount_due, 0) AS amount_due, p.amount_paid, p.balance_due, p.paid_at,
+                          COALESCE(NULLIF(a.cashier_billing_no, ''), p.cashier_reference) AS cashier_billing_no,
+                          COALESCE(NULLIF(a.cashier_payment_status, ''), NULLIF(p.payment_status, ''), 'unpaid') AS cashier_payment_status,
+                          p.latest_payment_method AS cashier_payment_method,
+                          a.cashier_can_proceed, a.cashier_verified_at,
+                          COALESCE(e.sync_status, '') AS cashier_sync_status
+                   FROM patient_appointments a
+                   LEFT JOIN cashier_payment_links p
+                     ON p.source_module = 'appointments'
+                    AND p.source_key = a.booking_id
+                   LEFT JOIN (
+                     SELECT e1.source_key, e1.sync_status, e1.amount_due, e1.id
+                     FROM cashier_integration_events e1
+                     INNER JOIN (
+                       SELECT source_key, MAX(id) AS max_id
+                       FROM cashier_integration_events
+                       WHERE source_module = 'appointments'
+                       GROUP BY source_key
+                     ) latest_event ON latest_event.max_id = e1.id
+                   ) e
+                     ON e.source_key = a.booking_id
+                   WHERE a.booking_id = ? LIMIT 1`,
+                  [bookingId]
+                );
+
+                writeJson(res, 200, { ok: true, message: 'Appointment created.', data: syncedRows[0] ? mapAppointmentRow(syncedRows[0]) : null });
                 return;
               }
 
@@ -3824,8 +4197,14 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               }
 
               const [existingRows] = await pool.query<RowDataPacket[]>(
-                `SELECT booking_id, doctor_name, department_name, appointment_date, preferred_time
-                 FROM patient_appointments WHERE booking_id = ? LIMIT 1`,
+                `SELECT a.booking_id, a.doctor_name, a.department_name, a.appointment_date, a.preferred_time, a.status,
+                        p.cashier_billing_id, p.cashier_reference, p.amount_due,
+                        COALESCE(NULLIF(p.payment_status, ''), 'unpaid') AS cashier_payment_status
+                 FROM patient_appointments a
+                 LEFT JOIN cashier_payment_links p
+                   ON p.source_module = 'appointments'
+                  AND p.source_key = a.booking_id
+                 WHERE a.booking_id = ? LIMIT 1`,
                 [bookingId]
               );
               const existing = existingRows[0];
@@ -3839,6 +4218,24 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               const nextAppointmentDate = 'appointment_date' in body ? toMysqlDate(body.appointment_date) : toMysqlDate(existing.appointment_date);
               const nextPreferredTime = 'preferred_time' in body ? toSafeText(body.preferred_time) : String(existing.preferred_time || '');
               const nextStatus = 'status' in body ? toSafeText(body.status).toLowerCase() : '';
+              const requiresCashierVerification = appointmentRequiresCashierVerification({
+                cashierBillingId: existing.cashier_billing_id,
+                cashierReference: existing.cashier_reference,
+                amountDue: existing.amount_due
+              });
+              const canProceedByCashier = appointmentCanProceedByCashier({
+                cashierBillingId: existing.cashier_billing_id,
+                cashierReference: existing.cashier_reference,
+                amountDue: existing.amount_due,
+                cashierPaymentStatus: existing.cashier_payment_status
+              });
+              if (requiresCashierVerification && !canProceedByCashier && ['confirmed', 'accepted', 'appointed'].includes(nextStatus)) {
+                writeJson(res, 422, {
+                  ok: false,
+                  message: 'This appointment is still waiting for cashier payment verification. Keep it on Awaiting until payment is verified as paid.'
+                });
+                return;
+              }
               if (nextStatus !== 'canceled' && nextAppointmentDate) {
                 const availability = await getDoctorAvailabilitySnapshot(pool, nextDoctorName, nextDepartmentName, nextAppointmentDate, nextPreferredTime || undefined, bookingId);
                 if (!Boolean(availability.isDoctorAvailable)) {
@@ -3893,11 +4290,31 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               await pool.query(`UPDATE patient_appointments SET ${setParts.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE booking_id = ?`, values);
 
               const [rows] = await pool.query<RowDataPacket[]>(
-                `SELECT id, booking_id, patient_id, patient_name, patient_email, patient_type, phone_number, emergency_contact, insurance_provider,
-                        payment_method, actor_role, appointment_priority, doctor_name,
-                        COALESCE(NULLIF(visit_type, ''), department_name, 'General Check-Up') AS service_name,
-                        department_name, appointment_date, preferred_time, status, symptoms_summary, doctor_notes, visit_reason, created_at, updated_at
-                 FROM patient_appointments WHERE booking_id = ? LIMIT 1`,
+                `SELECT a.id, a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.emergency_contact, a.insurance_provider,
+                        a.payment_method, a.actor_role, a.appointment_priority, a.doctor_name,
+                        COALESCE(NULLIF(a.visit_type, ''), a.department_name, 'General Check-Up') AS service_name,
+                        a.department_name, a.appointment_date, a.preferred_time, a.status, a.symptoms_summary, a.doctor_notes, a.visit_reason, a.created_at, a.updated_at,
+                        p.cashier_billing_id, p.cashier_reference, p.official_receipt, COALESCE(p.amount_due, e.amount_due, 0) AS amount_due, p.amount_paid, p.balance_due, p.paid_at,
+                        p.cashier_reference AS cashier_billing_no,
+                        COALESCE(NULLIF(p.payment_status, ''), 'unpaid') AS cashier_payment_status,
+                        p.latest_payment_method AS cashier_payment_method,
+                        COALESCE(e.sync_status, '') AS cashier_sync_status
+                 FROM patient_appointments a
+                 LEFT JOIN cashier_payment_links p
+                   ON p.source_module = 'appointments'
+                  AND p.source_key = a.booking_id
+                 LEFT JOIN (
+                   SELECT e1.source_key, e1.sync_status, e1.amount_due, e1.id
+                   FROM cashier_integration_events e1
+                   INNER JOIN (
+                     SELECT source_key, MAX(id) AS max_id
+                     FROM cashier_integration_events
+                     WHERE source_module = 'appointments'
+                     GROUP BY source_key
+                   ) latest_event ON latest_event.max_id = e1.id
+                 ) e
+                   ON e.source_key = a.booking_id
+                 WHERE a.booking_id = ? LIMIT 1`,
                 [bookingId]
               );
 
@@ -3911,6 +4328,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 bookingId,
                 { doctorName: nextDoctorName || null, departmentName: nextDepartmentName || null, appointmentDate: nextAppointmentDate || null, preferredTime: nextPreferredTime || null }
               );
+              const nextAmountDue = 'amount_due' in body ? toSafeMoney(body.amount_due, 0) : toSafeMoney(existing.amount_due, 0);
               await queueCashierIntegrationEvent(pool, {
                 sourceModule: 'appointments',
                 sourceEntity: 'appointment',
@@ -3918,12 +4336,24 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 patientName: toSafeText(body.patient_name) || toSafeText(rows[0]?.patient_name),
                 patientType: toSafeText(rows[0]?.patient_type),
                 referenceNo: bookingId,
-                amountDue: toSafeMoney(body.amount_due, 0),
+                amountDue: nextAmountDue,
                 paymentStatus: normalizePaymentStatus(body.payment_status),
                 payload: {
                   bookingId,
+                  student_id: toSafeText(rows[0]?.patient_id) || null,
+                  patient_id: toSafeText(rows[0]?.patient_id) || null,
+                  student_name: toSafeText(rows[0]?.patient_name) || null,
+                  patient_email: toSafeText(rows[0]?.patient_email) || null,
+                  phone_number: toSafeText(rows[0]?.phone_number) || null,
+                  year_level: toSafeText(body.year_level) || null,
+                  due_date: nextAppointmentDate || null,
+                  created_by: toSafeText(body.actor) || 'Clinic System',
+                  fee_type: toSafeText(rows[0]?.service_name) || null,
+                  description: toSafeText(rows[0]?.service_name) || null,
                   doctorName: nextDoctorName || null,
                   departmentName: nextDepartmentName || null,
+                  department_name: nextDepartmentName || null,
+                  program: nextDepartmentName || null,
                   appointmentDate: nextAppointmentDate || null,
                   preferredTime: nextPreferredTime || null,
                   status: toSafeText(rows[0]?.status) || null,
@@ -3931,7 +4361,52 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 }
               });
 
-              writeJson(res, 200, { ok: true, message: 'Appointment updated.', data: rows[0] ? mapAppointmentRow(rows[0]) : null });
+              if (cashierIntegrationEnabled(options) && cashierSyncMode(options) === 'auto') {
+                const [eventRows] = await pool.query<RowDataPacket[]>(
+                  `SELECT *
+                   FROM cashier_integration_events
+                   WHERE source_module = 'appointments' AND source_key = ?
+                   ORDER BY created_at DESC
+                   LIMIT 1`,
+                  [bookingId]
+                );
+                if (eventRows[0]) {
+                  await dispatchCashierEvent(pool, options, eventRows[0]);
+                  await syncAppointmentCashierColumnsFromLinks(pool, bookingId);
+                }
+              }
+
+              const [syncedRows] = await pool.query<RowDataPacket[]>(
+                `SELECT a.id, a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.emergency_contact, a.insurance_provider,
+                        a.payment_method, a.actor_role, a.appointment_priority, a.doctor_name,
+                        COALESCE(NULLIF(a.visit_type, ''), a.department_name, 'General Check-Up') AS service_name,
+                        a.department_name, a.appointment_date, a.preferred_time, a.status, a.symptoms_summary, a.doctor_notes, a.visit_reason, a.created_at, a.updated_at,
+                        p.cashier_billing_id, p.cashier_reference, p.official_receipt, COALESCE(p.amount_due, e.amount_due, 0) AS amount_due, p.amount_paid, p.balance_due, p.paid_at,
+                        COALESCE(NULLIF(a.cashier_billing_no, ''), p.cashier_reference) AS cashier_billing_no,
+                        COALESCE(NULLIF(a.cashier_payment_status, ''), NULLIF(p.payment_status, ''), 'unpaid') AS cashier_payment_status,
+                        p.latest_payment_method AS cashier_payment_method,
+                        a.cashier_can_proceed, a.cashier_verified_at,
+                        COALESCE(e.sync_status, '') AS cashier_sync_status
+                 FROM patient_appointments a
+                 LEFT JOIN cashier_payment_links p
+                   ON p.source_module = 'appointments'
+                  AND p.source_key = a.booking_id
+                 LEFT JOIN (
+                   SELECT e1.source_key, e1.sync_status, e1.amount_due, e1.id
+                   FROM cashier_integration_events e1
+                   INNER JOIN (
+                     SELECT source_key, MAX(id) AS max_id
+                     FROM cashier_integration_events
+                     WHERE source_module = 'appointments'
+                     GROUP BY source_key
+                   ) latest_event ON latest_event.max_id = e1.id
+                 ) e
+                   ON e.source_key = a.booking_id
+                 WHERE a.booking_id = ? LIMIT 1`,
+                [bookingId]
+              );
+
+              writeJson(res, 200, { ok: true, message: 'Appointment updated.', data: syncedRows[0] ? mapAppointmentRow(syncedRows[0]) : null });
               return;
             }
           }

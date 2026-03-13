@@ -282,6 +282,7 @@ onBeforeUnmount(() => {
                 <th>Doctor</th>
                 <th>Department</th>
                 <th>Status</th>
+                <th>Payment</th>
               </tr>
             </thead>
             <tbody>
@@ -294,6 +295,10 @@ onBeforeUnmount(() => {
                 <td>{{ item.teacherName || item.doctorName }}</td>
                 <td>{{ item.department }}</td>
                 <td><span class="status-pill">{{ item.status }}</span></td>
+                <td>
+                  <div class="booking-id">{{ item.cashierPaymentStatus || 'unpaid' }}</div>
+                  <small>{{ item.cashierPaymentMethod || 'Pending cashier update' }}<span v-if="item.officialReceipt"> - OR {{ item.officialReceipt }}</span></small>
+                </td>
               </tr>
             </tbody>
           </table>

@@ -4,6 +4,7 @@ import {
   mdiAccountOutline,
   mdiCogOutline,
   mdiCalendarClockOutline,
+  mdiCashRegister,
   mdiChartLine,
   mdiClipboardTextOutline,
   mdiFlaskOutline,
@@ -84,6 +85,11 @@ const sidebarItem: menu[] = [
     title: 'Reports',
     icon: mdiChartLine,
     to: '/modules/reports'
+  },
+  {
+    title: 'Cashier Integration',
+    icon: mdiCashRegister,
+    to: '/modules/cashier'
   },
   { divider: true },
   { header: 'Account' },
