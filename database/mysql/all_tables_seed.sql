@@ -471,4 +471,25 @@ ON DUPLICATE KEY UPDATE
   paid_at = VALUES(paid_at),
   metadata = VALUES(metadata);
 
+INSERT INTO department_clearance_records (
+  clearance_reference, patient_id, patient_code, patient_name, patient_type,
+  department_key, department_name, stage_order, status, remarks, requested_by, metadata
+)
+VALUES
+  ('HR-PAT-1001', 'PAT-1001', 'PAT-1001', 'Maria Santos', 'student', 'hr', 'HR', 1, 'approved', 'Employment verification cleared.', 'System Seed', JSON_OBJECT('purpose', 'Employment and staff clearance verification')),
+  ('PMED-PAT-1001', 'PAT-1001', 'PAT-1001', 'Maria Santos', 'student', 'pmed', 'PMED', 2, 'approved', 'Initial compliance completed.', 'System Seed', JSON_OBJECT('purpose', 'Pre-medical evaluation compliance')),
+  ('CLINIC-PAT-1001', 'PAT-1001', 'PAT-1001', 'Maria Santos', 'student', 'clinic', 'Clinic', 3, 'pending', 'Awaiting final health clearance validation.', 'System Seed', JSON_OBJECT('purpose', 'Health clearance validation')),
+  ('GUIDANCE-PAT-1001', 'PAT-1001', 'PAT-1001', 'Maria Santos', 'student', 'guidance', 'Guidance', 4, 'pending', '', 'System Seed', JSON_OBJECT('purpose', 'Behavioral and records validation')),
+  ('PREFECT-PAT-1001', 'PAT-1001', 'PAT-1001', 'Maria Santos', 'student', 'prefect', 'Prefect', 5, 'pending', '', 'System Seed', JSON_OBJECT('purpose', 'Discipline clearance')),
+  ('COMLAB-PAT-1001', 'PAT-1001', 'PAT-1001', 'Maria Santos', 'student', 'comlab', 'Comlab', 6, 'pending', '', 'System Seed', JSON_OBJECT('purpose', 'Operational and asset clearance')),
+  ('CRAD-PAT-1001', 'PAT-1001', 'PAT-1001', 'Maria Santos', 'student', 'crad', 'CRAD', 7, 'pending', '', 'System Seed', JSON_OBJECT('purpose', 'Records and documentation validation')),
+  ('CASHIER-PAT-1001', 'PAT-1001', 'PAT-1001', 'Maria Santos', 'student', 'cashier', 'Cashier', 8, 'pending', 'Waiting for financial settlement.', 'System Seed', JSON_OBJECT('purpose', 'Financial settlement')),
+  ('REGISTRAR-PAT-1001', 'PAT-1001', 'PAT-1001', 'Maria Santos', 'student', 'registrar', 'Registrar', 9, 'pending', 'Final release is locked until all prior departments approve.', 'System Seed', JSON_OBJECT('purpose', 'Final approval and documentation release'))
+ON DUPLICATE KEY UPDATE
+  patient_name = VALUES(patient_name),
+  patient_type = VALUES(patient_type),
+  status = VALUES(status),
+  remarks = VALUES(remarks),
+  metadata = VALUES(metadata);
+
 COMMIT;

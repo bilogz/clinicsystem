@@ -422,6 +422,55 @@ async function queueCashierIntegrationEvent(
   );
 }
 
+async function ensureDepartmentClearanceTables(pool: Pool): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS department_clearance_records (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      clearance_reference VARCHAR(120) NOT NULL UNIQUE,
+      patient_id VARCHAR(120) NULL,
+      patient_code VARCHAR(120) NULL,
+      patient_name VARCHAR(150) NOT NULL,
+      patient_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
+      department_key VARCHAR(40) NOT NULL,
+      department_name VARCHAR(120) NOT NULL,
+      stage_order INT NOT NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'pending',
+      remarks TEXT NULL,
+      approver_name VARCHAR(150) NULL,
+      approver_role VARCHAR(120) NULL,
+      external_reference VARCHAR(120) NULL,
+      requested_by VARCHAR(150) NULL,
+      decided_at DATETIME NULL,
+      metadata JSON NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      KEY idx_clearance_department (department_key, status, created_at),
+      KEY idx_clearance_patient (patient_name, patient_code)
+    )
+  `);
+}
+
+function departmentIntegrationMap(): Array<{
+  key: string;
+  name: string;
+  stageOrder: number;
+  purpose: string;
+  recommendedEndpoint: string;
+  clinicDataSources: string[];
+}> {
+  return [
+    { key: 'hr', name: 'HR', stageOrder: 1, purpose: 'Employment and staff clearance verification', recommendedEndpoint: '/api/patients', clinicDataSources: ['patient_master', 'module_activity_logs'] },
+    { key: 'pmed', name: 'PMED', stageOrder: 2, purpose: 'Pre-medical evaluation compliance', recommendedEndpoint: '/api/registrations', clinicDataSources: ['patient_registrations', 'patient_master'] },
+    { key: 'clinic', name: 'Clinic', stageOrder: 3, purpose: 'Health clearance validation', recommendedEndpoint: '/api/checkups', clinicDataSources: ['patient_appointments', 'checkup_visits', 'patient_master'] },
+    { key: 'guidance', name: 'Guidance', stageOrder: 4, purpose: 'Behavioral and records validation', recommendedEndpoint: '/api/mental-health', clinicDataSources: ['mental_health_sessions', 'module_activity_logs', 'patient_master'] },
+    { key: 'prefect', name: 'Prefect', stageOrder: 5, purpose: 'Discipline clearance validation', recommendedEndpoint: '/api/module-activity', clinicDataSources: ['module_activity_logs', 'patient_master'] },
+    { key: 'comlab', name: 'Comlab', stageOrder: 6, purpose: 'Operational and asset clearance', recommendedEndpoint: '/api/module-activity', clinicDataSources: ['module_activity_logs', 'patient_master'] },
+    { key: 'crad', name: 'CRAD', stageOrder: 7, purpose: 'Records and documentation validation', recommendedEndpoint: '/api/patients', clinicDataSources: ['patient_master', 'module_activity_logs'] },
+    { key: 'cashier', name: 'Cashier', stageOrder: 8, purpose: 'Financial settlement and payment processing', recommendedEndpoint: '/api/integrations/cashier/status', clinicDataSources: ['cashier_integration_events', 'cashier_payment_links'] },
+    { key: 'registrar', name: 'Registrar', stageOrder: 9, purpose: 'Final approval and official document release', recommendedEndpoint: '/api/integrations/departments/records', clinicDataSources: ['department_clearance_records', 'patient_master'] },
+  ];
+}
+
 async function upsertCashierPaymentLink(
   pool: Pool,
   params: {
@@ -1415,7 +1464,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
         const pool = await getPool(options);
         const url = new URL(req.url || '', 'http://localhost');
 
-        if (!pool || !['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status'].includes(url.pathname)) {
+        if (!pool || !['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/departments/map', '/api/integrations/departments/records'].includes(url.pathname)) {
           next();
           return;
         }
@@ -1958,6 +2007,196 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
             });
             writeJson(res, 200, { ok: true, message: 'Cashier payment status recorded.' });
             return;
+          }
+
+          if (url.pathname === '/api/integrations/departments/map' && (req.method || 'GET').toUpperCase() === 'GET') {
+            writeJson(res, 200, {
+              ok: true,
+              data: {
+                departments: departmentIntegrationMap()
+              }
+            });
+            return;
+          }
+
+          if (url.pathname === '/api/integrations/departments/records') {
+            await ensureDepartmentClearanceTables(pool);
+
+            if ((req.method || 'GET').toUpperCase() === 'GET') {
+              const department = toSafeText(url.searchParams.get('department')).toLowerCase();
+              const status = toSafeText(url.searchParams.get('status')).toLowerCase();
+              const search = toSafeText(url.searchParams.get('search')).toLowerCase();
+              const page = Math.max(1, toSafeInt(url.searchParams.get('page'), 1));
+              const perPage = Math.min(50, Math.max(1, toSafeInt(url.searchParams.get('per_page'), 15)));
+              const offset = (page - 1) * perPage;
+              const where: string[] = [];
+              const params: unknown[] = [];
+              if (department) {
+                where.push('LOWER(department_key) = ?');
+                params.push(department);
+              }
+              if (status) {
+                where.push('LOWER(status) = ?');
+                params.push(status);
+              }
+              if (search) {
+                const like = `%${search}%`;
+                where.push('(LOWER(patient_name) LIKE ? OR LOWER(COALESCE(patient_code, \'\')) LIKE ? OR LOWER(COALESCE(clearance_reference, \'\')) LIKE ? OR LOWER(COALESCE(external_reference, \'\')) LIKE ?)');
+                params.push(like, like, like, like);
+              }
+              const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM department_clearance_records${whereSql}`, params);
+              const total = Number(countRows[0]?.total || 0);
+              const [rows] = await pool.query<RowDataPacket[]>(
+                `SELECT *
+                 FROM department_clearance_records${whereSql}
+                 ORDER BY stage_order ASC, created_at DESC
+                 LIMIT ? OFFSET ?`,
+                [...params, perPage, offset]
+              );
+              writeJson(res, 200, {
+                ok: true,
+                data: {
+                  items: rows.map((row) => ({
+                    ...row,
+                    metadata: parseJsonRecord(row.metadata),
+                    created_at: formatDateTimeCell(row.created_at),
+                    updated_at: formatDateTimeCell(row.updated_at),
+                    decided_at: row.decided_at == null ? null : formatDateTimeCell(row.decided_at)
+                  })),
+                  meta: { page, perPage, total, totalPages: Math.max(1, Math.ceil(total / perPage)) },
+                  departments: departmentIntegrationMap()
+                }
+              });
+              return;
+            }
+
+            if ((req.method || '').toUpperCase() === 'POST') {
+              const body = await readJsonBody(req);
+              const action = toSafeText(body.action).toLowerCase();
+              const departmentKey = toSafeText(body.department_key).toLowerCase();
+              const departmentDef = departmentIntegrationMap().find((item) => item.key === departmentKey);
+              if (!departmentDef && action !== 'seed_defaults') {
+                writeJson(res, 422, { ok: false, message: 'Valid department_key is required.' });
+                return;
+              }
+
+              if (action === 'request_clearance') {
+                const patientName = toSafeText(body.patient_name);
+                if (!patientName) {
+                  writeJson(res, 422, { ok: false, message: 'patient_name is required.' });
+                  return;
+                }
+                const clearanceReference = toSafeText(body.clearance_reference) || `CLR-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 899999)}`;
+                await pool.query(
+                  `INSERT INTO department_clearance_records (
+                    clearance_reference, patient_id, patient_code, patient_name, patient_type,
+                    department_key, department_name, stage_order, status, remarks, approver_name,
+                    approver_role, external_reference, requested_by, metadata
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  ON DUPLICATE KEY UPDATE
+                    patient_id = VALUES(patient_id),
+                    patient_code = VALUES(patient_code),
+                    patient_name = VALUES(patient_name),
+                    patient_type = VALUES(patient_type),
+                    department_key = VALUES(department_key),
+                    department_name = VALUES(department_name),
+                    stage_order = VALUES(stage_order),
+                    remarks = VALUES(remarks),
+                    approver_name = VALUES(approver_name),
+                    approver_role = VALUES(approver_role),
+                    external_reference = VALUES(external_reference),
+                    requested_by = VALUES(requested_by),
+                    metadata = VALUES(metadata),
+                    updated_at = CURRENT_TIMESTAMP`,
+                  [
+                    clearanceReference,
+                    toSafeText(body.patient_id) || null,
+                    toSafeText(body.patient_code) || null,
+                    patientName,
+                    normalizePatientType(body.patient_type),
+                    departmentDef?.key,
+                    departmentDef?.name,
+                    Number(departmentDef?.stageOrder || 0),
+                    toSafeText(body.status) || 'pending',
+                    toSafeText(body.remarks) || null,
+                    toSafeText(body.approver_name) || null,
+                    toSafeText(body.approver_role) || null,
+                    toSafeText(body.external_reference) || null,
+                    toSafeText(body.requested_by) || null,
+                    JSON.stringify(parseJsonRecord(body.metadata))
+                  ]
+                );
+                await insertModuleActivity(pool, 'department_clearance', 'Clearance Requested', `Clearance requested from ${departmentDef?.name} for ${patientName}.`, toSafeText(body.requested_by) || 'System', 'clearance', clearanceReference, { department: departmentDef?.key });
+                writeJson(res, 200, { ok: true, message: 'Department clearance request saved.', data: { clearance_reference: clearanceReference } });
+                return;
+              }
+
+              if (action === 'submit_decision') {
+                const clearanceReference = toSafeText(body.clearance_reference);
+                const nextStatus = toSafeText(body.status).toLowerCase();
+                if (!clearanceReference || !['approved', 'rejected', 'hold', 'pending'].includes(nextStatus)) {
+                  writeJson(res, 422, { ok: false, message: 'clearance_reference and valid status are required.' });
+                  return;
+                }
+                await pool.query(
+                  `UPDATE department_clearance_records
+                   SET status = ?, remarks = ?, approver_name = ?, approver_role = ?, external_reference = COALESCE(?, external_reference),
+                       decided_at = CURRENT_TIMESTAMP, metadata = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE clearance_reference = ?`,
+                  [
+                    nextStatus,
+                    toSafeText(body.remarks) || null,
+                    toSafeText(body.approver_name) || null,
+                    toSafeText(body.approver_role) || null,
+                    toSafeText(body.external_reference) || null,
+                    JSON.stringify(parseJsonRecord(body.metadata)),
+                    clearanceReference
+                  ]
+                );
+                await insertModuleActivity(pool, 'department_clearance', `Clearance ${nextStatus}`, `${departmentDef?.name} marked ${clearanceReference} as ${nextStatus}.`, toSafeText(body.approver_name) || departmentDef?.name || 'External Department', 'clearance', clearanceReference, { department: departmentDef?.key, status: nextStatus });
+                writeJson(res, 200, { ok: true, message: 'Department decision recorded.' });
+                return;
+              }
+
+              if (action === 'seed_defaults') {
+                const patientName = toSafeText(body.patient_name) || 'Integration Test Patient';
+                const patientCode = toSafeText(body.patient_code) || 'PAT-INTEGRATION-001';
+                const patientType = normalizePatientType(body.patient_type);
+                for (const department of departmentIntegrationMap()) {
+                  const clearanceReference = `${department.key.toUpperCase()}-${patientCode}`;
+                  await pool.query(
+                    `INSERT INTO department_clearance_records (
+                      clearance_reference, patient_id, patient_code, patient_name, patient_type,
+                      department_key, department_name, stage_order, status, requested_by, metadata
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                      patient_name = VALUES(patient_name),
+                      patient_type = VALUES(patient_type),
+                      requested_by = VALUES(requested_by),
+                      metadata = VALUES(metadata),
+                      updated_at = CURRENT_TIMESTAMP`,
+                    [
+                      clearanceReference,
+                      toSafeText(body.patient_id) || null,
+                      patientCode,
+                      patientName,
+                      patientType,
+                      department.key,
+                      department.name,
+                      department.stageOrder,
+                      toSafeText(body.requested_by) || 'System',
+                      JSON.stringify({ purpose: department.purpose })
+                    ]
+                  );
+                }
+                writeJson(res, 200, { ok: true, message: 'Default department clearance records created.' });
+                return;
+              }
+
+              writeJson(res, 422, { ok: false, message: 'Unsupported department clearance action.' });
+              return;
+            }
           }
 
           if (url.pathname === '/api/module-activity' && (req.method || 'GET').toUpperCase() === 'GET') {

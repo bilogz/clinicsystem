@@ -422,6 +422,30 @@ CREATE TABLE IF NOT EXISTS cashier_payment_links (
   KEY idx_cashier_reference (cashier_reference)
 );
 
+CREATE TABLE IF NOT EXISTS department_clearance_records (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  clearance_reference VARCHAR(120) NOT NULL UNIQUE,
+  patient_id VARCHAR(120) NULL,
+  patient_code VARCHAR(120) NULL,
+  patient_name VARCHAR(150) NOT NULL,
+  patient_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
+  department_key VARCHAR(40) NOT NULL,
+  department_name VARCHAR(120) NOT NULL,
+  stage_order INT NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  remarks TEXT NULL,
+  approver_name VARCHAR(150) NULL,
+  approver_role VARCHAR(120) NULL,
+  external_reference VARCHAR(120) NULL,
+  requested_by VARCHAR(150) NULL,
+  decided_at DATETIME NULL,
+  metadata JSON NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_clearance_department (department_key, status, created_at),
+  KEY idx_clearance_patient (patient_name, patient_code)
+);
+
 INSERT INTO doctors (doctor_name, department_name, specialization, is_active)
 VALUES
   ('Dr. Humour', 'General Medicine', 'Internal Medicine', 1),
