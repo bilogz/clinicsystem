@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import { fetchModuleActivity, type ModuleActivityItem } from '@/services/moduleActivity';
+import { formatDateTimeWithTimezone } from '@/utils/dateTime';
 
 const props = withDefaults(
   defineProps<{
@@ -31,9 +32,7 @@ const summaryText = computed(() => {
 });
 
 function formatDate(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value || '--';
-  return parsed.toLocaleString();
+  return formatDateTimeWithTimezone(value, { fallback: value || '--' });
 }
 
 async function load(): Promise<void> {

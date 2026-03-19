@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import { useCustomizerStore } from '../../../stores/customizer';
 import { useAuthStore } from '@/stores/auth';
+import { useRealtimeClock } from '@/composables/useRealtimeClock';
+import { usePmedReportNotifications } from '@/composables/usePmedReportNotifications';
 // Icon Imports
 import { BellIcon, SettingsIcon, SearchIcon, Menu2Icon, ClockIcon, TemperatureIcon } from 'vue-tabler-icons';
 
@@ -12,11 +15,18 @@ import Searchbar from './SearchBarPanel.vue';
 
 const customizer = useCustomizerStore();
 const authStore = useAuthStore();
+const router = useRouter();
 const showSearch = ref(false);
-const clockText = ref('');
 const temperatureText = ref('Temp --');
-let clockTimer: ReturnType<typeof setInterval> | null = null;
+const {
+  notificationCount,
+  popup,
+  startPolling: startNotificationPolling,
+  stopPolling: stopNotificationPolling,
+  dismissPopup
+} = usePmedReportNotifications();
 let weatherTimer: ReturnType<typeof setInterval> | null = null;
+const { compactDateTimeText } = useRealtimeClock(1000);
 
 function searchbox() {
   showSearch.value = !showSearch.value;
@@ -30,16 +40,6 @@ const userInitials = computed(() => {
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase();
 });
-
-function updateClock(): void {
-  const now = new Date();
-  const formatted = new Intl.DateTimeFormat(undefined, {
-    weekday: 'short',
-    hour: 'numeric',
-    minute: '2-digit'
-  }).format(now);
-  clockText.value = formatted;
-}
 
 async function fetchTemperature(lat: number, lon: number): Promise<void> {
   try {
@@ -77,16 +77,20 @@ function refreshTemperature(): void {
   );
 }
 
+function openReportsNotifications(): void {
+  dismissPopup();
+  void router.push('/modules/reports');
+}
+
 onMounted(() => {
-  updateClock();
   refreshTemperature();
-  clockTimer = setInterval(updateClock, 1000);
+  startNotificationPolling();
   weatherTimer = setInterval(refreshTemperature, 10 * 60 * 1000);
 });
 
 onBeforeUnmount(() => {
-  if (clockTimer) clearInterval(clockTimer);
   if (weatherTimer) clearInterval(weatherTimer);
+  stopNotificationPolling();
 });
 </script>
 
@@ -142,7 +146,7 @@ onBeforeUnmount(() => {
     <div class="d-none d-lg-flex align-center ga-2">
       <v-chip color="lightsecondary" variant="flat" size="small" class="text-secondary">
         <ClockIcon size="14" stroke-width="1.8" class="mr-1" />
-        {{ clockText }}
+        {{ compactDateTimeText }}
       </v-chip>
       <v-chip color="lightsecondary" variant="flat" size="small" class="text-secondary">
         <TemperatureIcon size="14" stroke-width="1.8" class="mr-1" />
@@ -162,9 +166,11 @@ onBeforeUnmount(() => {
     <!-- ---------------------------------------------- -->
     <v-menu :close-on-content-click="false">
       <template v-slot:activator="{ props }">
-        <v-btn icon class="text-secondary mx-3" color="lightsecondary" rounded="sm" size="small" variant="flat" v-bind="props">
-          <BellIcon stroke-width="1.5" size="22" />
-        </v-btn>
+        <v-badge :model-value="notificationCount > 0" :content="notificationCount" color="error" floating offset-x="6" offset-y="6">
+          <v-btn icon class="text-secondary mx-3" color="lightsecondary" rounded="sm" size="small" variant="flat" v-bind="props">
+            <BellIcon stroke-width="1.5" size="22" />
+          </v-btn>
+        </v-badge>
       </template>
       <v-sheet rounded="md" width="330" elevation="12">
         <NotificationDD />
@@ -189,6 +195,14 @@ onBeforeUnmount(() => {
         <ProfileDD />
       </v-sheet>
     </v-menu>
+
+    <v-snackbar v-model="popup.open" color="error" timeout="4200" location="top right">
+      <div class="font-weight-bold">{{ popup.title }}</div>
+      <div class="text-body-2">{{ popup.message }}</div>
+      <template #actions>
+        <v-btn variant="text" color="white" @click="openReportsNotifications">View</v-btn>
+      </template>
+    </v-snackbar>
   </v-app-bar>
 </template>
 

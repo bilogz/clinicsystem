@@ -7,7 +7,7 @@ export const REALTIME_POLICY = {
     cashierMs: 15000,
     pharmacyMs: 20000,
     patientsMs: 15000,
-    reportsMs: 20000
+    reportsMs: 5000
   },
   debounce: {
     registrationSearchMs: 280,

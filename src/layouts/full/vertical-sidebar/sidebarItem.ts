@@ -86,6 +86,8 @@ const sidebarItem: menu[] = [
     icon: mdiChartLine,
     to: '/modules/reports'
   },
+  { divider: true },
+  { header: 'Integration' },
   {
     title: 'Cashier Integration',
     icon: mdiCashRegister,

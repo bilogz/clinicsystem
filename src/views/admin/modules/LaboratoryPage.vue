@@ -2171,7 +2171,6 @@ function formatAutosavedAt(value: string | null): string {
           <v-card-title>Laboratory Queue</v-card-title>
           <template #append>
             <div class="d-flex align-center ga-2 flex-wrap">
-              <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="queueLoading" @click="refreshQueueNow">Refresh</v-btn>
               <v-btn class="saas-btn saas-btn-light" prepend-icon="mdi-plus" :disabled="!canCreateRequest" @click="openCreateRequestDialog">New Lab Request</v-btn>
             </div>
           </template>

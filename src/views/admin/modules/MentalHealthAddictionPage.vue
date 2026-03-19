@@ -1,8 +1,9 @@
-ï»¿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
+import { toLocalInputDateTime } from '@/composables/useRealtimeClock';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
 import { dispatchMentalHealthAction, fetchMentalHealthSnapshot, type MentalHealthActivity, type MentalHealthNote, type MentalHealthPatient, type MentalHealthSession, type MentalHealthStatus } from '@/services/mentalHealth';
@@ -145,14 +146,14 @@ function runPrimaryAction(item: MentalHealthSession): void {
 }
 
 function resetSessionForm(): void {
-  Object.assign(sessionForm, { patient_id: '', patient_name: '', counselor: 'Dr. Rivera', session_type: 'Individual Counseling', session_mode: 'in_person', location_room: '', guardian_contact: '', emergency_contact: '', appointment_at: '', risk_level: 'low', diagnosis_condition: '', treatment_plan: '', session_goals: '', session_duration_minutes: 45, medication_reference: '', follow_up_frequency: 'Weekly', assessment_tool: 'PHQ-9', assessment_score: null, escalation_reason: '' });
+  Object.assign(sessionForm, { patient_id: '', patient_name: '', counselor: 'Dr. Rivera', session_type: 'Individual Counseling', session_mode: 'in_person', location_room: '', guardian_contact: '', emergency_contact: '', appointment_at: toLocalInputDateTime(), risk_level: 'low', diagnosis_condition: '', treatment_plan: '', session_goals: '', session_duration_minutes: 45, medication_reference: '', follow_up_frequency: 'Weekly', assessment_tool: 'PHQ-9', assessment_score: null, escalation_reason: '' });
 }
 
 function applySessionToForm(session: MentalHealthSession): void {
   Object.assign(sessionForm, {
     patient_id: session.patient_id, patient_name: session.patient_name, counselor: session.counselor, session_type: session.session_type,
     session_mode: session.session_mode, location_room: session.location_room || '', guardian_contact: session.guardian_contact || '', emergency_contact: session.emergency_contact || '',
-    appointment_at: session.appointment_at ? String(session.appointment_at).slice(0, 16) : '', risk_level: session.risk_level, diagnosis_condition: session.diagnosis_condition || '',
+    appointment_at: toLocalInputDateTime(session.appointment_at), risk_level: session.risk_level, diagnosis_condition: session.diagnosis_condition || '',
     treatment_plan: session.treatment_plan || '', session_goals: session.session_goals || '', session_duration_minutes: session.session_duration_minutes || 45,
     medication_reference: session.medication_reference || '', follow_up_frequency: session.follow_up_frequency || 'Weekly', assessment_tool: session.assessment_tool || 'PHQ-9',
     assessment_score: session.assessment_score ?? null, escalation_reason: session.escalation_reason || ''
@@ -181,7 +182,7 @@ function openCreate(): void { if (!can('create')) return showToast(`Role ${role.
 function openEdit(session: MentalHealthSession): void { if (!can('edit')) return showToast(`Role ${role.value} is not allowed to edit sessions.`, 'warning'); isEditMode.value = true; selectedSession.value = session; clearErrors(); applySessionToForm(session); sessionDialog.value = true; }
 function openDetails(session: MentalHealthSession): void { selectedSession.value = session; detailsDialog.value = true; }
 function openNote(session: MentalHealthSession): void { if (!can('note')) return showToast(`Role ${role.value} is not allowed to record notes.`, 'warning'); selectedSession.value = session; clearErrors(); Object.assign(noteForm, { note_type: 'Progress', note_content: '', clinical_score: null, attachment_name: '', attachment_url: '', mark_at_risk: false }); noteDialog.value = true; }
-function openFollowup(session: MentalHealthSession): void { if (!can('followup')) return showToast(`Role ${role.value} is not allowed to schedule follow-up.`, 'warning'); selectedSession.value = session; followupForm.next_follow_up_at = session.next_follow_up_at ? String(session.next_follow_up_at).slice(0, 16) : ''; followupForm.follow_up_frequency = session.follow_up_frequency || 'Weekly'; followupDialog.value = true; }
+function openFollowup(session: MentalHealthSession): void { if (!can('followup')) return showToast(`Role ${role.value} is not allowed to schedule follow-up.`, 'warning'); selectedSession.value = session; followupForm.next_follow_up_at = toLocalInputDateTime(session.next_follow_up_at || new Date()); followupForm.follow_up_frequency = session.follow_up_frequency || 'Weekly'; followupDialog.value = true; }
 function openComplete(session: MentalHealthSession): void { if (!can('complete')) return showToast(`Role ${role.value} is not allowed to complete sessions.`, 'warning'); selectedSession.value = session; completeForm.outcome_result = session.outcome_result || ''; completeDialog.value = true; }
 function openEscalate(session: MentalHealthSession): void { if (!can('escalate')) return showToast(`Role ${role.value} is not allowed to escalate sessions.`, 'warning'); selectedSession.value = session; escalateForm.escalation_reason = session.escalation_reason || ''; escalateDialog.value = true; }
 
@@ -408,7 +409,6 @@ onUnmounted(() => {
               <v-card-title>Sessions</v-card-title>
               <template #append>
                 <div class="d-flex ga-2 align-center flex-wrap">
-                  <v-btn class="saas-btn saas-btn-ghost" prepend-icon="mdi-refresh" :loading="pageLoading" @click="reloadDashboard">Refresh</v-btn>
                   <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-plus" :disabled="!can('create')" @click="openCreate">New Session</v-btn>
                 </div>
               </template>
@@ -475,7 +475,7 @@ onUnmounted(() => {
             <v-card-item><v-card-title>Upcoming Follow-Ups</v-card-title></v-card-item>
             <v-divider />
             <v-list density="compact">
-              <v-list-item v-for="item in upcomingFollowups" :key="`f-${item.id}`" :title="item.patient_name" :subtitle="`${item.case_reference} â€¢ ${formatDateTime(item.next_follow_up_at)}`" />
+              <v-list-item v-for="item in upcomingFollowups" :key="`f-${item.id}`" :title="item.patient_name" :subtitle="`${item.case_reference} • ${formatDateTime(item.next_follow_up_at)}`" />
               <v-list-item v-if="!upcomingFollowups.length" title="No follow-ups scheduled." />
             </v-list>
           </v-card>
@@ -493,7 +493,7 @@ onUnmounted(() => {
             <v-card-item><v-card-title>Activity Log</v-card-title></v-card-item>
             <v-divider />
             <v-list density="compact">
-              <v-list-item v-for="item in recentActivity" :key="`a-${item.id}`" :title="item.action" :subtitle="`${item.detail} â€¢ ${formatDateTime(item.created_at)}`" />
+              <v-list-item v-for="item in recentActivity" :key="`a-${item.id}`" :title="item.action" :subtitle="`${item.detail} • ${formatDateTime(item.created_at)}`" />
               <v-list-item v-if="!recentActivity.length" title="No activity yet." />
             </v-list>
           </v-card>
@@ -559,8 +559,8 @@ onUnmounted(() => {
             <v-col cols="12" md="8">
               <div class="flow-steps mb-3"><span class="step active">Create Session</span><span class="step active">Record Notes</span><span class="step">Plan Follow-Up</span><span class="step">Complete / Escalate</span></div>
               <v-alert variant="tonal" color="info" class="mb-3">{{ selectedSession.treatment_plan || 'No treatment plan documented.' }}</v-alert>
-              <v-card variant="outlined" class="mb-3"><v-card-item><v-card-title class="text-subtitle-1">Structured Notes</v-card-title></v-card-item><v-divider /><v-list density="compact"><v-list-item v-for="item in sessionNotes.slice(0, 6)" :key="`n-${item.id}`" :title="`${item.note_type} â€¢ ${item.created_by_role}`" :subtitle="`${item.note_content}${item.attachment_name ? ` â€¢ Attachment: ${item.attachment_name}` : ''}`" /><v-list-item v-if="!sessionNotes.length" title="No notes for this session." /></v-list></v-card>
-              <v-card variant="outlined"><v-card-item><v-card-title class="text-subtitle-1">Timeline / Audit</v-card-title></v-card-item><v-divider /><v-list density="compact"><v-list-item v-for="item in sessionActivity" :key="`ac-${item.id}`" :title="item.action" :subtitle="`${item.detail} â€¢ ${item.actor_role} â€¢ ${formatDateTime(item.created_at)}`" /><v-list-item v-if="!sessionActivity.length" title="No activity yet." /></v-list></v-card>
+              <v-card variant="outlined" class="mb-3"><v-card-item><v-card-title class="text-subtitle-1">Structured Notes</v-card-title></v-card-item><v-divider /><v-list density="compact"><v-list-item v-for="item in sessionNotes.slice(0, 6)" :key="`n-${item.id}`" :title="`${item.note_type} • ${item.created_by_role}`" :subtitle="`${item.note_content}${item.attachment_name ? ` • Attachment: ${item.attachment_name}` : ''}`" /><v-list-item v-if="!sessionNotes.length" title="No notes for this session." /></v-list></v-card>
+              <v-card variant="outlined"><v-card-item><v-card-title class="text-subtitle-1">Timeline / Audit</v-card-title></v-card-item><v-divider /><v-list density="compact"><v-list-item v-for="item in sessionActivity" :key="`ac-${item.id}`" :title="item.action" :subtitle="`${item.detail} • ${item.actor_role} • ${formatDateTime(item.created_at)}`" /><v-list-item v-if="!sessionActivity.length" title="No activity yet." /></v-list></v-card>
             </v-col>
           </v-row>
         </v-card-text>

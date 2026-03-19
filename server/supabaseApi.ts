@@ -1,14 +1,9 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'crypto';
-import { createPool, type Pool, type RowDataPacket } from 'mysql2/promise';
+import pg from 'pg';
 import type { Plugin } from 'vite';
 
-type MysqlApiOptions = {
-  dbClient?: string;
-  host?: string;
-  port?: string;
-  database?: string;
-  user?: string;
-  password?: string;
+type SupabaseApiOptions = {
+  databaseUrl?: string;
   cashierEnabled?: string;
   cashierBaseUrl?: string;
   cashierSharedToken?: string;
@@ -18,7 +13,19 @@ type MysqlApiOptions = {
 
 type JsonRecord = Record<string, unknown>;
 
-let mysqlPool: Pool | null = null;
+type RowDataPacket = Record<string, any>;
+
+type DbPool = {
+  query<T extends RowDataPacket = RowDataPacket>(sql: string, params?: unknown[]): Promise<[T[], null]>;
+  end(): Promise<void>;
+};
+
+// Backward-compatible alias so the rest of the file doesn't need a massive rewrite.
+type Pool = DbPool;
+
+let pgPool: DbPool | null = null;
+
+const { Pool: PgPool } = pg;
 
 function parseCookieHeader(rawCookie: string | undefined): Record<string, string> {
   if (!rawCookie) return {};
@@ -88,6 +95,13 @@ function toSafeMoney(value: unknown, fallback = 0): number {
   return Math.round(parsed * 100) / 100;
 }
 
+function toLocalIsoDate(value: Date): string {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 function normalizeDoctorFilter(value: string): string {
   return value.replace(/^doctor:\s*/i, '').trim();
 }
@@ -95,6 +109,8 @@ function normalizeDoctorFilter(value: string): string {
 function normalizePatientType(value: unknown): 'student' | 'teacher' | 'unknown' {
   const normalized = toSafeText(value).toLowerCase();
   if (normalized === 'student' || normalized === 'teacher') return normalized;
+  if (/^(stu|student)[-_:/\s]*/i.test(normalized)) return 'student';
+  if (/^(emp|teacher|faculty|staff|prof|instructor)[-_:/\s]*/i.test(normalized)) return 'teacher';
   return 'unknown';
 }
 
@@ -113,6 +129,10 @@ function inferPatientType(input: {
 
   const actorType = normalizePatientType(input.actorRole);
   if (actorType !== 'unknown') return actorType;
+
+  const normalizedPatientId = toSafeText(input.patientId).toLowerCase();
+  if (/^(stu|student)[-_:/]/i.test(normalizedPatientId)) return 'student';
+  if (/^(emp|teacher|faculty|staff)[-_:/]/i.test(normalizedPatientId)) return 'teacher';
 
   const haystack = [
     input.patientName,
@@ -134,14 +154,14 @@ function inferPatientType(input: {
     if (numericAge >= 24) return 'teacher';
   }
 
-  return 'unknown';
+  return 'student';
 }
 
 function currentDateString(): string {
-  return new Date().toISOString().slice(0, 10);
+  return toLocalIsoDate(new Date());
 }
 
-function toMysqlDate(value: unknown): string | null {
+function toSqlDate(value: unknown): string | null {
   const text = toSafeText(value);
   if (!text) return null;
   const parsed = new Date(text);
@@ -149,7 +169,7 @@ function toMysqlDate(value: unknown): string | null {
   return parsed.toISOString().slice(0, 10);
 }
 
-function toMysqlDateTime(value: unknown): string | null {
+function toSqlDateTime(value: unknown): string | null {
   const text = toSafeText(value);
   if (!text) return null;
   const parsed = new Date(text);
@@ -158,7 +178,7 @@ function toMysqlDateTime(value: unknown): string | null {
 }
 
 function formatDateCell(value: unknown): string {
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (value instanceof Date) return toLocalIsoDate(value);
   return toSafeText(value);
 }
 
@@ -166,7 +186,13 @@ function formatDateTimeCell(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
   const text = toSafeText(value);
   if (!text) return '';
-  const parsed = new Date(text);
+  const normalizedText =
+    /(?:Z|[+-]\d{2}:\d{2})$/i.test(text)
+      ? text
+      : /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/i.test(text)
+        ? text.replace(' ', 'T') + 'Z'
+        : text;
+  const parsed = new Date(normalizedText);
   return Number.isNaN(parsed.getTime()) ? text : parsed.toISOString();
 }
 
@@ -192,6 +218,24 @@ function parseJsonArray(value: unknown): string[] {
   } catch {
     return [];
   }
+}
+
+function extractIsoTimestamp(value: unknown): string | null {
+  const text = toSafeText(value);
+  if (!text) return null;
+  const match = text.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)$/);
+  return match?.[1] || null;
+}
+
+function resolveReportDeliveryTimestamp(metadata: Record<string, unknown>, entityKey: unknown, createdAt: unknown): string {
+  return formatDateTimeCell(
+    metadata.dispatched_at ||
+      metadata.generated_at ||
+      metadata.report_generated_at ||
+      extractIsoTimestamp(metadata.report_reference) ||
+      extractIsoTimestamp(entityKey) ||
+      createdAt
+  );
 }
 
 function toBooleanFlag(value: unknown): boolean {
@@ -255,37 +299,83 @@ function matchesDateRange(period: string): { sql: string; params: string[] } | n
   return null;
 }
 
-async function getPool(options: MysqlApiOptions): Promise<Pool | null> {
-  if ((options.dbClient || '').trim().toLowerCase() !== 'mysql') return null;
-  if (!options.host || !options.database || !options.user) return null;
-  if (!mysqlPool) {
-    mysqlPool = createPool({
-      host: options.host,
-      port: Number(options.port || '3306'),
-      database: options.database,
-      user: options.user,
-      password: options.password || '',
-      waitForConnections: true,
-      connectionLimit: 10
-    });
-  }
-  return mysqlPool;
+function normalizeSqlForPostgres(sql: string): string {
+  return sql;
 }
 
-async function ensureModuleActivityLogsTable(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS module_activity_logs (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      module VARCHAR(60) NOT NULL,
-      action VARCHAR(120) NOT NULL,
-      detail TEXT NOT NULL,
-      actor VARCHAR(120) NOT NULL DEFAULT 'System',
-      entity_type VARCHAR(60) NULL,
-      entity_key VARCHAR(120) NULL,
-      metadata JSON NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+function convertQuestionMarksToDollarParams(sql: string): string {
+  let index = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let out = '';
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i];
+    if (ch === "'" && !inDouble) {
+      const prev = sql[i - 1];
+      if (prev !== '\\') inSingle = !inSingle;
+      out += ch;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      const prev = sql[i - 1];
+      if (prev !== '\\') inDouble = !inDouble;
+      out += ch;
+      continue;
+    }
+    if (ch === '?' && !inSingle && !inDouble) {
+      index += 1;
+      out += `$${index}`;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function createDbPool(options: SupabaseApiOptions): DbPool | null {
+  const databaseUrl = toSafeText(options.databaseUrl || process.env.DATABASE_URL);
+  if (!databaseUrl) return null;
+  if (
+    /your-password/i.test(databaseUrl) ||
+    /your-project-ref/i.test(databaseUrl) ||
+    /YOUR-PROJECT/i.test(databaseUrl) ||
+    /replace-with-an-anon-key/i.test(databaseUrl)
+  ) {
+    throw new Error(
+      'Supabase is not configured. Set a real Supabase PostgreSQL DATABASE_URL in .env before signing in.'
+    );
+  }
+
+  const innerPool = new PgPool({
+    connectionString: databaseUrl,
+    ssl: { rejectUnauthorized: false },
+    // Prefer shared integration tables in `clinic` schema (integration-merge baseline).
+    options: '-c search_path=clinic,public'
+  });
+
+  return {
+    async query<T extends RowDataPacket = RowDataPacket>(sql: string, params: unknown[] = []): Promise<[T[], null]> {
+      const rewritten = normalizeSqlForPostgres(sql);
+      const text = convertQuestionMarksToDollarParams(rewritten);
+      const result = await innerPool.query(text, params as any[]);
+      return [result.rows as T[], null];
+    },
+    async end(): Promise<void> {
+      await innerPool.end();
+    }
+  };
+}
+
+async function getPool(options: SupabaseApiOptions): Promise<DbPool | null> {
+  if (!pgPool) {
+    pgPool = createDbPool(options);
+  }
+  return pgPool;
+}
+
+async function ensureModuleActivityLogsTable(_pool: DbPool): Promise<void> {
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  return;
 }
 
 async function insertModuleActivity(
@@ -306,12 +396,28 @@ async function insertModuleActivity(
   );
 }
 
-function cashierIntegrationEnabled(options: MysqlApiOptions): boolean {
+function cashierIntegrationEnabled(options: SupabaseApiOptions): boolean {
   return toSafeText(options.cashierEnabled).toLowerCase() === 'true';
 }
 
-function cashierSyncMode(options: MysqlApiOptions): 'queue' | 'auto' {
+function cashierSyncMode(options: SupabaseApiOptions): 'queue' | 'auto' {
   return toSafeText(options.cashierSyncMode).toLowerCase() === 'auto' ? 'auto' : 'queue';
+}
+
+function cashierUsesInternalSync(options: SupabaseApiOptions): boolean {
+  if (!cashierIntegrationEnabled(options)) return false;
+  const normalized = toSafeText(options.cashierBaseUrl).replace(/\/+$/, '').toLowerCase();
+  return normalized === '' || normalized === 'internal' || normalized === 'supabase://internal' || normalized === 'supabase-internal';
+}
+
+function cashierResolvedBaseUrl(options: SupabaseApiOptions): string {
+  const baseUrl = toSafeText(options.cashierBaseUrl).replace(/\/+$/, '');
+  if (cashierUsesInternalSync(options)) return 'supabase://internal';
+  return baseUrl;
+}
+
+function cashierResolvedInboundPath(options: SupabaseApiOptions): string {
+  return toSafeText(options.cashierInboundPath) || '/api/integrations/cashier/payment-status';
 }
 
 function normalizePaymentStatus(value: unknown): 'unpaid' | 'partial' | 'paid' | 'void' {
@@ -330,6 +436,20 @@ function normalizeCashierPaymentMethod(value: unknown): string | null {
   if (upper === 'CARD') return 'Card';
   if (upper === 'ONLINE') return 'Online';
   return normalized;
+}
+
+function canManageCashierFinancials(session: RowDataPacket | null): boolean {
+  if (!session) return false;
+  if (toBooleanFlag(session.is_super_admin)) return true;
+
+  const role = toSafeText(session.role).toLowerCase();
+  const department = toSafeText(session.department).toLowerCase();
+  const access = parseJsonArray(session.access_exemptions).map((entry) => toSafeText(entry).toLowerCase());
+
+  const matchesFinanceScope = (value: string): boolean =>
+    value.includes('cashier') || value.includes('finance') || value.includes('billing');
+
+  return matchesFinanceScope(role) || matchesFinanceScope(department) || access.some(matchesFinanceScope);
 }
 
 function appointmentRequiresCashierVerification(input: {
@@ -357,80 +477,15 @@ function buildCashierEventKey(parts: Array<string | number | null | undefined>):
 }
 
 async function ensureCashierIntegrationTables(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS cashier_integration_events (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      event_key VARCHAR(128) NOT NULL UNIQUE,
-      source_module VARCHAR(60) NOT NULL,
-      source_entity VARCHAR(60) NOT NULL,
-      source_key VARCHAR(120) NOT NULL,
-      patient_name VARCHAR(150) NULL,
-      patient_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
-      reference_no VARCHAR(120) NULL,
-      amount_due DECIMAL(10,2) NOT NULL DEFAULT 0,
-      currency_code VARCHAR(10) NOT NULL DEFAULT 'PHP',
-      payment_status VARCHAR(20) NOT NULL DEFAULT 'unpaid',
-      sync_status VARCHAR(20) NOT NULL DEFAULT 'pending',
-      last_error TEXT NULL,
-      synced_at DATETIME NULL,
-      payload JSON NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      KEY idx_cashier_sync_status (sync_status, created_at),
-      KEY idx_cashier_source_lookup (source_module, source_key)
-    )
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS cashier_payment_links (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      source_module VARCHAR(60) NOT NULL,
-      source_key VARCHAR(120) NOT NULL,
-      cashier_reference VARCHAR(120) NULL,
-      cashier_billing_id BIGINT NULL,
-      invoice_number VARCHAR(120) NULL,
-      official_receipt VARCHAR(120) NULL,
-      amount_due DECIMAL(10,2) NOT NULL DEFAULT 0,
-      amount_paid DECIMAL(10,2) NOT NULL DEFAULT 0,
-      balance_due DECIMAL(10,2) NOT NULL DEFAULT 0,
-      payment_status VARCHAR(20) NOT NULL DEFAULT 'unpaid',
-      latest_payment_method VARCHAR(40) NULL,
-      paid_at DATETIME NULL,
-      metadata JSON NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_cashier_payment_link (source_module, source_key),
-      KEY idx_cashier_reference (cashier_reference)
-    )
-  `);
-
-  try {
-    await pool.query(`ALTER TABLE cashier_payment_links ADD COLUMN cashier_billing_id BIGINT NULL AFTER cashier_reference`);
-  } catch {}
-  try {
-    await pool.query(`ALTER TABLE cashier_payment_links ADD COLUMN latest_payment_method VARCHAR(40) NULL AFTER payment_status`);
-  } catch {}
-  try {
-    await pool.query(`ALTER TABLE patient_appointments ADD COLUMN cashier_billing_id BIGINT NULL AFTER payment_method`);
-  } catch {}
-  try {
-    await pool.query(`ALTER TABLE patient_appointments ADD COLUMN cashier_billing_no VARCHAR(120) NULL AFTER cashier_billing_id`);
-  } catch {}
-  try {
-    await pool.query(`ALTER TABLE patient_appointments ADD COLUMN cashier_payment_status VARCHAR(20) NOT NULL DEFAULT 'unpaid' AFTER cashier_billing_no`);
-  } catch {}
-  try {
-    await pool.query(`ALTER TABLE patient_appointments ADD COLUMN cashier_can_proceed TINYINT(1) NOT NULL DEFAULT 0 AFTER cashier_payment_status`);
-  } catch {}
-  try {
-    await pool.query(`ALTER TABLE patient_appointments ADD COLUMN cashier_verified_at DATETIME NULL AFTER cashier_can_proceed`);
-  } catch {}
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 async function syncAppointmentCashierColumnsFromLinks(pool: Pool, bookingId?: string): Promise<void> {
   await ensureCashierIntegrationTables(pool);
 
-  const filters = [`p.source_module = 'appointments'`];
+  const filters = [`p.source_module = 'appointments'`, `p.source_key = a.booking_id`];
   const params: Array<string | number> = [];
 
   if (bookingId && bookingId.trim() !== '') {
@@ -440,18 +495,16 @@ async function syncAppointmentCashierColumnsFromLinks(pool: Pool, bookingId?: st
 
   await pool.query(
     `UPDATE patient_appointments a
-     INNER JOIN cashier_payment_links p
-       ON p.source_module = 'appointments'
-      AND p.source_key = a.booking_id
-     SET a.cashier_billing_id = p.cashier_billing_id,
-         a.cashier_billing_no = COALESCE(NULLIF(p.invoice_number, ''), NULLIF(p.cashier_reference, ''), a.cashier_billing_no),
-         a.cashier_payment_status = COALESCE(NULLIF(p.payment_status, ''), a.cashier_payment_status),
-         a.cashier_can_proceed = CASE WHEN COALESCE(NULLIF(p.payment_status, ''), 'unpaid') = 'paid' THEN 1 ELSE 0 END,
-         a.cashier_verified_at = CASE
+     SET cashier_billing_id = p.cashier_billing_id,
+         cashier_billing_no = COALESCE(NULLIF(p.invoice_number, ''), NULLIF(p.cashier_reference, ''), a.cashier_billing_no),
+         cashier_payment_status = COALESCE(NULLIF(p.payment_status, ''), a.cashier_payment_status),
+         cashier_can_proceed = CASE WHEN COALESCE(NULLIF(p.payment_status, ''), 'unpaid') = 'paid' THEN 1 ELSE 0 END,
+         cashier_verified_at = CASE
            WHEN COALESCE(NULLIF(p.payment_status, ''), 'unpaid') = 'paid' THEN COALESCE(p.paid_at, a.cashier_verified_at, CURRENT_TIMESTAMP)
            ELSE a.cashier_verified_at
          END,
-         a.updated_at = CURRENT_TIMESTAMP
+         updated_at = CURRENT_TIMESTAMP
+     FROM cashier_payment_links p
      WHERE ${filters.join(' AND ')}`,
     params
   );
@@ -479,16 +532,16 @@ async function queueCashierIntegrationEvent(
       event_key, source_module, source_entity, source_key, patient_name, patient_type,
       reference_no, amount_due, currency_code, payment_status, sync_status, payload
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-    ON DUPLICATE KEY UPDATE
-      patient_name = VALUES(patient_name),
-      patient_type = VALUES(patient_type),
-      reference_no = VALUES(reference_no),
-      amount_due = VALUES(amount_due),
-      currency_code = VALUES(currency_code),
-      payment_status = VALUES(payment_status),
+    ON CONFLICT (event_key) DO UPDATE SET
+      patient_name = EXCLUDED.patient_name,
+      patient_type = EXCLUDED.patient_type,
+      reference_no = EXCLUDED.reference_no,
+      amount_due = EXCLUDED.amount_due,
+      currency_code = EXCLUDED.currency_code,
+      payment_status = EXCLUDED.payment_status,
       sync_status = 'pending',
       last_error = NULL,
-      payload = VALUES(payload),
+      payload = EXCLUDED.payload,
       updated_at = CURRENT_TIMESTAMP`,
     [
       eventKey,
@@ -506,7 +559,7 @@ async function queueCashierIntegrationEvent(
   );
 }
 
-async function backfillAppointmentCashierEvents(pool: Pool, options: MysqlApiOptions, limit = 50): Promise<void> {
+async function backfillAppointmentCashierEvents(pool: Pool, options: SupabaseApiOptions, limit = 50): Promise<void> {
   await ensureCashierIntegrationTables(pool);
   const [missingRows] = await pool.query<RowDataPacket[]>(
     `SELECT a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.doctor_name,
@@ -574,31 +627,9 @@ async function backfillAppointmentCashierEvents(pool: Pool, options: MysqlApiOpt
 }
 
 async function ensureDepartmentClearanceTables(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS department_clearance_records (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      clearance_reference VARCHAR(120) NOT NULL UNIQUE,
-      patient_id VARCHAR(120) NULL,
-      patient_code VARCHAR(120) NULL,
-      patient_name VARCHAR(150) NOT NULL,
-      patient_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
-      department_key VARCHAR(40) NOT NULL,
-      department_name VARCHAR(120) NOT NULL,
-      stage_order INT NOT NULL,
-      status VARCHAR(20) NOT NULL DEFAULT 'pending',
-      remarks TEXT NULL,
-      approver_name VARCHAR(150) NULL,
-      approver_role VARCHAR(120) NULL,
-      external_reference VARCHAR(120) NULL,
-      requested_by VARCHAR(150) NULL,
-      decided_at DATETIME NULL,
-      metadata JSON NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      KEY idx_clearance_department (department_key, status, created_at),
-      KEY idx_clearance_patient (patient_name, patient_code)
-    )
-  `);
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 function departmentIntegrationMap(): Array<{
@@ -611,7 +642,7 @@ function departmentIntegrationMap(): Array<{
 }> {
   return [
     { key: 'hr', name: 'HR', stageOrder: 1, purpose: 'Employment and staff clearance verification', recommendedEndpoint: '/api/patients', clinicDataSources: ['patient_master', 'module_activity_logs'] },
-    { key: 'pmed', name: 'PMED', stageOrder: 2, purpose: 'Pre-medical evaluation compliance', recommendedEndpoint: '/api/registrations', clinicDataSources: ['patient_registrations', 'patient_master'] },
+    { key: 'pmed', name: 'PMED', stageOrder: 2, purpose: 'Evaluation and consolidated inter-department reporting', recommendedEndpoint: '/api/integrations/departments/report?department=pmed', clinicDataSources: ['patient_registrations', 'cashier_payment_links', 'checkup_visits', 'mental_health_sessions', 'laboratory_requests', 'department_clearance_records', 'module_activity_logs'] },
     { key: 'clinic', name: 'Clinic', stageOrder: 3, purpose: 'Health clearance validation', recommendedEndpoint: '/api/checkups', clinicDataSources: ['patient_appointments', 'checkup_visits', 'patient_master'] },
     { key: 'guidance', name: 'Guidance', stageOrder: 4, purpose: 'Behavioral and records validation', recommendedEndpoint: '/api/mental-health', clinicDataSources: ['mental_health_sessions', 'module_activity_logs', 'patient_master'] },
     { key: 'prefect', name: 'Prefect', stageOrder: 5, purpose: 'Discipline clearance validation', recommendedEndpoint: '/api/module-activity', clinicDataSources: ['module_activity_logs', 'patient_master'] },
@@ -620,6 +651,413 @@ function departmentIntegrationMap(): Array<{
     { key: 'cashier', name: 'Cashier', stageOrder: 8, purpose: 'Financial settlement and payment processing', recommendedEndpoint: '/api/integrations/cashier/status', clinicDataSources: ['cashier_integration_events', 'cashier_payment_links'] },
     { key: 'registrar', name: 'Registrar', stageOrder: 9, purpose: 'Final approval and official document release', recommendedEndpoint: '/api/integrations/departments/records', clinicDataSources: ['department_clearance_records', 'patient_master'] },
   ];
+}
+
+async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise<Record<string, unknown>> {
+  const normalizedKey = toSafeText(departmentKey).toLowerCase();
+  const department = departmentIntegrationMap().find((item) => item.key === normalizedKey);
+  if (!department) {
+    throw new Error('Valid department is required for report generation.');
+  }
+
+  const [profileRows] = await pool.query<RowDataPacket[]>(
+    `SELECT department_key, department_name, flow_order, clearance_stage_order, receives, sends, notes, updated_at
+     FROM department_flow_profiles
+     WHERE department_key = ?
+     LIMIT 1`,
+    [normalizedKey]
+  );
+
+  const profile = profileRows[0]
+    ? {
+        department_key: String(profileRows[0].department_key || department.key),
+        department_name: String(profileRows[0].department_name || department.name),
+        flow_order: Number(profileRows[0].flow_order || 0),
+        clearance_stage_order: Number(profileRows[0].clearance_stage_order || 0),
+        receives: Array.isArray(profileRows[0].receives) ? profileRows[0].receives : JSON.parse(String(profileRows[0].receives || '[]')),
+        sends: Array.isArray(profileRows[0].sends) ? profileRows[0].sends : JSON.parse(String(profileRows[0].sends || '[]')),
+        notes: String(profileRows[0].notes || ''),
+        updated_at: formatDateTimeCell(profileRows[0].updated_at)
+      }
+    : {
+        department_key: department.key,
+        department_name: department.name,
+        flow_order: department.stageOrder,
+        clearance_stage_order: department.stageOrder,
+        receives: [],
+        sends: [],
+        notes: department.purpose,
+        updated_at: null
+      };
+
+  const [dispatchRows] = await pool.query<RowDataPacket[]>(
+    `SELECT action, detail, actor, entity_key, metadata, created_at
+     FROM module_activity_logs
+     WHERE module = 'department_reports'
+       AND COALESCE(metadata->>'department_key', '') = ?
+     ORDER BY created_at DESC
+     LIMIT 20`,
+    [normalizedKey]
+  );
+
+  if (normalizedKey !== 'pmed') {
+    const [clearanceRows] = await pool.query<RowDataPacket[]>(
+      `SELECT status, COUNT(*) AS total
+       FROM department_clearance_records
+       WHERE department_key = ?
+       GROUP BY status
+       ORDER BY status`,
+      [normalizedKey]
+    );
+
+    return {
+      department,
+      profile,
+      sections: [
+        {
+          key: 'clearance_status',
+          title: 'Department Clearance Status',
+          source: 'department_clearance_records',
+          metrics: clearanceRows.map((row) => ({
+            label: String(row.status || 'pending'),
+            total: Number(row.total || 0)
+          }))
+        }
+      ],
+      recent_dispatches: dispatchRows.map((row) => ({
+        action: String(row.action || ''),
+        detail: String(row.detail || ''),
+        actor: String(row.actor || ''),
+        entity_key: String(row.entity_key || ''),
+        metadata: parseJsonRecord(row.metadata),
+        created_at: formatDateTimeCell(row.created_at)
+      }))
+    };
+  }
+
+  const [
+    registrationSummaryRows,
+    cashierSummaryRows,
+    healthSummaryRows,
+    counselingSummaryRows,
+    laboratorySummaryRows,
+    prefectSummaryRows,
+    comlabSummaryRows,
+    cradSummaryRows,
+    hrSummaryRows
+  ] = await Promise.all([
+    pool.query<RowDataPacket[]>(
+      `SELECT
+         COUNT(*) AS total_registrations,
+         SUM(CASE WHEN patient_type = 'student' THEN 1 ELSE 0 END) AS student_total,
+         SUM(CASE WHEN patient_type = 'teacher' THEN 1 ELSE 0 END) AS teacher_total,
+         SUM(CASE WHEN LOWER(status) = 'pending' THEN 1 ELSE 0 END) AS pending_total
+       FROM patient_registrations`
+    ).then(([rows]) => rows),
+    pool.query<RowDataPacket[]>(
+      `SELECT
+         COUNT(*) AS total_links,
+         COALESCE(SUM(amount_due), 0) AS total_due,
+         COALESCE(SUM(amount_paid), 0) AS total_paid,
+         COALESCE(SUM(balance_due), 0) AS total_balance,
+         SUM(CASE WHEN payment_status = 'paid' THEN 1 ELSE 0 END) AS paid_total,
+         SUM(CASE WHEN payment_status = 'partial' THEN 1 ELSE 0 END) AS partial_total,
+         SUM(CASE WHEN payment_status = 'unpaid' THEN 1 ELSE 0 END) AS unpaid_total
+       FROM cashier_payment_links`
+    ).then(([rows]) => rows),
+    pool.query<RowDataPacket[]>(
+      `SELECT
+         (SELECT COUNT(*) FROM patient_appointments) AS appointment_total,
+         (SELECT COUNT(*) FROM checkup_visits) AS checkup_total,
+         (SELECT COUNT(*) FROM checkup_visits WHERE status = 'completed') AS completed_checkups,
+         (SELECT COUNT(*) FROM checkup_visits WHERE status = 'in_consultation') AS active_consultations,
+         (SELECT COUNT(*) FROM checkup_visits WHERE is_emergency = 1) AS emergency_cases`
+    ).then(([rows]) => rows),
+    pool.query<RowDataPacket[]>(
+      `SELECT
+         COUNT(*) AS total_sessions,
+         SUM(CASE WHEN status IN ('active', 'follow_up', 'at_risk') THEN 1 ELSE 0 END) AS open_sessions,
+         SUM(CASE WHEN risk_level = 'high' THEN 1 ELSE 0 END) AS high_risk_sessions,
+         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_sessions
+       FROM mental_health_sessions`
+    ).then(([rows]) => rows),
+    pool.query<RowDataPacket[]>(
+      `SELECT
+         COUNT(*) AS total_requests,
+         SUM(CASE WHEN status = 'Pending' THEN 1 ELSE 0 END) AS pending_requests,
+         SUM(CASE WHEN status = 'In Progress' THEN 1 ELSE 0 END) AS in_progress_requests,
+         SUM(CASE WHEN status IN ('Result Ready', 'Completed') THEN 1 ELSE 0 END) AS finished_requests
+       FROM laboratory_requests`
+    ).then(([rows]) => rows),
+    pool.query<RowDataPacket[]>(
+      `SELECT status, COUNT(*) AS total
+       FROM department_clearance_records
+       WHERE department_key = 'prefect'
+       GROUP BY status
+       ORDER BY status`
+    ).then(([rows]) => rows),
+    pool.query<RowDataPacket[]>(
+      `SELECT status, COUNT(*) AS total
+       FROM department_clearance_records
+       WHERE department_key = 'comlab'
+       GROUP BY status
+       ORDER BY status`
+    ).then(([rows]) => rows),
+    pool.query<RowDataPacket[]>(
+      `SELECT status, COUNT(*) AS total
+       FROM department_clearance_records
+       WHERE department_key = 'crad'
+       GROUP BY status
+       ORDER BY status`
+    ).then(([rows]) => rows),
+    pool.query<RowDataPacket[]>(
+      `SELECT status, COUNT(*) AS total
+       FROM department_clearance_records
+       WHERE department_key = 'hr'
+       GROUP BY status
+       ORDER BY status`
+    ).then(([rows]) => rows)
+  ]);
+
+  const registrationSummary = registrationSummaryRows[0] || {};
+  const cashierSummary = cashierSummaryRows[0] || {};
+  const healthSummary = healthSummaryRows[0] || {};
+  const counselingSummary = counselingSummaryRows[0] || {};
+  const laboratorySummary = laboratorySummaryRows[0] || {};
+
+  return {
+    department,
+    profile,
+    sections: [
+      {
+        key: 'enrollment_statistics',
+        title: 'Enrollment Statistics',
+        source: 'registrar',
+        metrics: [
+          { label: 'Total registrations', total: Number(registrationSummary.total_registrations || 0) },
+          { label: 'Students', total: Number(registrationSummary.student_total || 0) },
+          { label: 'Teachers', total: Number(registrationSummary.teacher_total || 0) },
+          { label: 'Pending', total: Number(registrationSummary.pending_total || 0) }
+        ]
+      },
+      {
+        key: 'financial_reports',
+        title: 'Financial Reports',
+        source: 'cashier',
+        metrics: [
+          { label: 'Billing links', total: Number(cashierSummary.total_links || 0) },
+          { label: 'Total due', total: toSafeMoney(cashierSummary.total_due, 0) },
+          { label: 'Total paid', total: toSafeMoney(cashierSummary.total_paid, 0) },
+          { label: 'Outstanding balance', total: toSafeMoney(cashierSummary.total_balance, 0) },
+          { label: 'Paid records', total: Number(cashierSummary.paid_total || 0) },
+          { label: 'Partial records', total: Number(cashierSummary.partial_total || 0) },
+          { label: 'Unpaid records', total: Number(cashierSummary.unpaid_total || 0) }
+        ]
+      },
+      {
+        key: 'health_service_reports',
+        title: 'Health Service Reports',
+        source: 'clinic',
+        metrics: [
+          { label: 'Appointments', total: Number(healthSummary.appointment_total || 0) },
+          { label: 'Check-up visits', total: Number(healthSummary.checkup_total || 0) },
+          { label: 'Completed check-ups', total: Number(healthSummary.completed_checkups || 0) },
+          { label: 'Active consultations', total: Number(healthSummary.active_consultations || 0) },
+          { label: 'Emergency cases', total: Number(healthSummary.emergency_cases || 0) }
+        ]
+      },
+      {
+        key: 'counseling_reports',
+        title: 'Counseling Reports',
+        source: 'guidance',
+        metrics: [
+          { label: 'Total sessions', total: Number(counselingSummary.total_sessions || 0) },
+          { label: 'Open sessions', total: Number(counselingSummary.open_sessions || 0) },
+          { label: 'High risk', total: Number(counselingSummary.high_risk_sessions || 0) },
+          { label: 'Completed sessions', total: Number(counselingSummary.completed_sessions || 0) }
+        ]
+      },
+      {
+        key: 'discipline_statistics',
+        title: 'Discipline Statistics',
+        source: 'prefect',
+        metrics: prefectSummaryRows.map((row) => ({
+          label: String(row.status || 'pending'),
+          total: Number(row.total || 0)
+        }))
+      },
+      {
+        key: 'laboratory_usage_reports',
+        title: 'Laboratory Usage Reports',
+        source: 'computer_laboratory',
+        metrics: [
+          { label: 'Total lab requests', total: Number(laboratorySummary.total_requests || 0) },
+          { label: 'Pending', total: Number(laboratorySummary.pending_requests || 0) },
+          { label: 'In progress', total: Number(laboratorySummary.in_progress_requests || 0) },
+          { label: 'Finished', total: Number(laboratorySummary.finished_requests || 0) },
+          ...comlabSummaryRows.map((row) => ({
+            label: `Comlab ${String(row.status || 'pending')}`,
+            total: Number(row.total || 0)
+          }))
+        ]
+      },
+      {
+        key: 'program_activity_reports',
+        title: 'Program Activity Reports',
+        source: 'crad',
+        metrics: cradSummaryRows.map((row) => ({
+          label: String(row.status || 'pending'),
+          total: Number(row.total || 0)
+        }))
+      },
+      {
+        key: 'employee_performance_records',
+        title: 'Employee Performance Records',
+        source: 'hr',
+        metrics: hrSummaryRows.map((row) => ({
+          label: String(row.status || 'pending'),
+          total: Number(row.total || 0)
+        }))
+      }
+    ],
+    outgoing_targets: [
+      { key: 'school_admin', label: 'School Administration', report_type: 'evaluation_reports' },
+      { key: 'hr', label: 'HR Department', report_type: 'staff_evaluation_feedback' }
+    ],
+    recent_dispatches: dispatchRows.map((row) => ({
+      action: String(row.action || ''),
+      detail: String(row.detail || ''),
+      actor: String(row.actor || ''),
+      entity_key: String(row.entity_key || ''),
+      metadata: parseJsonRecord(row.metadata),
+      created_at: formatDateTimeCell(row.created_at)
+    }))
+  };
+}
+
+async function buildPmedRequiredReportsPackage(pool: Pool): Promise<Record<string, unknown>> {
+  const report = await buildDepartmentReport(pool, 'pmed');
+  const sections = Array.isArray(report.sections) ? report.sections : [];
+  const [deliveryRows] = await pool.query<RowDataPacket[]>(
+    `SELECT action, detail, actor, entity_key, metadata, created_at
+     FROM module_activity_logs
+     WHERE module = 'department_reports'
+       AND COALESCE(metadata->>'target_key', '') = 'pmed'
+     ORDER BY created_at DESC
+     LIMIT 12`
+  );
+
+  const sources = Array.from(
+    new Set(
+      sections
+        .map((section) => toSafeText((section as Record<string, unknown>).source).toLowerCase())
+        .filter(Boolean)
+    )
+  );
+
+  return {
+    title: 'PMED Required Reports',
+    description: 'Consolidated report package containing only the sections PMED needs for evaluation.',
+    sections,
+    summary: {
+      section_count: sections.length,
+      source_count: sources.length,
+      metric_count: sections.reduce((total, section) => {
+        const metrics = Array.isArray((section as Record<string, unknown>).metrics)
+          ? ((section as Record<string, unknown>).metrics as unknown[])
+          : [];
+        return total + metrics.length;
+      }, 0),
+      sources
+    },
+    recent_deliveries: deliveryRows.map((row) => {
+      const metadata = parseJsonRecord(row.metadata);
+      return {
+        action: String(row.action || ''),
+        detail: String(row.detail || ''),
+        actor: String(row.actor || ''),
+        entity_key: String(row.entity_key || ''),
+        metadata,
+        created_at: resolveReportDeliveryTimestamp(metadata, row.entity_key, row.created_at)
+      };
+    })
+  };
+}
+
+async function buildClinicPmedRequestNotifications(pool: Pool): Promise<Record<string, unknown>[]> {
+  const [requestRows] = await pool.query<RowDataPacket[]>(
+    `SELECT action, detail, actor, entity_key, metadata, created_at
+     FROM module_activity_logs
+     WHERE module = 'department_reports'
+       AND LOWER(COALESCE(metadata->>'source_department', '')) = 'pmed'
+       AND (
+         LOWER(COALESCE(metadata->>'target_key', metadata->>'target_department', '')) IN ('reports', 'clinic')
+         OR LOWER(COALESCE(metadata->>'notification_scope', '')) = 'clinic_reports'
+       )
+       AND LOWER(COALESCE(metadata->>'request_status', '')) = 'requested'
+     ORDER BY created_at DESC
+     LIMIT 12`
+  );
+
+  const notifications = requestRows.map((row) => ({
+    action: String(row.action || ''),
+    detail: String(row.detail || ''),
+    actor: String(row.actor || ''),
+    entity_key: String(row.entity_key || ''),
+    metadata: parseJsonRecord(row.metadata),
+    created_at: formatDateTimeCell(row.created_at)
+  }));
+
+  const notificationsByKey = new Map<string, Record<string, unknown>>();
+  for (const row of notifications) {
+    notificationsByKey.set(String(row.entity_key || ''), row);
+  }
+
+  try {
+    const [fallbackRows] = await pool.query<RowDataPacket[]>(
+      `SELECT report_reference, report_name, report_type, owner_name, delivery_status, generated_at, updated_at, created_at
+       FROM public.pmed_reports
+       WHERE LOWER(COALESCE(delivery_status, '')) = 'awaiting department'
+         AND (
+           LOWER(COALESCE(report_type, '')) LIKE 'clinic %'
+           OR LOWER(COALESCE(report_name, '')) LIKE '%clinic%'
+         )
+       ORDER BY COALESCE(generated_at, updated_at, created_at) DESC
+       LIMIT 12`
+    );
+
+    for (const row of fallbackRows) {
+      const entityKey = String(row.report_reference || '');
+      if (!entityKey || notificationsByKey.has(entityKey)) continue;
+      notificationsByKey.set(entityKey, {
+        action: 'PMED Report Requested',
+        detail: `PMED requested Clinic to submit ${String(row.report_name || 'a department report')}.`,
+        actor: String(row.owner_name || 'PMED Reports'),
+        entity_key: entityKey,
+        metadata: {
+          source_department: 'pmed',
+          source_department_name: 'PMED',
+          target_department: 'clinic',
+          target_department_name: 'Clinic',
+          target_key: 'reports',
+          request_status: 'requested',
+          report_reference: entityKey,
+          report_name: String(row.report_name || 'Department Report'),
+          report_type: String(row.report_type || 'Clinic Report'),
+          stage: 'reporting',
+          notification_scope: 'clinic_reports',
+          fallback_source: 'pmed_reports'
+        },
+        created_at: formatDateTimeCell(row.generated_at || row.updated_at || row.created_at)
+      });
+    }
+  } catch {
+    // PMED reporting table is optional in some deployments.
+  }
+
+  return Array.from(notificationsByKey.values())
+    .sort((left, right) => new Date(String(right.created_at || '')).getTime() - new Date(String(left.created_at || '')).getTime())
+    .slice(0, 12);
 }
 
 async function upsertCashierPaymentLink(
@@ -646,18 +1084,18 @@ async function upsertCashierPaymentLink(
       source_module, source_key, cashier_reference, cashier_billing_id, invoice_number, official_receipt,
       amount_due, amount_paid, balance_due, payment_status, latest_payment_method, paid_at, metadata
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      cashier_reference = VALUES(cashier_reference),
-      cashier_billing_id = VALUES(cashier_billing_id),
-      invoice_number = VALUES(invoice_number),
-      official_receipt = VALUES(official_receipt),
-      amount_due = VALUES(amount_due),
-      amount_paid = VALUES(amount_paid),
-      balance_due = VALUES(balance_due),
-      payment_status = VALUES(payment_status),
-      latest_payment_method = VALUES(latest_payment_method),
-      paid_at = VALUES(paid_at),
-      metadata = VALUES(metadata),
+    ON CONFLICT (source_module, source_key) DO UPDATE SET
+      cashier_reference = EXCLUDED.cashier_reference,
+      cashier_billing_id = EXCLUDED.cashier_billing_id,
+      invoice_number = EXCLUDED.invoice_number,
+      official_receipt = EXCLUDED.official_receipt,
+      amount_due = EXCLUDED.amount_due,
+      amount_paid = EXCLUDED.amount_paid,
+      balance_due = EXCLUDED.balance_due,
+      payment_status = EXCLUDED.payment_status,
+      latest_payment_method = EXCLUDED.latest_payment_method,
+      paid_at = EXCLUDED.paid_at,
+      metadata = EXCLUDED.metadata,
       updated_at = CURRENT_TIMESTAMP`,
     [
       params.sourceModule,
@@ -671,7 +1109,7 @@ async function upsertCashierPaymentLink(
       toSafeMoney(params.balanceDue, 0),
       normalizePaymentStatus(params.paymentStatus),
       normalizeCashierPaymentMethod(params.latestPaymentMethod),
-      toMysqlDateTime(params.paidAt),
+      toSqlDateTime(params.paidAt),
       JSON.stringify(params.metadata || {})
     ]
   );
@@ -679,20 +1117,76 @@ async function upsertCashierPaymentLink(
 
 async function dispatchCashierEvent(
   pool: Pool,
-  options: MysqlApiOptions,
+  options: SupabaseApiOptions,
   eventRow: RowDataPacket
 ): Promise<{ ok: boolean; statusCode?: number; message: string }> {
-  const baseUrl = toSafeText(options.cashierBaseUrl).replace(/\/+$/, '');
-  if (!cashierIntegrationEnabled(options) || !baseUrl) {
-    return { ok: false, message: 'Cashier integration is disabled or missing base URL.' };
+  const baseUrl = cashierResolvedBaseUrl(options);
+  if (!cashierIntegrationEnabled(options)) {
+    return { ok: false, message: 'Cashier integration is disabled.' };
   }
   const eventPayload = parseJsonRecord(eventRow.payload);
   const studentId = toSafeText(eventPayload.student_id || eventPayload.patient_id);
   const studentName = toSafeText(eventPayload.student_name || eventRow.patient_name);
-  const studentSyncEndpoint = `${baseUrl}/clinic/student/sync`;
-  const billingEndpoint = `${baseUrl}/cashier/billing/create`;
   await ensureCashierIntegrationTables(pool);
   try {
+    const [existingLinkRows] = await pool.query<RowDataPacket[]>(
+      `SELECT cashier_billing_id, cashier_reference, invoice_number, official_receipt, amount_due, amount_paid, balance_due, payment_status, latest_payment_method, paid_at
+       FROM cashier_payment_links
+       WHERE source_module = ? AND source_key = ?
+       LIMIT 1`,
+      [String(eventRow.source_module || ''), String(eventRow.source_key || '')]
+    );
+    const existingLink = existingLinkRows[0];
+
+    if (cashierUsesInternalSync(options)) {
+      const amountDue = Number(eventRow.amount_due || existingLink?.amount_due || 0);
+      const paymentStatus = normalizePaymentStatus(existingLink?.payment_status || eventRow.payment_status);
+      const amountPaid = paymentStatus === 'paid'
+        ? amountDue
+        : paymentStatus === 'partial'
+          ? Number(existingLink?.amount_paid || 0)
+          : Number(existingLink?.amount_paid || 0);
+      const balanceDue = paymentStatus === 'paid'
+        ? 0
+        : Math.max(0, Number(existingLink?.balance_due ?? (amountDue - amountPaid)));
+
+      await upsertCashierPaymentLink(pool, {
+        sourceModule: String(eventRow.source_module || ''),
+        sourceKey: String(eventRow.source_key || ''),
+        cashierReference: toSafeText(existingLink?.cashier_reference) || toSafeText(eventPayload.billing_code) || `SUPA-${toSafeText(eventRow.source_key || '')}`,
+        cashierBillingId: toSafeInt(existingLink?.cashier_billing_id, 0) || toSafeInt(eventRow.id, 0) || null,
+        invoiceNumber: toSafeText(existingLink?.invoice_number) || toSafeText(eventPayload.billing_code) || null,
+        officialReceipt: toSafeText(existingLink?.official_receipt) || null,
+        amountDue,
+        amountPaid,
+        balanceDue,
+        paymentStatus,
+        latestPaymentMethod: toSafeText(existingLink?.latest_payment_method) || normalizeCashierPaymentMethod(eventPayload.payment_method) || null,
+        paidAt: paymentStatus === 'paid'
+          ? toSafeText(existingLink?.paid_at) || formatDateTimeCell(eventRow.synced_at || eventRow.updated_at || eventRow.created_at) || new Date().toISOString()
+          : toSafeText(existingLink?.paid_at) || null,
+        metadata: {
+          source: 'supabase_internal_cashier_sync',
+          student_id: studentId || null,
+          student_name: studentName || null
+        }
+      });
+
+      if (String(eventRow.source_module || '') === 'appointments') {
+        await syncAppointmentCashierColumnsFromLinks(pool, String(eventRow.source_key || ''));
+      }
+
+      await pool.query(
+        `UPDATE cashier_integration_events
+         SET sync_status = 'acknowledged', synced_at = CURRENT_TIMESTAMP, last_error = NULL, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [Number(eventRow.id || 0)]
+      );
+      return { ok: true, statusCode: 200, message: 'Synced through Supabase internal cashier integration.' };
+    }
+
+    const studentSyncEndpoint = `${baseUrl}/clinic/student/sync`;
+    const billingEndpoint = `${baseUrl}/cashier/billing/create`;
     const headers = {
       'Content-Type': 'application/json',
       ...(toSafeText(options.cashierSharedToken) ? { 'X-Integration-Token': toSafeText(options.cashierSharedToken) } : {})
@@ -722,15 +1216,6 @@ async function dispatchCashierEvent(
         return { ok: false, statusCode: studentResponse.status, message };
       }
     }
-
-    const [existingLinkRows] = await pool.query<RowDataPacket[]>(
-      `SELECT cashier_billing_id, cashier_reference, amount_due, amount_paid, balance_due, payment_status, latest_payment_method, paid_at
-       FROM cashier_payment_links
-       WHERE source_module = ? AND source_key = ?
-       LIMIT 1`,
-      [String(eventRow.source_module || ''), String(eventRow.source_key || '')]
-    );
-    const existingLink = existingLinkRows[0];
 
     let responseStatus = 200;
     if (Number(eventRow.amount_due || 0) > 0 && studentId && studentName && !toSafeInt(existingLink?.cashier_billing_id, 0)) {
@@ -829,500 +1314,69 @@ async function dispatchCashierEvent(
 }
 
 async function ensureDoctorsTable(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS doctors (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      doctor_name VARCHAR(120) NOT NULL UNIQUE,
-      department_name VARCHAR(120) NOT NULL,
-      specialization VARCHAR(160) NULL,
-      is_active TINYINT(1) NOT NULL DEFAULT 1,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-  `);
-
-  await pool.query(`
-    INSERT INTO doctors (doctor_name, department_name, specialization, is_active)
-    VALUES
-      ('Dr. Humour', 'General Medicine', 'Internal Medicine', 1),
-      ('Dr. Jenni', 'General Medicine', 'General Medicine', 1),
-      ('Dr. Rivera', 'Pediatrics', 'Pediatrics', 1),
-      ('Dr. Morco', 'Orthopedic', 'Orthopedics', 1),
-      ('Dr. Martinez', 'Orthopedic', 'Orthopedics', 1),
-      ('Dr. Santos', 'Dental', 'Dentistry', 1),
-      ('Dr. Lim', 'Dental', 'Dentistry', 1),
-      ('Dr. A. Rivera', 'Laboratory', 'Pathology', 1),
-      ('Dr. S. Villaraza', 'Mental Health', 'Psychiatry', 1),
-      ('Dr. B. Martinez', 'Check-Up', 'General Practice', 1)
-    ON DUPLICATE KEY UPDATE
-      department_name = VALUES(department_name),
-      specialization = VALUES(specialization),
-      is_active = VALUES(is_active)
-  `);
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 async function ensureDoctorAvailabilityTables(pool: Pool): Promise<void> {
-  await ensureDoctorsTable(pool);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS doctor_availability (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      doctor_name VARCHAR(120) NOT NULL,
-      department_name VARCHAR(120) NOT NULL,
-      day_of_week SMALLINT NOT NULL,
-      start_time TIME NOT NULL,
-      end_time TIME NOT NULL,
-      max_appointments INT NOT NULL DEFAULT 8,
-      is_active TINYINT(1) NOT NULL DEFAULT 1,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_doctor_slot (doctor_name, department_name, day_of_week, start_time, end_time)
-    )
-  `);
-
-  await pool.query(`
-    INSERT INTO doctor_availability (doctor_name, department_name, day_of_week, start_time, end_time, max_appointments, is_active)
-    VALUES
-      ('Dr. Humour', 'General Medicine', 1, '08:00:00', '12:00:00', 8, 1),
-      ('Dr. Humour', 'General Medicine', 3, '08:00:00', '12:00:00', 8, 1),
-      ('Dr. Jenni', 'General Medicine', 2, '13:00:00', '17:00:00', 8, 1),
-      ('Dr. Jenni', 'General Medicine', 4, '13:00:00', '17:00:00', 8, 1),
-      ('Dr. Rivera', 'Pediatrics', 1, '09:00:00', '13:00:00', 10, 1),
-      ('Dr. Rivera', 'Pediatrics', 3, '09:00:00', '13:00:00', 10, 1),
-      ('Dr. Morco', 'Orthopedic', 2, '09:00:00', '12:00:00', 6, 1),
-      ('Dr. Martinez', 'Orthopedic', 4, '09:00:00', '12:00:00', 6, 1),
-      ('Dr. Santos', 'Dental', 1, '10:00:00', '15:00:00', 10, 1),
-      ('Dr. Lim', 'Dental', 3, '10:00:00', '15:00:00', 10, 1),
-      ('Dr. A. Rivera', 'Laboratory', 2, '08:00:00', '11:00:00', 5, 1),
-      ('Dr. S. Villaraza', 'Mental Health', 5, '13:00:00', '18:00:00', 8, 1),
-      ('Dr. B. Martinez', 'Check-Up', 2, '08:00:00', '12:00:00', 8, 1),
-      ('Dr. B. Martinez', 'Check-Up', 5, '08:00:00', '12:00:00', 8, 1)
-    ON DUPLICATE KEY UPDATE
-      max_appointments = VALUES(max_appointments),
-      is_active = VALUES(is_active)
-  `);
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 async function ensurePatientAppointmentsTable(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS patient_appointments (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      booking_id VARCHAR(40) NOT NULL UNIQUE,
-      patient_id VARCHAR(60) NULL,
-      patient_name VARCHAR(150) NOT NULL,
-      patient_age SMALLINT NULL,
-      patient_email VARCHAR(190) NULL,
-      patient_gender VARCHAR(30) NULL,
-      patient_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
-      guardian_name VARCHAR(150) NULL,
-      phone_number VARCHAR(60) NOT NULL,
-      emergency_contact VARCHAR(120) NULL,
-      insurance_provider VARCHAR(120) NULL,
-      payment_method VARCHAR(40) NULL,
-      actor_role VARCHAR(20) NOT NULL DEFAULT 'unknown',
-      appointment_priority VARCHAR(20) NOT NULL DEFAULT 'Routine',
-      symptoms_summary TEXT NULL,
-      doctor_notes TEXT NULL,
-      doctor_name VARCHAR(120) NOT NULL,
-      department_name VARCHAR(120) NOT NULL,
-      visit_type VARCHAR(120) NULL,
-      appointment_date DATE NOT NULL,
-      preferred_time VARCHAR(20) NULL,
-      visit_reason TEXT NULL,
-      status VARCHAR(40) NOT NULL DEFAULT 'Pending',
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-  `);
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 async function ensurePatientRegistrationsTable(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS patient_registrations (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      case_id VARCHAR(40) NOT NULL UNIQUE,
-      patient_name VARCHAR(150) NOT NULL,
-      patient_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
-      patient_email VARCHAR(190) NULL,
-      age SMALLINT NULL,
-      concern TEXT NULL,
-      intake_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      booked_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      status VARCHAR(20) NOT NULL DEFAULT 'Pending',
-      assigned_to VARCHAR(120) NOT NULL DEFAULT 'Unassigned',
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-  `);
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 async function ensurePatientWalkinsTable(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS patient_walkins (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      case_id VARCHAR(40) NOT NULL UNIQUE,
-      patient_name VARCHAR(150) NOT NULL,
-      patient_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
-      age SMALLINT NULL,
-      sex VARCHAR(12) NULL,
-      date_of_birth DATE NULL,
-      contact VARCHAR(60) NULL,
-      address TEXT NULL,
-      emergency_contact VARCHAR(120) NULL,
-      patient_ref VARCHAR(60) NULL,
-      visit_department VARCHAR(80) NULL,
-      checkin_time DATETIME NULL,
-      pain_scale SMALLINT NULL,
-      temperature_c DECIMAL(4,1) NULL,
-      blood_pressure VARCHAR(20) NULL,
-      pulse_bpm SMALLINT NULL,
-      weight_kg DECIMAL(5,2) NULL,
-      chief_complaint TEXT NULL,
-      severity VARCHAR(20) NOT NULL DEFAULT 'Low',
-      intake_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      assigned_doctor VARCHAR(120) NOT NULL DEFAULT 'Nurse Triage',
-      status VARCHAR(40) NOT NULL DEFAULT 'waiting',
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-  `);
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 async function ensureCheckupVisitsTable(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS checkup_visits (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      visit_id VARCHAR(40) NOT NULL UNIQUE,
-      patient_name VARCHAR(150) NOT NULL,
-      patient_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
-      assigned_doctor VARCHAR(120) NOT NULL DEFAULT 'Unassigned',
-      source VARCHAR(50) NOT NULL DEFAULT 'appointment_confirmed',
-      status VARCHAR(40) NOT NULL DEFAULT 'intake',
-      chief_complaint TEXT NULL,
-      diagnosis TEXT NULL,
-      clinical_notes TEXT NULL,
-      consultation_started_at DATETIME NULL,
-      lab_requested TINYINT(1) NOT NULL DEFAULT 0,
-      lab_result_ready TINYINT(1) NOT NULL DEFAULT 0,
-      prescription_created TINYINT(1) NOT NULL DEFAULT 0,
-      prescription_dispensed TINYINT(1) NOT NULL DEFAULT 0,
-      follow_up_date DATE NULL,
-      is_emergency TINYINT(1) NOT NULL DEFAULT 0,
-      version INT NOT NULL DEFAULT 1,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-  `);
-
-  const [seedRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM checkup_visits`);
-  if (Number(seedRows[0]?.total || 0) > 0) return;
-
-  await pool.query(`
-    INSERT INTO checkup_visits (
-      visit_id, patient_name, patient_type, assigned_doctor, source, status, chief_complaint,
-      diagnosis, clinical_notes, lab_requested, lab_result_ready, prescription_created, prescription_dispensed
-    ) VALUES
-      ('VISIT-2026-2001', 'Maria Santos', 'student', 'Dr. Humour', 'appointment_confirmed', 'queue', 'Fever with sore throat', NULL, NULL, 0, 0, 0, 0),
-      ('VISIT-2026-2002', 'Rico Dela Cruz', 'teacher', 'Dr. Humour', 'walkin_triage_completed', 'doctor_assigned', 'Persistent headache', NULL, NULL, 0, 0, 0, 0),
-      ('VISIT-2026-2003', 'Juana Reyes', 'student', 'Dr. Jenni', 'waiting_for_doctor', 'in_consultation', 'Back pain', 'Muscle strain', 'Pain localized at lower back, no neuro deficits.', 1, 0, 0, 0)
-    ON DUPLICATE KEY UPDATE visit_id = VALUES(visit_id)
-  `);
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 async function ensureLaboratoryTables(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS laboratory_requests (
-      request_id BIGINT PRIMARY KEY,
-      visit_id VARCHAR(60) NOT NULL,
-      patient_id VARCHAR(60) NOT NULL,
-      patient_name VARCHAR(150) NOT NULL,
-      patient_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
-      age SMALLINT NULL,
-      sex VARCHAR(20) NULL,
-      category VARCHAR(80) NOT NULL,
-      priority VARCHAR(20) NOT NULL DEFAULT 'Normal',
-      status VARCHAR(30) NOT NULL DEFAULT 'Pending',
-      requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      requested_by_doctor VARCHAR(120) NOT NULL,
-      doctor_department VARCHAR(120) NULL,
-      notes TEXT NULL,
-      tests JSON NULL,
-      specimen_type VARCHAR(80) NULL,
-      sample_source VARCHAR(80) NULL,
-      collection_date_time DATETIME NULL,
-      clinical_diagnosis TEXT NULL,
-      lab_instructions TEXT NULL,
-      insurance_reference VARCHAR(120) NULL,
-      billing_reference VARCHAR(120) NULL,
-      assigned_lab_staff VARCHAR(120) NULL,
-      sample_collected TINYINT(1) NOT NULL DEFAULT 0,
-      sample_collected_at DATETIME NULL,
-      processing_started_at DATETIME NULL,
-      result_encoded_at DATETIME NULL,
-      result_reference_range TEXT NULL,
-      verified_by VARCHAR(120) NULL,
-      verified_at DATETIME NULL,
-      rejection_reason TEXT NULL,
-      resample_flag TINYINT(1) NOT NULL DEFAULT 0,
-      released_at DATETIME NULL,
-      raw_attachment_name VARCHAR(255) NULL,
-      encoded_values JSON NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS laboratory_activity_logs (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      request_id BIGINT NOT NULL,
-      action VARCHAR(120) NOT NULL,
-      details TEXT NOT NULL,
-      actor VARCHAR(120) NOT NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 async function ensurePharmacyInventoryTables(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS pharmacy_medicines (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      medicine_code VARCHAR(40) NOT NULL,
-      sku VARCHAR(60) NOT NULL UNIQUE,
-      medicine_name VARCHAR(150) NOT NULL,
-      brand_name VARCHAR(150) NULL,
-      generic_name VARCHAR(150) NULL,
-      category VARCHAR(80) NULL,
-      medicine_type VARCHAR(80) NULL,
-      dosage_strength VARCHAR(80) NULL,
-      unit_of_measure VARCHAR(40) NULL,
-      supplier_name VARCHAR(120) NULL,
-      purchase_cost DECIMAL(10,2) NOT NULL DEFAULT 0,
-      selling_price DECIMAL(10,2) NOT NULL DEFAULT 0,
-      batch_lot_no VARCHAR(80) NULL,
-      manufacturing_date DATE NULL,
-      expiry_date DATE NULL,
-      storage_requirements TEXT NULL,
-      reorder_level INT NOT NULL DEFAULT 20,
-      low_stock_threshold INT NOT NULL DEFAULT 20,
-      stock_capacity INT NOT NULL DEFAULT 100,
-      stock_on_hand INT NOT NULL DEFAULT 0,
-      stock_location VARCHAR(120) NULL,
-      barcode VARCHAR(120) NULL,
-      is_archived TINYINT(1) NOT NULL DEFAULT 0,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS pharmacy_dispense_requests (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      request_code VARCHAR(60) NOT NULL UNIQUE,
-      medicine_id BIGINT NOT NULL,
-      patient_name VARCHAR(150) NOT NULL,
-      quantity INT NOT NULL DEFAULT 1,
-      notes TEXT NULL,
-      prescription_reference VARCHAR(120) NOT NULL,
-      dispense_reason TEXT NOT NULL,
-      status VARCHAR(30) NOT NULL DEFAULT 'Pending',
-      requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      fulfilled_at DATETIME NULL,
-      fulfilled_by VARCHAR(120) NULL
-    )
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS pharmacy_stock_movements (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      medicine_id BIGINT NOT NULL,
-      movement_type VARCHAR(40) NOT NULL,
-      quantity_change INT NOT NULL,
-      quantity_before INT NOT NULL,
-      quantity_after INT NOT NULL,
-      reason TEXT NOT NULL,
-      batch_lot_no VARCHAR(80) NULL,
-      stock_location VARCHAR(120) NULL,
-      actor VARCHAR(120) NOT NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS pharmacy_activity_logs (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      action VARCHAR(80) NOT NULL,
-      detail TEXT NOT NULL,
-      actor VARCHAR(120) NOT NULL,
-      tone VARCHAR(20) NOT NULL DEFAULT 'info',
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 async function ensureMentalHealthTables(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS mental_health_patients (
-      patient_id VARCHAR(40) PRIMARY KEY,
-      patient_name VARCHAR(150) NOT NULL,
-      patient_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
-      date_of_birth DATE NULL,
-      sex VARCHAR(20) NULL,
-      contact_number VARCHAR(60) NULL,
-      guardian_contact VARCHAR(120) NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS mental_health_sessions (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      case_reference VARCHAR(60) NOT NULL UNIQUE,
-      patient_id VARCHAR(40) NOT NULL,
-      patient_name VARCHAR(150) NOT NULL,
-      patient_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
-      counselor VARCHAR(120) NOT NULL,
-      session_type VARCHAR(120) NOT NULL,
-      status VARCHAR(40) NOT NULL DEFAULT 'create',
-      risk_level VARCHAR(20) NOT NULL DEFAULT 'low',
-      diagnosis_condition TEXT NULL,
-      treatment_plan TEXT NULL,
-      session_goals TEXT NULL,
-      session_duration_minutes INT NOT NULL DEFAULT 45,
-      session_mode VARCHAR(20) NOT NULL DEFAULT 'in_person',
-      location_room VARCHAR(120) NULL,
-      guardian_contact VARCHAR(120) NULL,
-      emergency_contact VARCHAR(120) NULL,
-      medication_reference VARCHAR(120) NULL,
-      follow_up_frequency VARCHAR(80) NULL,
-      escalation_reason TEXT NULL,
-      outcome_result TEXT NULL,
-      assessment_score INT NULL,
-      assessment_tool VARCHAR(80) NULL,
-      appointment_at DATETIME NOT NULL,
-      next_follow_up_at DATETIME NULL,
-      created_by_role VARCHAR(80) NOT NULL,
-      is_draft TINYINT(1) NOT NULL DEFAULT 0,
-      archived_at DATETIME NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS mental_health_notes (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      session_id BIGINT NOT NULL,
-      note_type VARCHAR(80) NOT NULL,
-      note_content TEXT NOT NULL,
-      clinical_score INT NULL,
-      attachment_name VARCHAR(255) NULL,
-      attachment_url VARCHAR(255) NULL,
-      created_by_role VARCHAR(80) NOT NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS mental_health_activity_logs (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      session_id BIGINT NULL,
-      action VARCHAR(120) NOT NULL,
-      detail TEXT NOT NULL,
-      actor_role VARCHAR(80) NOT NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 async function ensurePatientMasterTables(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS patient_master (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      patient_code VARCHAR(60) NOT NULL,
-      patient_name VARCHAR(150) NOT NULL,
-      identity_key VARCHAR(220) NOT NULL UNIQUE,
-      patient_type VARCHAR(20) NOT NULL DEFAULT 'unknown',
-      email VARCHAR(190) NULL,
-      contact VARCHAR(60) NULL,
-      sex VARCHAR(20) NULL,
-      date_of_birth DATE NULL,
-      age SMALLINT NULL,
-      emergency_contact VARCHAR(120) NULL,
-      guardian_contact VARCHAR(120) NULL,
-      latest_status VARCHAR(60) NOT NULL DEFAULT 'active',
-      risk_level VARCHAR(20) NOT NULL DEFAULT 'low',
-      appointment_count INT NOT NULL DEFAULT 0,
-      walkin_count INT NOT NULL DEFAULT 0,
-      checkup_count INT NOT NULL DEFAULT 0,
-      mental_count INT NOT NULL DEFAULT 0,
-      pharmacy_count INT NOT NULL DEFAULT 0,
-      source_tags JSON NULL,
-      last_seen_at DATETIME NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-  `);
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 async function ensureAdminProfileTables(pool: Pool): Promise<void> {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS admin_profiles (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      username VARCHAR(190) NOT NULL UNIQUE,
-      full_name VARCHAR(190) NOT NULL,
-      email VARCHAR(190) NOT NULL,
-      role VARCHAR(80) NOT NULL DEFAULT 'admin',
-      department VARCHAR(120) NOT NULL DEFAULT 'Administration',
-      access_exemptions JSON NULL,
-      is_super_admin TINYINT(1) NOT NULL DEFAULT 0,
-      password_hash TEXT NULL,
-      status VARCHAR(30) NOT NULL DEFAULT 'active',
-      phone VARCHAR(80) NOT NULL DEFAULT '',
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      last_login_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      email_notifications TINYINT(1) NOT NULL DEFAULT 1,
-      in_app_notifications TINYINT(1) NOT NULL DEFAULT 1,
-      dark_mode TINYINT(1) NOT NULL DEFAULT 0
-    )
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS admin_activity_logs (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      username VARCHAR(190) NOT NULL,
-      action VARCHAR(100) NOT NULL,
-      raw_action VARCHAR(100) NOT NULL,
-      description TEXT NOT NULL,
-      ip_address VARCHAR(80) NOT NULL DEFAULT '127.0.0.1',
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS admin_sessions (
-      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-      session_token_hash VARCHAR(128) NOT NULL UNIQUE,
-      admin_profile_id BIGINT NOT NULL,
-      ip_address VARCHAR(80) NOT NULL DEFAULT '',
-      user_agent TEXT NOT NULL,
-      expires_at DATETIME NOT NULL,
-      revoked_at DATETIME NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  const [rows] = await pool.query<RowDataPacket[]>(`SELECT id FROM admin_profiles WHERE LOWER(username) = 'joecelgarcia1@gmail.com' LIMIT 1`);
-  if (rows[0]) return;
-
-  await pool.query(
-    `INSERT INTO admin_profiles (username, full_name, email, role, department, access_exemptions, is_super_admin, password_hash, status, phone)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      'joecelgarcia1@gmail.com',
-      'BCP Clinic Admin',
-      'joecelgarcia1@gmail.com',
-      'admin',
-      'Administration',
-      JSON.stringify([]),
-      1,
-      hashPassword('Admin#123'),
-      'active',
-      '+63 912 345 6789'
-    ]
-  );
+  // Supabase-only: tables come from `supabase/schema.sql`.
+  void pool;
+  return;
 }
 
 async function getDoctorAvailabilitySnapshot(
@@ -1336,7 +1390,7 @@ async function getDoctorAvailabilitySnapshot(
   await ensureDoctorAvailabilityTables(pool);
   await ensurePatientAppointmentsTable(pool);
 
-  const requestedDate = toMysqlDate(appointmentDate);
+  const requestedDate = toSqlDate(appointmentDate);
   if (!requestedDate) {
     return { doctorName, departmentName, appointmentDate, isDoctorAvailable: false, reason: 'Invalid appointment date.', slots: [], recommendedTimes: [] };
   }
@@ -1389,13 +1443,23 @@ async function getDoctorAvailabilitySnapshot(
 }
 
 function mapAppointmentRow(row: RowDataPacket): Record<string, unknown> {
+  const patientType = inferPatientType({
+    patientType: row.patient_type,
+    actorRole: row.actor_role,
+    patientName: row.patient_name,
+    patientEmail: row.patient_email,
+    concern: row.visit_reason || row.symptoms_summary,
+    visitType: row.visit_type,
+    patientId: row.patient_id,
+    age: row.patient_age
+  });
   return {
     id: Number(row.id || 0),
     booking_id: String(row.booking_id || ''),
     patient_id: row.patient_id == null ? null : String(row.patient_id),
     patient_name: String(row.patient_name || ''),
     patient_email: row.patient_email == null ? null : String(row.patient_email),
-    patient_type: String(row.patient_type || 'unknown'),
+    patient_type: patientType,
     phone_number: String(row.phone_number || ''),
     emergency_contact: row.emergency_contact == null ? null : String(row.emergency_contact),
     insurance_provider: row.insurance_provider == null ? null : String(row.insurance_provider),
@@ -1430,11 +1494,18 @@ function mapAppointmentRow(row: RowDataPacket): Record<string, unknown> {
 }
 
 function mapRegistrationRow(row: RowDataPacket): Record<string, unknown> {
+  const patientType = inferPatientType({
+    patientType: row.patient_type,
+    patientName: row.patient_name,
+    patientEmail: row.patient_email,
+    concern: row.concern,
+    age: row.age
+  });
   return {
     id: Number(row.id || 0),
     case_id: String(row.case_id || ''),
     patient_name: String(row.patient_name || ''),
-    patient_type: String(row.patient_type || 'unknown'),
+    patient_type: patientType,
     patient_email: row.patient_email == null ? '' : String(row.patient_email),
     age: Number(row.age || 0),
     concern: row.concern == null ? '' : String(row.concern),
@@ -1446,11 +1517,18 @@ function mapRegistrationRow(row: RowDataPacket): Record<string, unknown> {
 }
 
 function mapWalkinRow(row: RowDataPacket): Record<string, unknown> {
+  const patientType = inferPatientType({
+    patientType: row.patient_type,
+    patientName: row.patient_name,
+    concern: row.chief_complaint,
+    patientId: row.patient_ref,
+    age: row.age
+  });
   return {
     id: Number(row.id || 0),
     case_id: String(row.case_id || ''),
     patient_name: String(row.patient_name || ''),
-    patient_type: String(row.patient_type || 'unknown'),
+    patient_type: patientType,
     age: Number(row.age || 0),
     sex: row.sex == null ? '' : String(row.sex),
     date_of_birth: row.date_of_birth == null ? '' : formatDateCell(row.date_of_birth),
@@ -1474,11 +1552,17 @@ function mapWalkinRow(row: RowDataPacket): Record<string, unknown> {
 }
 
 function mapCheckupRow(row: RowDataPacket): Record<string, unknown> {
+  const patientType = inferPatientType({
+    patientType: row.patient_type,
+    patientName: row.patient_name,
+    concern: row.chief_complaint,
+    visitType: row.source
+  });
   return {
     id: Number(row.id || 0),
     visit_id: String(row.visit_id || ''),
     patient_name: String(row.patient_name || ''),
-    patient_type: String(row.patient_type || 'unknown'),
+    patient_type: patientType,
     assigned_doctor: String(row.assigned_doctor || 'Unassigned'),
     source: String(row.source || 'appointment_confirmed'),
     status: String(row.status || 'intake'),
@@ -1498,12 +1582,19 @@ function mapCheckupRow(row: RowDataPacket): Record<string, unknown> {
 }
 
 function mapLabDetailRow(row: RowDataPacket): Record<string, unknown> {
+  const patientType = inferPatientType({
+    patientType: row.patient_type,
+    patientName: row.patient_name,
+    patientId: row.patient_id,
+    concern: row.category || row.clinical_diagnosis,
+    age: row.age
+  });
   return {
     request_id: Number(row.request_id || 0),
     visit_id: String(row.visit_id || ''),
     patient_id: String(row.patient_id || ''),
     patient_name: String(row.patient_name || ''),
-    patient_type: String(row.patient_type || 'unknown'),
+    patient_type: patientType,
     age: row.age == null ? null : Number(row.age),
     sex: row.sex == null ? '' : String(row.sex),
     category: String(row.category || ''),
@@ -1538,11 +1629,18 @@ function mapLabDetailRow(row: RowDataPacket): Record<string, unknown> {
 }
 
 function mapPatientRow(row: RowDataPacket): Record<string, unknown> {
+  const patientType = inferPatientType({
+    patientType: row.patient_type,
+    patientName: row.patient_name,
+    patientEmail: row.email,
+    patientId: row.patient_code,
+    age: row.age
+  });
   return {
     id: Number(row.id || 0),
     patient_code: String(row.patient_code || ''),
     patient_name: String(row.patient_name || ''),
-    patient_type: String(row.patient_type || 'unknown'),
+    patient_type: patientType,
     email: row.email == null ? null : String(row.email),
     contact: row.contact == null ? null : String(row.contact),
     sex: row.sex == null ? null : String(row.sex),
@@ -1602,20 +1700,92 @@ async function rebuildPatientMaster(pool: Pool): Promise<void> {
       patient_code, patient_name, identity_key, patient_type, email, contact, sex, age, emergency_contact, latest_status, risk_level, source_tags, last_seen_at
     )
     SELECT
-      COALESCE(NULLIF(TRIM(COALESCE(patient_id, '')), ''), CONCAT('PAT-A-', id)),
-      patient_name,
-      CONCAT(LOWER(TRIM(patient_name)), '|', COALESCE(phone_number, '')),
-      patient_type,
-      NULLIF(TRIM(COALESCE(patient_email, '')), ''),
-      NULLIF(TRIM(COALESCE(phone_number, '')), ''),
-      NULLIF(TRIM(COALESCE(patient_gender, '')), ''),
-      patient_age,
-      NULLIF(TRIM(COALESCE(emergency_contact, '')), ''),
-      LOWER(COALESCE(status, 'pending')),
-      CASE WHEN LOWER(COALESCE(appointment_priority, 'routine')) = 'urgent' THEN 'medium' ELSE 'low' END,
-      JSON_ARRAY('appointments'),
-      COALESCE(updated_at, created_at, CURRENT_TIMESTAMP)
-    FROM patient_appointments
+      seeded.patient_code,
+      seeded.patient_name,
+      seeded.identity_key,
+      seeded.patient_type,
+      seeded.email,
+      seeded.contact,
+      seeded.sex,
+      seeded.age,
+      seeded.emergency_contact,
+      seeded.latest_status,
+      seeded.risk_level,
+      seeded.source_tags,
+      seeded.last_seen_at
+    FROM (
+      SELECT DISTINCT ON (CONCAT(LOWER(TRIM(a.patient_name)), '|', COALESCE(a.phone_number, '')))
+        COALESCE(NULLIF(TRIM(COALESCE(a.patient_id, '')), ''), CONCAT('PAT-A-', a.id)) AS patient_code,
+        a.patient_name,
+        CASE
+          WHEN NULLIF(TRIM(COALESCE(a.patient_id, '')), '') IS NOT NULL THEN LOWER(CONCAT('id:', TRIM(a.patient_id)))
+          WHEN NULLIF(TRIM(COALESCE(a.patient_email, '')), '') IS NOT NULL THEN LOWER(CONCAT('email:', TRIM(a.patient_email)))
+          WHEN NULLIF(TRIM(COALESCE(a.phone_number, '')), '') IS NOT NULL THEN LOWER(CONCAT('phone:', regexp_replace(TRIM(a.phone_number), '[^0-9]+', '', 'g')))
+          ELSE LOWER(CONCAT('name:', TRIM(a.patient_name)))
+        END AS identity_key,
+        a.patient_type,
+        NULLIF(TRIM(COALESCE(a.patient_email, '')), '') AS email,
+        NULLIF(TRIM(COALESCE(a.phone_number, '')), '') AS contact,
+        NULLIF(TRIM(COALESCE(a.patient_gender, '')), '') AS sex,
+        a.patient_age AS age,
+        NULLIF(TRIM(COALESCE(a.emergency_contact, '')), '') AS emergency_contact,
+        LOWER(COALESCE(a.status, 'pending')) AS latest_status,
+        CASE WHEN LOWER(COALESCE(a.appointment_priority, 'routine')) = 'urgent' THEN 'medium' ELSE 'low' END AS risk_level,
+        CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM cashier_payment_links p
+            WHERE p.source_module = 'appointments'
+              AND p.source_key = a.booking_id
+          ) OR EXISTS (
+            SELECT 1
+            FROM cashier_integration_events e
+            WHERE e.source_module = 'appointments'
+              AND e.source_key = a.booking_id
+          ) THEN ARRAY['appointments', 'cashier']::TEXT[]
+          ELSE ARRAY['appointments']::TEXT[]
+        END AS source_tags,
+        COALESCE(a.updated_at, a.created_at, CURRENT_TIMESTAMP) AS last_seen_at
+      FROM patient_appointments a
+      ORDER BY
+        CASE
+          WHEN NULLIF(TRIM(COALESCE(a.patient_id, '')), '') IS NOT NULL THEN LOWER(CONCAT('id:', TRIM(a.patient_id)))
+          WHEN NULLIF(TRIM(COALESCE(a.patient_email, '')), '') IS NOT NULL THEN LOWER(CONCAT('email:', TRIM(a.patient_email)))
+          WHEN NULLIF(TRIM(COALESCE(a.phone_number, '')), '') IS NOT NULL THEN LOWER(CONCAT('phone:', regexp_replace(TRIM(a.phone_number), '[^0-9]+', '', 'g')))
+          ELSE LOWER(CONCAT('name:', TRIM(a.patient_name)))
+        END,
+        COALESCE(a.updated_at, a.created_at, CURRENT_TIMESTAMP) DESC,
+        a.id DESC
+    ) AS seeded
+    ON CONFLICT (identity_key) DO UPDATE
+    SET
+      patient_code = COALESCE(NULLIF(EXCLUDED.patient_code, ''), patient_master.patient_code),
+      patient_name = COALESCE(NULLIF(EXCLUDED.patient_name, ''), patient_master.patient_name),
+      patient_type = CASE
+        WHEN EXCLUDED.patient_type IN ('student', 'teacher') THEN EXCLUDED.patient_type
+        ELSE patient_master.patient_type
+      END,
+      email = COALESCE(EXCLUDED.email, patient_master.email),
+      contact = COALESCE(EXCLUDED.contact, patient_master.contact),
+      sex = COALESCE(EXCLUDED.sex, patient_master.sex),
+      age = COALESCE(EXCLUDED.age, patient_master.age),
+      emergency_contact = COALESCE(EXCLUDED.emergency_contact, patient_master.emergency_contact),
+      latest_status = COALESCE(EXCLUDED.latest_status, patient_master.latest_status),
+      risk_level = CASE
+        WHEN EXCLUDED.risk_level = 'high' THEN 'high'
+        WHEN patient_master.risk_level = 'high' THEN 'high'
+        WHEN EXCLUDED.risk_level = 'medium' OR patient_master.risk_level = 'medium' THEN 'medium'
+        ELSE COALESCE(EXCLUDED.risk_level, patient_master.risk_level)
+      END,
+      source_tags = ARRAY(
+        SELECT DISTINCT tag
+        FROM unnest(COALESCE(patient_master.source_tags, ARRAY[]::TEXT[]) || COALESCE(EXCLUDED.source_tags, ARRAY[]::TEXT[])) AS tag
+      ),
+      last_seen_at = GREATEST(
+        COALESCE(patient_master.last_seen_at, TIMESTAMP '1970-01-01'),
+        COALESCE(EXCLUDED.last_seen_at, TIMESTAMP '1970-01-01')
+      ),
+      updated_at = CURRENT_TIMESTAMP
   `);
 
   await pool.query(`
@@ -1623,20 +1793,81 @@ async function rebuildPatientMaster(pool: Pool): Promise<void> {
       patient_code, patient_name, identity_key, patient_type, contact, sex, date_of_birth, age, emergency_contact, latest_status, risk_level, source_tags, last_seen_at
     )
     SELECT
-      COALESCE(NULLIF(TRIM(COALESCE(patient_ref, '')), ''), CONCAT('PAT-W-', id)),
-      patient_name,
-      CONCAT(LOWER(TRIM(patient_name)), '|', COALESCE(contact, '')),
-      patient_type,
-      NULLIF(TRIM(COALESCE(contact, '')), ''),
-      NULLIF(TRIM(COALESCE(sex, '')), ''),
-      date_of_birth,
-      age,
-      NULLIF(TRIM(COALESCE(emergency_contact, '')), ''),
-      LOWER(COALESCE(status, 'waiting')),
-      CASE WHEN LOWER(COALESCE(severity, 'low')) = 'emergency' THEN 'high' WHEN LOWER(COALESCE(severity, 'low')) = 'moderate' THEN 'medium' ELSE 'low' END,
-      JSON_ARRAY('walkin'),
-      COALESCE(updated_at, created_at, CURRENT_TIMESTAMP)
-    FROM patient_walkins
+      seeded.patient_code,
+      seeded.patient_name,
+      seeded.identity_key,
+      seeded.patient_type,
+      seeded.contact,
+      seeded.sex,
+      seeded.date_of_birth,
+      seeded.age,
+      seeded.emergency_contact,
+      seeded.latest_status,
+      seeded.risk_level,
+      seeded.source_tags,
+      seeded.last_seen_at
+    FROM (
+      SELECT DISTINCT ON (CONCAT(LOWER(TRIM(w.patient_name)), '|', COALESCE(w.contact, '')))
+        COALESCE(NULLIF(TRIM(COALESCE(w.patient_ref, '')), ''), CONCAT('PAT-W-', w.id)) AS patient_code,
+        w.patient_name,
+        CASE
+          WHEN NULLIF(TRIM(COALESCE(w.patient_ref, '')), '') IS NOT NULL THEN LOWER(CONCAT('id:', TRIM(w.patient_ref)))
+          WHEN NULLIF(TRIM(COALESCE(w.contact, '')), '') IS NOT NULL THEN LOWER(CONCAT('phone:', regexp_replace(TRIM(w.contact), '[^0-9]+', '', 'g')))
+          ELSE LOWER(CONCAT('name:', TRIM(w.patient_name)))
+        END AS identity_key,
+        w.patient_type,
+        NULLIF(TRIM(COALESCE(w.contact, '')), '') AS contact,
+        NULLIF(TRIM(COALESCE(w.sex, '')), '') AS sex,
+        w.date_of_birth,
+        w.age,
+        NULLIF(TRIM(COALESCE(w.emergency_contact, '')), '') AS emergency_contact,
+        LOWER(COALESCE(w.status, 'waiting')) AS latest_status,
+        CASE
+          WHEN LOWER(COALESCE(w.severity, 'low')) = 'emergency' THEN 'high'
+          WHEN LOWER(COALESCE(w.severity, 'low')) = 'moderate' THEN 'medium'
+          ELSE 'low'
+        END AS risk_level,
+        ARRAY['walkin']::TEXT[] AS source_tags,
+        COALESCE(w.updated_at, w.created_at, CURRENT_TIMESTAMP) AS last_seen_at
+      FROM patient_walkins w
+      ORDER BY
+        CASE
+          WHEN NULLIF(TRIM(COALESCE(w.patient_ref, '')), '') IS NOT NULL THEN LOWER(CONCAT('id:', TRIM(w.patient_ref)))
+          WHEN NULLIF(TRIM(COALESCE(w.contact, '')), '') IS NOT NULL THEN LOWER(CONCAT('phone:', regexp_replace(TRIM(w.contact), '[^0-9]+', '', 'g')))
+          ELSE LOWER(CONCAT('name:', TRIM(w.patient_name)))
+        END,
+        COALESCE(w.updated_at, w.created_at, CURRENT_TIMESTAMP) DESC,
+        w.id DESC
+    ) AS seeded
+    ON CONFLICT (identity_key) DO UPDATE
+    SET
+      patient_code = COALESCE(NULLIF(EXCLUDED.patient_code, ''), patient_master.patient_code),
+      patient_name = COALESCE(NULLIF(EXCLUDED.patient_name, ''), patient_master.patient_name),
+      patient_type = CASE
+        WHEN EXCLUDED.patient_type IN ('student', 'teacher') THEN EXCLUDED.patient_type
+        ELSE patient_master.patient_type
+      END,
+      contact = COALESCE(EXCLUDED.contact, patient_master.contact),
+      sex = COALESCE(EXCLUDED.sex, patient_master.sex),
+      date_of_birth = COALESCE(EXCLUDED.date_of_birth, patient_master.date_of_birth),
+      age = COALESCE(EXCLUDED.age, patient_master.age),
+      emergency_contact = COALESCE(EXCLUDED.emergency_contact, patient_master.emergency_contact),
+      latest_status = COALESCE(EXCLUDED.latest_status, patient_master.latest_status),
+      risk_level = CASE
+        WHEN EXCLUDED.risk_level = 'high' THEN 'high'
+        WHEN patient_master.risk_level = 'high' THEN 'high'
+        WHEN EXCLUDED.risk_level = 'medium' OR patient_master.risk_level = 'medium' THEN 'medium'
+        ELSE COALESCE(EXCLUDED.risk_level, patient_master.risk_level)
+      END,
+      source_tags = ARRAY(
+        SELECT DISTINCT tag
+        FROM unnest(COALESCE(patient_master.source_tags, ARRAY[]::TEXT[]) || COALESCE(EXCLUDED.source_tags, ARRAY[]::TEXT[])) AS tag
+      ),
+      last_seen_at = GREATEST(
+        COALESCE(patient_master.last_seen_at, TIMESTAMP '1970-01-01'),
+        COALESCE(EXCLUDED.last_seen_at, TIMESTAMP '1970-01-01')
+      ),
+      updated_at = CURRENT_TIMESTAMP
   `);
 
   await pool.query(`
@@ -1644,15 +1875,72 @@ async function rebuildPatientMaster(pool: Pool): Promise<void> {
       patient_code, patient_name, identity_key, patient_type, latest_status, risk_level, source_tags, last_seen_at
     )
     SELECT
-      CONCAT('PAT-C-', id),
-      patient_name,
-      CONCAT(LOWER(TRIM(patient_name)), '|'),
-      patient_type,
-      LOWER(COALESCE(status, 'intake')),
-      CASE WHEN is_emergency = 1 THEN 'high' ELSE 'low' END,
-      JSON_ARRAY('checkup'),
-      COALESCE(updated_at, created_at, CURRENT_TIMESTAMP)
-    FROM checkup_visits
+      seeded.patient_code,
+      seeded.patient_name,
+      seeded.identity_key,
+      seeded.patient_type,
+      seeded.latest_status,
+      seeded.risk_level,
+      seeded.source_tags,
+      seeded.last_seen_at
+    FROM (
+      SELECT DISTINCT ON (CONCAT(LOWER(TRIM(c.patient_name)), '|'))
+        COALESCE(
+          (
+            SELECT pm.patient_code
+            FROM patient_master pm
+            WHERE LOWER(TRIM(pm.patient_name)) = LOWER(TRIM(c.patient_name))
+            ORDER BY COALESCE(pm.last_seen_at, pm.updated_at, pm.created_at) DESC
+            LIMIT 1
+          ),
+          CONCAT('PAT-C-', c.id)
+        ) AS patient_code,
+        c.patient_name,
+        COALESCE(
+          (
+            SELECT pm.identity_key
+            FROM patient_master pm
+            WHERE LOWER(TRIM(pm.patient_name)) = LOWER(TRIM(c.patient_name))
+            ORDER BY COALESCE(pm.last_seen_at, pm.updated_at, pm.created_at) DESC
+            LIMIT 1
+          ),
+          LOWER(CONCAT('name:', TRIM(c.patient_name)))
+        ) AS identity_key,
+        c.patient_type,
+        LOWER(COALESCE(c.status, 'intake')) AS latest_status,
+        CASE WHEN c.is_emergency = 1 THEN 'high' ELSE 'low' END AS risk_level,
+        ARRAY['checkup']::TEXT[] AS source_tags,
+        COALESCE(c.updated_at, c.created_at, CURRENT_TIMESTAMP) AS last_seen_at
+      FROM checkup_visits c
+      ORDER BY
+        CONCAT(LOWER(TRIM(c.patient_name)), '|'),
+        COALESCE(c.updated_at, c.created_at, CURRENT_TIMESTAMP) DESC,
+        c.id DESC
+    ) AS seeded
+    ON CONFLICT (identity_key) DO UPDATE
+    SET
+      patient_code = COALESCE(NULLIF(EXCLUDED.patient_code, ''), patient_master.patient_code),
+      patient_name = COALESCE(NULLIF(EXCLUDED.patient_name, ''), patient_master.patient_name),
+      patient_type = CASE
+        WHEN EXCLUDED.patient_type IN ('student', 'teacher') THEN EXCLUDED.patient_type
+        ELSE patient_master.patient_type
+      END,
+      latest_status = COALESCE(EXCLUDED.latest_status, patient_master.latest_status),
+      risk_level = CASE
+        WHEN EXCLUDED.risk_level = 'high' THEN 'high'
+        WHEN patient_master.risk_level = 'high' THEN 'high'
+        WHEN EXCLUDED.risk_level = 'medium' OR patient_master.risk_level = 'medium' THEN 'medium'
+        ELSE COALESCE(EXCLUDED.risk_level, patient_master.risk_level)
+      END,
+      source_tags = ARRAY(
+        SELECT DISTINCT tag
+        FROM unnest(COALESCE(patient_master.source_tags, ARRAY[]::TEXT[]) || COALESCE(EXCLUDED.source_tags, ARRAY[]::TEXT[])) AS tag
+      ),
+      last_seen_at = GREATEST(
+        COALESCE(patient_master.last_seen_at, TIMESTAMP '1970-01-01'),
+        COALESCE(EXCLUDED.last_seen_at, TIMESTAMP '1970-01-01')
+      ),
+      updated_at = CURRENT_TIMESTAMP
   `);
 
   await pool.query(`
@@ -1660,45 +1948,149 @@ async function rebuildPatientMaster(pool: Pool): Promise<void> {
       patient_code, patient_name, identity_key, patient_type, contact, sex, date_of_birth, guardian_contact, latest_status, risk_level, source_tags, last_seen_at
     )
     SELECT
-      patient_id,
-      patient_name,
-      CONCAT(LOWER(TRIM(patient_name)), '|', COALESCE(contact_number, '')),
-      patient_type,
-      NULLIF(TRIM(COALESCE(contact_number, '')), ''),
-      NULLIF(TRIM(COALESCE(sex, '')), ''),
-      date_of_birth,
-      NULLIF(TRIM(COALESCE(guardian_contact, '')), ''),
-      'active',
-      'low',
-      JSON_ARRAY('mental'),
-      CURRENT_TIMESTAMP
-    FROM mental_health_patients
+      seeded.patient_code,
+      seeded.patient_name,
+      seeded.identity_key,
+      seeded.patient_type,
+      seeded.contact,
+      seeded.sex,
+      seeded.date_of_birth,
+      seeded.guardian_contact,
+      seeded.latest_status,
+      seeded.risk_level,
+      seeded.source_tags,
+      seeded.last_seen_at
+    FROM (
+      SELECT DISTINCT ON (CONCAT(LOWER(TRIM(m.patient_name)), '|', COALESCE(m.contact_number, '')))
+        m.patient_id AS patient_code,
+        m.patient_name,
+        CASE
+          WHEN NULLIF(TRIM(COALESCE(m.patient_id, '')), '') IS NOT NULL THEN LOWER(CONCAT('id:', TRIM(m.patient_id)))
+          WHEN NULLIF(TRIM(COALESCE(m.contact_number, '')), '') IS NOT NULL THEN LOWER(CONCAT('phone:', regexp_replace(TRIM(m.contact_number), '[^0-9]+', '', 'g')))
+          ELSE LOWER(CONCAT('name:', TRIM(m.patient_name)))
+        END AS identity_key,
+        m.patient_type,
+        NULLIF(TRIM(COALESCE(m.contact_number, '')), '') AS contact,
+        NULLIF(TRIM(COALESCE(m.sex, '')), '') AS sex,
+        m.date_of_birth,
+        NULLIF(TRIM(COALESCE(m.guardian_contact, '')), '') AS guardian_contact,
+        'active' AS latest_status,
+        'low' AS risk_level,
+        ARRAY['mental']::TEXT[] AS source_tags,
+        CURRENT_TIMESTAMP AS last_seen_at
+      FROM mental_health_patients m
+      ORDER BY
+        CASE
+          WHEN NULLIF(TRIM(COALESCE(m.patient_id, '')), '') IS NOT NULL THEN LOWER(CONCAT('id:', TRIM(m.patient_id)))
+          WHEN NULLIF(TRIM(COALESCE(m.contact_number, '')), '') IS NOT NULL THEN LOWER(CONCAT('phone:', regexp_replace(TRIM(m.contact_number), '[^0-9]+', '', 'g')))
+          ELSE LOWER(CONCAT('name:', TRIM(m.patient_name)))
+        END,
+        m.id DESC
+    ) AS seeded
+    ON CONFLICT (identity_key) DO UPDATE
+    SET
+      patient_code = COALESCE(NULLIF(EXCLUDED.patient_code, ''), patient_master.patient_code),
+      patient_name = COALESCE(NULLIF(EXCLUDED.patient_name, ''), patient_master.patient_name),
+      patient_type = CASE
+        WHEN EXCLUDED.patient_type IN ('student', 'teacher') THEN EXCLUDED.patient_type
+        ELSE patient_master.patient_type
+      END,
+      contact = COALESCE(EXCLUDED.contact, patient_master.contact),
+      sex = COALESCE(EXCLUDED.sex, patient_master.sex),
+      date_of_birth = COALESCE(EXCLUDED.date_of_birth, patient_master.date_of_birth),
+      guardian_contact = COALESCE(EXCLUDED.guardian_contact, patient_master.guardian_contact),
+      latest_status = COALESCE(EXCLUDED.latest_status, patient_master.latest_status),
+      risk_level = CASE
+        WHEN EXCLUDED.risk_level = 'high' THEN 'high'
+        WHEN patient_master.risk_level = 'high' THEN 'high'
+        WHEN EXCLUDED.risk_level = 'medium' OR patient_master.risk_level = 'medium' THEN 'medium'
+        ELSE COALESCE(EXCLUDED.risk_level, patient_master.risk_level)
+      END,
+      source_tags = ARRAY(
+        SELECT DISTINCT tag
+        FROM unnest(COALESCE(patient_master.source_tags, ARRAY[]::TEXT[]) || COALESCE(EXCLUDED.source_tags, ARRAY[]::TEXT[])) AS tag
+      ),
+      last_seen_at = GREATEST(
+        COALESCE(patient_master.last_seen_at, TIMESTAMP '1970-01-01'),
+        COALESCE(EXCLUDED.last_seen_at, TIMESTAMP '1970-01-01')
+      ),
+      updated_at = CURRENT_TIMESTAMP
   `);
 
-  const [appointmentCounts] = await pool.query<RowDataPacket[]>(`SELECT CONCAT(LOWER(TRIM(patient_name)), '|', COALESCE(phone_number, '')) AS identity_key, COUNT(*) AS total FROM patient_appointments GROUP BY 1`);
+  const [appointmentCounts] = await pool.query<RowDataPacket[]>(`
+    SELECT
+      CASE
+        WHEN NULLIF(TRIM(COALESCE(patient_id, '')), '') IS NOT NULL THEN LOWER(CONCAT('id:', TRIM(patient_id)))
+        WHEN NULLIF(TRIM(COALESCE(patient_email, '')), '') IS NOT NULL THEN LOWER(CONCAT('email:', TRIM(patient_email)))
+        WHEN NULLIF(TRIM(COALESCE(phone_number, '')), '') IS NOT NULL THEN LOWER(CONCAT('phone:', regexp_replace(TRIM(phone_number), '[^0-9]+', '', 'g')))
+        ELSE LOWER(CONCAT('name:', TRIM(patient_name)))
+      END AS identity_key,
+      COUNT(*) AS total
+    FROM patient_appointments
+    GROUP BY 1
+  `);
   for (const row of appointmentCounts) {
     await pool.query(`UPDATE patient_master SET appointment_count = ? WHERE identity_key = ?`, [Number(row.total || 0), String(row.identity_key || '')]);
   }
-  const [walkinCounts] = await pool.query<RowDataPacket[]>(`SELECT CONCAT(LOWER(TRIM(patient_name)), '|', COALESCE(contact, '')) AS identity_key, COUNT(*) AS total FROM patient_walkins GROUP BY 1`);
+  const [walkinCounts] = await pool.query<RowDataPacket[]>(`
+    SELECT
+      CASE
+        WHEN NULLIF(TRIM(COALESCE(patient_ref, '')), '') IS NOT NULL THEN LOWER(CONCAT('id:', TRIM(patient_ref)))
+        WHEN NULLIF(TRIM(COALESCE(contact, '')), '') IS NOT NULL THEN LOWER(CONCAT('phone:', regexp_replace(TRIM(contact), '[^0-9]+', '', 'g')))
+        ELSE LOWER(CONCAT('name:', TRIM(patient_name)))
+      END AS identity_key,
+      COUNT(*) AS total
+    FROM patient_walkins
+    GROUP BY 1
+  `);
   for (const row of walkinCounts) {
     await pool.query(`UPDATE patient_master SET walkin_count = ? WHERE identity_key = ?`, [Number(row.total || 0), String(row.identity_key || '')]);
   }
-  const [checkupCounts] = await pool.query<RowDataPacket[]>(`SELECT CONCAT(LOWER(TRIM(patient_name)), '|') AS identity_key, COUNT(*) AS total, MAX(CASE WHEN is_emergency = 1 THEN 1 ELSE 0 END) AS high_risk FROM checkup_visits GROUP BY 1`);
+  const [checkupCounts] = await pool.query<RowDataPacket[]>(`
+    SELECT LOWER(TRIM(patient_name)) AS patient_name_key, COUNT(*) AS total, MAX(CASE WHEN is_emergency = 1 THEN 1 ELSE 0 END) AS high_risk
+    FROM checkup_visits
+    GROUP BY 1
+  `);
   for (const row of checkupCounts) {
-    await pool.query(`UPDATE patient_master SET checkup_count = ?, risk_level = CASE WHEN ? = 1 THEN 'high' ELSE risk_level END WHERE identity_key = ?`, [Number(row.total || 0), Number(row.high_risk || 0), String(row.identity_key || '')]);
+    await pool.query(
+      `UPDATE patient_master
+       SET checkup_count = ?, risk_level = CASE WHEN ? = 1 THEN 'high' ELSE risk_level END
+       WHERE LOWER(TRIM(patient_name)) = ?`,
+      [Number(row.total || 0), Number(row.high_risk || 0), String(row.patient_name_key || '')]
+    );
   }
-  const [mentalCounts] = await pool.query<RowDataPacket[]>(`SELECT CONCAT(LOWER(TRIM(patient_name)), '|') AS identity_key, COUNT(*) AS total, MAX(CASE risk_level WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END) AS risk_rank, SUBSTRING_INDEX(GROUP_CONCAT(status ORDER BY updated_at DESC), ',', 1) AS latest_status FROM mental_health_sessions GROUP BY 1`);
+  const [mentalCounts] = await pool.query<RowDataPacket[]>(
+    `SELECT
+       CASE
+         WHEN NULLIF(TRIM(COALESCE(patient_id, '')), '') IS NOT NULL THEN LOWER(CONCAT('id:', TRIM(patient_id)))
+         ELSE LOWER(CONCAT('name:', TRIM(patient_name)))
+       END AS identity_key,
+       COUNT(*) AS total,
+       MAX(CASE risk_level WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END) AS risk_rank,
+       split_part(string_agg(status, ',' ORDER BY updated_at DESC), ',', 1) AS latest_status
+     FROM mental_health_sessions
+     GROUP BY 1`
+  );
   for (const row of mentalCounts) {
     const riskLevel = Number(row.risk_rank || 1) >= 3 ? 'high' : Number(row.risk_rank || 1) === 2 ? 'medium' : 'low';
     await pool.query(`UPDATE patient_master SET mental_count = ?, risk_level = CASE WHEN ? = 'high' OR risk_level <> 'high' THEN ? ELSE risk_level END, latest_status = COALESCE(?, latest_status) WHERE identity_key = ?`, [Number(row.total || 0), riskLevel, riskLevel, toSafeText(row.latest_status) || null, String(row.identity_key || '')]);
   }
-  const [pharmacyCounts] = await pool.query<RowDataPacket[]>(`SELECT CONCAT(LOWER(TRIM(patient_name)), '|') AS identity_key, COUNT(*) AS total FROM pharmacy_dispense_requests GROUP BY 1`);
+  const [pharmacyCounts] = await pool.query<RowDataPacket[]>(`
+    SELECT LOWER(TRIM(patient_name)) AS patient_name_key, COUNT(*) AS total
+    FROM pharmacy_dispense_requests
+    GROUP BY 1
+  `);
   for (const row of pharmacyCounts) {
-    await pool.query(`UPDATE patient_master SET pharmacy_count = ? WHERE identity_key = ?`, [Number(row.total || 0), String(row.identity_key || '')]);
+    await pool.query(
+      `UPDATE patient_master
+       SET pharmacy_count = ?
+       WHERE LOWER(TRIM(patient_name)) = ?`,
+      [Number(row.total || 0), String(row.patient_name_key || '')]
+    );
   }
 }
 
-async function resolveMysqlAdminSession(pool: Pool, req: any): Promise<RowDataPacket | null> {
+async function resolveAdminSession(pool: Pool, req: any): Promise<RowDataPacket | null> {
   const cookies = parseCookieHeader(String(req.headers?.cookie || ''));
   const sessionToken = toSafeText(cookies.admin_session);
   if (!sessionToken) return null;
@@ -1717,15 +2109,25 @@ async function resolveMysqlAdminSession(pool: Pool, req: any): Promise<RowDataPa
   return rows[0] || null;
 }
 
-export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
+export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
   return {
-    name: 'mysql-compatibility-api',
+    name: 'supabase-api',
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
-        const pool = await getPool(options);
         const url = new URL(req.url || '', 'http://localhost');
+        let pool: DbPool | null = null;
+        try {
+          pool = await getPool(options);
+        } catch (error) {
+          if (['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report'].includes(url.pathname)) {
+            writeJson(res, 500, { ok: false, message: error instanceof Error ? error.message : 'Supabase connection failed.' });
+            return;
+          }
+          next();
+          return;
+        }
 
-        if (!pool || !['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/departments/map', '/api/integrations/departments/records'].includes(url.pathname)) {
+        if (!pool || !['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report'].includes(url.pathname)) {
           next();
           return;
         }
@@ -1763,10 +2165,10 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               await pool.query(
                 `INSERT INTO doctors (doctor_name, department_name, specialization, is_active)
                  VALUES (?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE
-                   department_name = VALUES(department_name),
-                   specialization = VALUES(specialization),
-                   is_active = VALUES(is_active)`,
+                 ON CONFLICT (doctor_name) DO UPDATE SET
+                   department_name = EXCLUDED.department_name,
+                   specialization = EXCLUDED.specialization,
+                   is_active = EXCLUDED.is_active`,
                 [doctorName, departmentName, toSafeText(body.specialization) || null, body.is_active === false ? 0 : 1]
               );
               const [rows] = await pool.query<RowDataPacket[]>(
@@ -1842,7 +2244,10 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 await pool.query(
                   `INSERT INTO doctor_availability (doctor_name, department_name, day_of_week, start_time, end_time, max_appointments, is_active)
                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                   ON DUPLICATE KEY UPDATE max_appointments = VALUES(max_appointments), is_active = VALUES(is_active)`,
+                   ON CONFLICT (doctor_name, department_name, day_of_week, start_time, end_time) DO UPDATE SET
+                     max_appointments = EXCLUDED.max_appointments,
+                     is_active = EXCLUDED.is_active,
+                     updated_at = CURRENT_TIMESTAMP`,
                   [
                     toSafeText(body.doctor_name),
                     toSafeText(body.department_name),
@@ -1870,7 +2275,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 return;
               }
               if (action === 'delete') {
-                await pool.query('DELETE FROM doctor_availability WHERE id = ? LIMIT 1', [toSafeInt(body.id, 0)]);
+                await pool.query('DELETE FROM doctor_availability WHERE id = ?', [toSafeInt(body.id, 0)]);
                 writeJson(res, 200, { ok: true, data: { id: toSafeInt(body.id, 0) } });
                 return;
               }
@@ -1881,7 +2286,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
             await ensureAdminProfileTables(pool);
 
             if ((req.method || 'GET').toUpperCase() === 'GET') {
-              const session = await resolveMysqlAdminSession(pool, req);
+              const session = await resolveAdminSession(pool, req);
               writeJson(res, 200, {
                 ok: true,
                 data: {
@@ -1945,7 +2350,11 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 }
                 const sessionToken = randomBytes(32).toString('hex');
                 const sessionHash = createHash('sha256').update(sessionToken).digest('hex');
-                await pool.query(`INSERT INTO admin_sessions (session_token_hash, admin_profile_id, ip_address, user_agent, expires_at) VALUES (?, ?, ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 12 HOUR))`, [sessionHash, Number(account.id || 0), '127.0.0.1', String(req.headers['user-agent'] || '')]);
+                await pool.query(
+                  `INSERT INTO admin_sessions (session_token_hash, admin_profile_id, ip_address, user_agent, expires_at)
+                   VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP + INTERVAL '12 hours')`,
+                  [sessionHash, Number(account.id || 0), '127.0.0.1', String(req.headers['user-agent'] || '')]
+                );
                 await pool.query(`UPDATE admin_profiles SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?`, [Number(account.id || 0)]);
                 await pool.query(`INSERT INTO admin_activity_logs (username, action, raw_action, description, ip_address) VALUES (?, 'Login', 'LOGIN', 'Admin signed in.', '127.0.0.1')`, [String(account.username || '')]);
                 appendSetCookie(`admin_session=${sessionToken}; Max-Age=${60 * 60 * 12}; HttpOnly; SameSite=Lax; Path=/`);
@@ -1968,7 +2377,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               }
 
               if (action === 'create_account') {
-                const actor = await resolveMysqlAdminSession(pool, req);
+                const actor = await resolveAdminSession(pool, req);
                 if (!actor || !toBooleanFlag(actor.is_super_admin)) {
                   writeJson(res, 403, { ok: false, message: 'Only super admin can create admin accounts.' });
                   return;
@@ -1999,7 +2408,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
 
           if (url.pathname === '/api/admin-profile') {
             await ensureAdminProfileTables(pool);
-            const adminSession = await resolveMysqlAdminSession(pool, req);
+            const adminSession = await resolveAdminSession(pool, req);
             if (!adminSession) {
               writeJson(res, 401, { ok: false, message: 'Admin authentication required.' });
               return;
@@ -2085,8 +2494,8 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               data: {
                 enabled: cashierIntegrationEnabled(options),
                 syncMode: cashierSyncMode(options),
-                baseUrl: toSafeText(options.cashierBaseUrl) || '',
-                inboundPath: toSafeText(options.cashierInboundPath) || '/api/integrations/clinic-events',
+                baseUrl: cashierResolvedBaseUrl(options),
+                inboundPath: cashierResolvedInboundPath(options),
                 queue: {
                   pending: Number(queueRows[0]?.pending_total || 0),
                   sent: Number(queueRows[0]?.sent_total || 0),
@@ -2095,6 +2504,12 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 },
                 recentEvents: recentEvents.map((row) => ({
                   ...row,
+                  patient_type: inferPatientType({
+                    patientType: row.patient_type,
+                    patientName: row.patient_name,
+                    patientId: row.reference_no,
+                    concern: row.source_module
+                  }),
                   amount_due: Number(row.amount_due || 0),
                   created_at: formatDateTimeCell(row.created_at),
                   synced_at: row.synced_at == null ? null : formatDateTimeCell(row.synced_at)
@@ -2144,6 +2559,12 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               data: {
                 items: rows.map((row) => ({
                   ...row,
+                  patient_type: inferPatientType({
+                    patientType: row.patient_type,
+                    patientName: row.patient_name,
+                    patientId: row.reference_no,
+                    concern: row.source_module
+                  }),
                   amount_due: Number(row.amount_due || 0),
                   created_at: formatDateTimeCell(row.created_at),
                   updated_at: formatDateTimeCell(row.updated_at),
@@ -2159,6 +2580,18 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
             await ensureCashierIntegrationTables(pool);
             const body = await readJsonBody(req);
             const action = toSafeText(body.action).toLowerCase();
+
+            if (action === 'dispatch_pending' || action === 'acknowledge') {
+              const adminSession = await resolveAdminSession(pool, req);
+              if (!adminSession) {
+                writeJson(res, 401, { ok: false, message: 'Admin authentication required.' });
+                return;
+              }
+              if (!canManageCashierFinancials(adminSession)) {
+                writeJson(res, 403, { ok: false, message: 'Only cashier or finance-authorized admins can update cashier sync actions.' });
+                return;
+              }
+            }
 
             if (action === 'enqueue') {
               const sourceModule = toSafeText(body.source_module);
@@ -2230,11 +2663,53 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
 
           if (url.pathname === '/api/integrations/cashier/payment-status' && (req.method || '').toUpperCase() === 'POST') {
             await ensureCashierIntegrationTables(pool);
+            const adminSession = await resolveAdminSession(pool, req);
+            if (!adminSession) {
+              writeJson(res, 401, { ok: false, message: 'Admin authentication required.' });
+              return;
+            }
+            if (!canManageCashierFinancials(adminSession)) {
+              writeJson(res, 403, { ok: false, message: 'Only cashier or finance-authorized admins can edit payment records.' });
+              return;
+            }
             const body = await readJsonBody(req);
             const sourceModule = toSafeText(body.source_module);
             const sourceKey = toSafeText(body.source_key);
             if (!sourceModule || !sourceKey) {
               writeJson(res, 422, { ok: false, message: 'source_module and source_key are required.' });
+              return;
+            }
+            const amountDue = toSafeMoney(body.amount_due, 0);
+            const amountPaid = toSafeMoney(body.amount_paid, 0);
+            const normalizedPaymentStatus = normalizePaymentStatus(body.payment_status);
+            const derivedBalanceDue = Math.max(0, Number((amountDue - amountPaid).toFixed(2)));
+
+            if (amountDue < 0 || amountPaid < 0) {
+              writeJson(res, 422, { ok: false, message: 'Amount due and amount paid cannot be negative.' });
+              return;
+            }
+            if (amountPaid > amountDue && amountDue > 0) {
+              writeJson(res, 422, { ok: false, message: 'Amount paid cannot be greater than amount due.' });
+              return;
+            }
+            if (normalizedPaymentStatus === 'unpaid' && amountPaid > 0) {
+              writeJson(res, 422, { ok: false, message: 'Use partial or paid when payment has already been collected.' });
+              return;
+            }
+            if (normalizedPaymentStatus === 'partial' && (amountPaid <= 0 || derivedBalanceDue <= 0)) {
+              writeJson(res, 422, { ok: false, message: 'Partial payments require collected amount greater than zero and a remaining balance.' });
+              return;
+            }
+            if (normalizedPaymentStatus === 'paid' && derivedBalanceDue > 0) {
+              writeJson(res, 422, { ok: false, message: 'Paid status requires the balance due to be zero.' });
+              return;
+            }
+            if (normalizedPaymentStatus === 'paid' && amountDue > 0 && amountPaid < amountDue) {
+              writeJson(res, 422, { ok: false, message: 'Paid status requires amount paid to match amount due.' });
+              return;
+            }
+            if (normalizedPaymentStatus === 'paid' && !toSafeText(body.official_receipt)) {
+              writeJson(res, 422, { ok: false, message: 'Official receipt is required before marking a payment as paid.' });
               return;
             }
               await upsertCashierPaymentLink(pool, {
@@ -2244,12 +2719,12 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 cashierBillingId: toSafeInt(body.cashier_billing_id, 0) || null,
               invoiceNumber: toSafeText(body.invoice_number) || null,
               officialReceipt: toSafeText(body.official_receipt) || null,
-              amountDue: toSafeMoney(body.amount_due, 0),
-              amountPaid: toSafeMoney(body.amount_paid, 0),
-              balanceDue: toSafeMoney(body.balance_due, 0),
-              paymentStatus: toSafeText(body.payment_status) || 'unpaid',
+              amountDue,
+              amountPaid,
+              balanceDue: derivedBalanceDue,
+              paymentStatus: normalizedPaymentStatus,
               latestPaymentMethod: toSafeText(body.latest_payment_method || body.payment_method) || null,
-                paidAt: toSafeText(body.paid_at) || null,
+                paidAt: normalizedPaymentStatus === 'paid' ? (toSafeText(body.paid_at) || new Date().toISOString()) : toSafeText(body.paid_at) || null,
                 metadata: parseJsonRecord(body.metadata)
               });
               if (sourceModule === 'appointments') {
@@ -2260,15 +2735,17 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                  SET payment_status = ?, sync_status = ?, last_error = NULL, updated_at = CURRENT_TIMESTAMP
                WHERE source_module = ? AND source_key = ?`,
               [
-                normalizePaymentStatus(body.payment_status),
-                normalizePaymentStatus(body.payment_status) === 'paid' ? 'acknowledged' : 'sent',
+                normalizedPaymentStatus,
+                normalizedPaymentStatus === 'paid' ? 'acknowledged' : 'sent',
                 sourceModule,
                 sourceKey
               ]
             );
-            await insertModuleActivity(pool, 'cashier_integration', 'Cashier Payment Status Updated', `Received cashier payment status for ${sourceModule} ${sourceKey}.`, toSafeText(body.actor) || 'Cashier System', 'cashier_payment', sourceKey, {
-              paymentStatus: normalizePaymentStatus(body.payment_status),
-              amountPaid: toSafeMoney(body.amount_paid, 0),
+            await insertModuleActivity(pool, 'cashier_integration', 'Cashier Payment Status Updated', `Received cashier payment status for ${sourceModule} ${sourceKey}.`, toSafeText(body.actor) || toSafeText(adminSession.full_name) || toSafeText(adminSession.username) || 'Cashier', 'cashier_payment', sourceKey, {
+              paymentStatus: normalizedPaymentStatus,
+              amountPaid,
+              amountDue,
+              balanceDue: derivedBalanceDue,
               officialReceipt: toSafeText(body.official_receipt) || null
             });
             writeJson(res, 200, { ok: true, message: 'Cashier payment status recorded.' });
@@ -2283,6 +2760,65 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               }
             });
             return;
+          }
+
+          if (url.pathname === '/api/integrations/departments/report') {
+            await ensureDepartmentClearanceTables(pool);
+            if ((req.method || 'GET').toUpperCase() === 'GET') {
+              const departmentKey = toSafeText(url.searchParams.get('department')).toLowerCase();
+              if (!departmentKey) {
+                writeJson(res, 422, { ok: false, message: 'department is required.' });
+                return;
+              }
+              const report = await buildDepartmentReport(pool, departmentKey);
+              writeJson(res, 200, { ok: true, data: report });
+              return;
+            }
+
+            if ((req.method || '').toUpperCase() === 'POST') {
+              const body = await readJsonBody(req);
+              const action = toSafeText(body.action).toLowerCase();
+              const departmentKey = toSafeText(body.department_key).toLowerCase();
+              const targetKey = toSafeText(body.target_key).toLowerCase();
+              const reportType = toSafeText(body.report_type).toLowerCase();
+              const departmentDef = departmentIntegrationMap().find((item) => item.key === departmentKey);
+              if (action !== 'dispatch_report' || !departmentDef || !targetKey || !reportType) {
+                writeJson(res, 422, { ok: false, message: 'action=dispatch_report, department_key, target_key, and report_type are required.' });
+                return;
+              }
+
+              const report = await buildDepartmentReport(pool, departmentKey);
+              const reportKey = `${departmentKey}:${targetKey}:${new Date().toISOString()}`;
+              const detail = `${departmentDef.name} sent ${reportType.replace(/_/g, ' ')} to ${targetKey}.`;
+              await insertModuleActivity(
+                pool,
+                'department_reports',
+                'Report Dispatched',
+                detail,
+                toSafeText(body.actor) || departmentDef.name,
+                'department_report',
+                reportKey,
+                {
+                  department_key: departmentKey,
+                  target_key: targetKey,
+                  report_type: reportType,
+                  report_name: toSafeText(body.report_name) || reportType,
+                  summary: parseJsonRecord(body.summary),
+                  report
+                }
+              );
+              writeJson(res, 200, {
+                ok: true,
+                message: 'Department report dispatched.',
+                data: {
+                  department_key: departmentKey,
+                  target_key: targetKey,
+                  report_type: reportType,
+                  entity_key: reportKey
+                }
+              });
+              return;
+            }
           }
 
           if (url.pathname === '/api/integrations/departments/records') {
@@ -2325,6 +2861,11 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 data: {
                   items: rows.map((row) => ({
                     ...row,
+                    patient_type: inferPatientType({
+                      patientType: row.patient_type,
+                      patientName: row.patient_name,
+                      patientId: row.patient_id || row.patient_code || row.external_reference
+                    }),
                     metadata: parseJsonRecord(row.metadata),
                     created_at: formatDateTimeCell(row.created_at),
                     updated_at: formatDateTimeCell(row.updated_at),
@@ -2360,20 +2901,20 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                     department_key, department_name, stage_order, status, remarks, approver_name,
                     approver_role, external_reference, requested_by, metadata
                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                  ON DUPLICATE KEY UPDATE
-                    patient_id = VALUES(patient_id),
-                    patient_code = VALUES(patient_code),
-                    patient_name = VALUES(patient_name),
-                    patient_type = VALUES(patient_type),
-                    department_key = VALUES(department_key),
-                    department_name = VALUES(department_name),
-                    stage_order = VALUES(stage_order),
-                    remarks = VALUES(remarks),
-                    approver_name = VALUES(approver_name),
-                    approver_role = VALUES(approver_role),
-                    external_reference = VALUES(external_reference),
-                    requested_by = VALUES(requested_by),
-                    metadata = VALUES(metadata),
+                  ON CONFLICT (clearance_reference) DO UPDATE SET
+                    patient_id = EXCLUDED.patient_id,
+                    patient_code = EXCLUDED.patient_code,
+                    patient_name = EXCLUDED.patient_name,
+                    patient_type = EXCLUDED.patient_type,
+                    department_key = EXCLUDED.department_key,
+                    department_name = EXCLUDED.department_name,
+                    stage_order = EXCLUDED.stage_order,
+                    remarks = EXCLUDED.remarks,
+                    approver_name = EXCLUDED.approver_name,
+                    approver_role = EXCLUDED.approver_role,
+                    external_reference = EXCLUDED.external_reference,
+                    requested_by = EXCLUDED.requested_by,
+                    metadata = EXCLUDED.metadata,
                     updated_at = CURRENT_TIMESTAMP`,
                   [
                     clearanceReference,
@@ -2399,6 +2940,17 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               }
 
               if (action === 'submit_decision') {
+                if (departmentKey === 'cashier') {
+                  const adminSession = await resolveAdminSession(pool, req);
+                  if (!adminSession) {
+                    writeJson(res, 401, { ok: false, message: 'Admin authentication required.' });
+                    return;
+                  }
+                  if (!canManageCashierFinancials(adminSession)) {
+                    writeJson(res, 403, { ok: false, message: 'Only cashier or finance-authorized admins can submit cashier clearance decisions.' });
+                    return;
+                  }
+                }
                 const clearanceReference = toSafeText(body.clearance_reference);
                 const nextStatus = toSafeText(body.status).toLowerCase();
                 if (!clearanceReference || !['approved', 'rejected', 'hold', 'pending'].includes(nextStatus)) {
@@ -2436,11 +2988,11 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                       clearance_reference, patient_id, patient_code, patient_name, patient_type,
                       department_key, department_name, stage_order, status, requested_by, metadata
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-                    ON DUPLICATE KEY UPDATE
-                      patient_name = VALUES(patient_name),
-                      patient_type = VALUES(patient_type),
-                      requested_by = VALUES(requested_by),
-                      metadata = VALUES(metadata),
+                    ON CONFLICT (clearance_reference) DO UPDATE SET
+                      patient_name = EXCLUDED.patient_name,
+                      patient_type = EXCLUDED.patient_type,
+                      requested_by = EXCLUDED.requested_by,
+                      metadata = EXCLUDED.metadata,
                       updated_at = CURRENT_TIMESTAMP`,
                     [
                       clearanceReference,
@@ -2562,9 +3114,11 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
             await ensureMentalHealthTables(pool);
             await ensurePharmacyInventoryTables(pool);
             await ensurePatientMasterTables(pool);
+            await ensureDepartmentClearanceTables(pool);
+            await ensureCashierIntegrationTables(pool);
 
-            const requestedFrom = toMysqlDate(url.searchParams.get('from')) || '';
-            const requestedTo = toMysqlDate(url.searchParams.get('to')) || '';
+            const requestedFrom = toSqlDate(url.searchParams.get('from')) || '';
+            const requestedTo = toSqlDate(url.searchParams.get('to')) || '';
             const today = new Date();
             const defaultTo = today.toISOString().slice(0, 10);
             const defaultFromDate = new Date(today);
@@ -2588,36 +3142,36 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               `SELECT COUNT(*) AS total,
                       SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'emergency' OR LOWER(COALESCE(severity, '')) = 'emergency' THEN 1 ELSE 0 END) AS emergency
                FROM patient_walkins
-               WHERE DATE(COALESCE(checkin_time, intake_time, created_at)) BETWEEN ? AND ?`,
+               WHERE COALESCE(checkin_time, intake_time, created_at)::date BETWEEN ? AND ?`,
               [fromDate, toDate]
             );
             const [checkupRows] = await pool.query<RowDataPacket[]>(
               `SELECT COUNT(*) AS total,
                       SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'in_consultation' THEN 1 ELSE 0 END) AS in_consultation
                FROM checkup_visits
-               WHERE DATE(created_at) BETWEEN ? AND ?`,
+               WHERE created_at::date BETWEEN ? AND ?`,
               [fromDate, toDate]
             );
             const [mentalRows] = await pool.query<RowDataPacket[]>(
               `SELECT COUNT(*) AS total,
                       SUM(CASE WHEN LOWER(COALESCE(risk_level, '')) = 'high' OR LOWER(COALESCE(status, '')) IN ('at_risk', 'escalated') THEN 1 ELSE 0 END) AS at_risk
                FROM mental_health_sessions
-               WHERE DATE(created_at) BETWEEN ? AND ?`,
+               WHERE created_at::date BETWEEN ? AND ?`,
               [fromDate, toDate]
             );
             const [pharmacyRows] = await pool.query<RowDataPacket[]>(
               `SELECT COUNT(*) AS total
                FROM pharmacy_dispense_requests
-               WHERE DATE(requested_at) BETWEEN ? AND ?`,
+               WHERE requested_at::date BETWEEN ? AND ?`,
               [fromDate, toDate]
             );
 
             const trendQueries: Array<[string, string, 'appointments' | 'walkin' | 'checkup' | 'mental' | 'pharmacy']> = [
-              [`SELECT DATE_FORMAT(appointment_date, '%Y-%m-%d') AS day, COUNT(*) AS total FROM patient_appointments WHERE appointment_date BETWEEN ? AND ? GROUP BY DATE_FORMAT(appointment_date, '%Y-%m-%d')`, 'appointments', 'appointments'],
-              [`SELECT DATE_FORMAT(DATE(COALESCE(checkin_time, intake_time, created_at)), '%Y-%m-%d') AS day, COUNT(*) AS total FROM patient_walkins WHERE DATE(COALESCE(checkin_time, intake_time, created_at)) BETWEEN ? AND ? GROUP BY DATE_FORMAT(DATE(COALESCE(checkin_time, intake_time, created_at)), '%Y-%m-%d')`, 'walkin', 'walkin'],
-              [`SELECT DATE_FORMAT(DATE(created_at), '%Y-%m-%d') AS day, COUNT(*) AS total FROM checkup_visits WHERE DATE(created_at) BETWEEN ? AND ? GROUP BY DATE_FORMAT(DATE(created_at), '%Y-%m-%d')`, 'checkup', 'checkup'],
-              [`SELECT DATE_FORMAT(DATE(created_at), '%Y-%m-%d') AS day, COUNT(*) AS total FROM mental_health_sessions WHERE DATE(created_at) BETWEEN ? AND ? GROUP BY DATE_FORMAT(DATE(created_at), '%Y-%m-%d')`, 'mental', 'mental'],
-              [`SELECT DATE_FORMAT(DATE(requested_at), '%Y-%m-%d') AS day, COUNT(*) AS total FROM pharmacy_dispense_requests WHERE DATE(requested_at) BETWEEN ? AND ? GROUP BY DATE_FORMAT(DATE(requested_at), '%Y-%m-%d')`, 'pharmacy', 'pharmacy']
+              [`SELECT to_char(appointment_date, 'YYYY-MM-DD') AS day, COUNT(*) AS total FROM patient_appointments WHERE appointment_date BETWEEN ? AND ? GROUP BY to_char(appointment_date, 'YYYY-MM-DD')`, 'appointments', 'appointments'],
+              [`SELECT to_char(COALESCE(checkin_time, intake_time, created_at)::date, 'YYYY-MM-DD') AS day, COUNT(*) AS total FROM patient_walkins WHERE COALESCE(checkin_time, intake_time, created_at)::date BETWEEN ? AND ? GROUP BY to_char(COALESCE(checkin_time, intake_time, created_at)::date, 'YYYY-MM-DD')`, 'walkin', 'walkin'],
+              [`SELECT to_char(created_at::date, 'YYYY-MM-DD') AS day, COUNT(*) AS total FROM checkup_visits WHERE created_at::date BETWEEN ? AND ? GROUP BY to_char(created_at::date, 'YYYY-MM-DD')`, 'checkup', 'checkup'],
+              [`SELECT to_char(created_at::date, 'YYYY-MM-DD') AS day, COUNT(*) AS total FROM mental_health_sessions WHERE created_at::date BETWEEN ? AND ? GROUP BY to_char(created_at::date, 'YYYY-MM-DD')`, 'mental', 'mental'],
+              [`SELECT to_char(requested_at::date, 'YYYY-MM-DD') AS day, COUNT(*) AS total FROM pharmacy_dispense_requests WHERE requested_at::date BETWEEN ? AND ? GROUP BY to_char(requested_at::date, 'YYYY-MM-DD')`, 'pharmacy', 'pharmacy']
             ];
 
             for (const [query, , metricKey] of trendQueries) {
@@ -2634,10 +3188,13 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                ORDER BY created_at DESC
                LIMIT 20`
             );
+            const pmedPackage = await buildPmedRequiredReportsPackage(pool);
+            const pmedRequestNotifications = await buildClinicPmedRequestNotifications(pool);
 
             writeJson(res, 200, {
               ok: true,
               data: {
+                generatedAt: new Date().toISOString(),
                 window: { from: fromDate, to: toDate },
                 kpis: {
                   totalPatients: Number(patientTotalsRows[0]?.total_patients || 0),
@@ -2662,7 +3219,97 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                   detail: String(row.detail || ''),
                   actor: String(row.actor || ''),
                   created_at: formatDateTimeCell(row.created_at)
-                }))
+                })),
+                pmedPackage,
+                pmedRequestNotifications
+              }
+            });
+            return;
+          }
+
+          if (url.pathname === '/api/reports' && (req.method || '').toUpperCase() === 'POST') {
+            await ensureModuleActivityLogsTable(pool);
+            await ensureDepartmentClearanceTables(pool);
+            await ensureCashierIntegrationTables(pool);
+            const body = await readJsonBody(req);
+            const action = toSafeText(body.action).toLowerCase();
+
+            if (action !== 'send_to_pmed') {
+              writeJson(res, 422, { ok: false, message: 'Unsupported reports action.' });
+              return;
+            }
+
+            const pmedPackage = await buildPmedRequiredReportsPackage(pool);
+            const dispatchedAt = new Date().toISOString();
+            const reportKey = `reports:pmed:${dispatchedAt}`;
+            const detail = `Clinic reports sent ${Number((pmedPackage.summary as Record<string, unknown>)?.section_count || 0)} PMED-required sections.`;
+            const actor = toSafeText(body.actor) || 'Reports Admin';
+            await insertModuleActivity(
+              pool,
+              'department_reports',
+              'Report Sent to PMED',
+              detail,
+              actor,
+              'department_report',
+              reportKey,
+              {
+                department_key: 'reports',
+                source_department: 'clinic',
+                source_department_name: 'Clinic',
+                target_key: 'pmed',
+                target_department: 'pmed',
+                stage: 'reporting',
+                report_type: 'pmed_required_reports',
+                report_name: 'Clinic PMED Required Reports',
+                export_format: 'JSON',
+                delivery_status: 'Received',
+                dispatched_at: dispatchedAt,
+                summary: pmedPackage.summary,
+                pmed_sections: pmedPackage.sections
+              }
+            );
+            await insertModuleActivity(
+              pool,
+              'reports',
+              'PMED Report Package Sent',
+              detail,
+              actor,
+              'report_dispatch',
+              reportKey,
+              {
+                target_key: 'pmed',
+                report_type: 'pmed_required_reports',
+                dispatched_at: dispatchedAt
+              }
+            );
+            await insertModuleActivity(
+              pool,
+              'pmed',
+              'DEPARTMENT_REPORT_RECEIVED',
+              'Clinic PMED required report package arrived in the PMED reporting inbox.',
+              actor,
+              'report',
+              reportKey,
+              {
+                source_department: 'clinic',
+                source_department_name: 'Clinic',
+                target_department: 'pmed',
+                report_type: 'pmed_required_reports',
+                report_name: 'Clinic PMED Required Reports',
+                export_format: 'JSON',
+                delivery_status: 'Received',
+                dispatched_at: dispatchedAt,
+                summary: pmedPackage.summary,
+                pmed_sections: pmedPackage.sections
+              }
+            );
+
+            writeJson(res, 200, {
+              ok: true,
+              message: 'Required reports sent to PMED.',
+              data: {
+                reportKey,
+                package: await buildPmedRequiredReportsPackage(pool)
               }
             });
             return;
@@ -2676,20 +3323,20 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               `SELECT
                  (SELECT COUNT(*) FROM patient_master) AS total_patients,
                  (SELECT COUNT(*) FROM patient_appointments) AS total_appointments,
-                 (SELECT COUNT(*) FROM patient_appointments WHERE appointment_date = CURDATE()) AS today_appointments,
+                 (SELECT COUNT(*) FROM patient_appointments WHERE appointment_date = CURRENT_DATE) AS today_appointments,
                  (SELECT COUNT(*) FROM patient_appointments WHERE LOWER(COALESCE(status, '')) IN ('pending', 'new', 'awaiting')) AS pending_appointments,
-                 (SELECT COUNT(*) FROM patient_appointments WHERE LOWER(COALESCE(status, '')) = 'completed' AND DATE(updated_at) = CURDATE()) AS completed_today,
-                 (SELECT COUNT(*) FROM patient_master WHERE created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')) AS new_patients_month`
+                 (SELECT COUNT(*) FROM patient_appointments WHERE LOWER(COALESCE(status, '')) = 'completed' AND updated_at::date = CURRENT_DATE) AS completed_today,
+                 (SELECT COUNT(*) FROM patient_master WHERE created_at >= date_trunc('month', CURRENT_DATE)::date) AS new_patients_month`
             );
             const summary = summaryRows[0] || {};
 
             const monthSeries = buildRecentMonthSeries(6);
             const monthCounts = new Map(monthSeries.map((item) => [item.key, 0]));
             const [trendRows] = await pool.query<RowDataPacket[]>(
-              `SELECT DATE_FORMAT(appointment_date, '%b') AS label, LOWER(DATE_FORMAT(appointment_date, '%b')) AS month_key, COUNT(*) AS total
+              `SELECT TRIM(to_char(appointment_date, 'Mon')) AS label, LOWER(TRIM(to_char(appointment_date, 'Mon'))) AS month_key, COUNT(*) AS total
                FROM patient_appointments
                WHERE appointment_date >= ? AND appointment_date < ?
-               GROUP BY DATE_FORMAT(appointment_date, '%Y-%m'), DATE_FORMAT(appointment_date, '%b')
+               GROUP BY to_char(appointment_date, 'YYYY-MM'), TRIM(to_char(appointment_date, 'Mon'))
                ORDER BY MIN(appointment_date)`,
               [monthSeries[0]?.start || currentDateString(), monthSeries[monthSeries.length - 1]?.end || currentDateString()]
             );
@@ -2713,7 +3360,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
             const [upcomingRows] = await pool.query<RowDataPacket[]>(
               `SELECT booking_id, patient_name, doctor_name, department_name, appointment_date, preferred_time, status
                FROM patient_appointments
-               WHERE appointment_date >= CURDATE()
+               WHERE appointment_date >= CURRENT_DATE
                ORDER BY appointment_date ASC, COALESCE(preferred_time, '99:99') ASC
                LIMIT 8`
             );
@@ -2846,8 +3493,8 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                     toSafeText(body.patient_email) || null,
                     body.age ?? null,
                     toSafeText(body.concern) || null,
-                    toMysqlDateTime(body.intake_time),
-                    toMysqlDateTime(body.booked_time),
+                    toSqlDateTime(body.intake_time),
+                    toSqlDateTime(body.booked_time),
                     toSafeText(body.status || 'Pending') || 'Pending',
                     toSafeText(body.assigned_to || 'Unassigned') || 'Unassigned'
                   ]
@@ -2883,8 +3530,8 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                     toSafeText(body.patient_email) || null,
                     body.age ?? null,
                     toSafeText(body.concern) || null,
-                    toMysqlDateTime(body.intake_time),
-                    toMysqlDateTime(body.booked_time),
+                    toSqlDateTime(body.intake_time),
+                    toSqlDateTime(body.booked_time),
                     toSafeText(body.status) || null,
                     toSafeText(body.assigned_to) || null,
                     id
@@ -3054,13 +3701,13 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                     inferPatientType({ patientType: body.patient_type, patientName, patientId: body.patient_ref, age: body.age, concern: body.chief_complaint }),
                     body.age ?? null,
                     toSafeText(body.sex) || null,
-                    toMysqlDate(body.date_of_birth),
+                    toSqlDate(body.date_of_birth),
                     toSafeText(body.contact) || null,
                     toSafeText(body.address) || null,
                     toSafeText(body.emergency_contact) || null,
                     toSafeText(body.patient_ref) || null,
                     toSafeText(body.visit_department) || null,
-                    toMysqlDateTime(body.checkin_time),
+                    toSqlDateTime(body.checkin_time),
                     body.pain_scale ?? null,
                     body.temperature_c ?? null,
                     toSafeText(body.blood_pressure) || null,
@@ -3068,7 +3715,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                     body.weight_kg ?? null,
                     toSafeText(body.chief_complaint) || null,
                     toSafeText(body.severity || 'Low') || 'Low',
-                    toMysqlDateTime(body.checkin_time),
+                    toSqlDateTime(body.checkin_time),
                     toSafeText(body.assigned_doctor || 'Nurse Triage') || 'Nurse Triage'
                   ]
                 );
@@ -3259,7 +3906,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 const notes = toSafeText(body.clinical_notes);
                 if (!diagnosis || !notes) return fail('diagnosis and clinical_notes are required.');
                 if (!['in_consultation', 'lab_requested'].includes(currentStatus)) return fail('Consultation save is allowed only during consultation/lab stage.');
-                await pool.query(`UPDATE checkup_visits SET diagnosis = ?, clinical_notes = ?, follow_up_date = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [diagnosis, notes, toMysqlDate(body.follow_up_date), id]);
+                await pool.query(`UPDATE checkup_visits SET diagnosis = ?, clinical_notes = ?, follow_up_date = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [diagnosis, notes, toSqlDate(body.follow_up_date), id]);
               } else if (action === 'request_lab') {
                 if (!['in_consultation', 'doctor_assigned'].includes(currentStatus)) return fail('Lab can only be requested during doctor consultation flow.');
                 await pool.query(`UPDATE checkup_visits SET status = 'lab_requested', lab_requested = 1, lab_result_ready = 0, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [id]);
@@ -3323,8 +3970,8 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               const category = toSafeText(url.searchParams.get('category')).toLowerCase();
               const priority = toSafeText(url.searchParams.get('priority')).toLowerCase();
               const doctor = toSafeText(url.searchParams.get('doctor')).toLowerCase();
-              const fromDate = toMysqlDate(url.searchParams.get('fromDate'));
-              const toDate = toMysqlDate(url.searchParams.get('toDate'));
+              const fromDate = toSqlDate(url.searchParams.get('fromDate'));
+              const toDate = toSqlDate(url.searchParams.get('toDate'));
               const where: string[] = [];
               const params: unknown[] = [];
               if (search) {
@@ -3350,11 +3997,11 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 params.push(doctor);
               }
               if (fromDate) {
-                where.push('DATE(requested_at) >= ?');
+                where.push('requested_at::date >= ?');
                 params.push(fromDate);
               }
               if (toDate) {
-                where.push('DATE(requested_at) <= ?');
+                where.push('requested_at::date <= ?');
                 params.push(toDate);
               }
               const [rows] = await pool.query<RowDataPacket[]>(
@@ -3409,7 +4056,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                     JSON.stringify(tests),
                     toSafeText(body.specimen_type) || 'Whole Blood',
                     toSafeText(body.sample_source) || 'Blood',
-                    toMysqlDateTime(body.collection_date_time),
+                    toSqlDateTime(body.collection_date_time),
                     toSafeText(body.clinical_diagnosis) || null,
                     toSafeText(body.lab_instructions) || null,
                     toSafeText(body.insurance_reference) || null,
@@ -3460,7 +4107,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                        processing_started_at = COALESCE(?, CURRENT_TIMESTAMP), specimen_type = COALESCE(NULLIF(?, ''), specimen_type), sample_source = COALESCE(NULLIF(?, ''), sample_source),
                        collection_date_time = COALESCE(?, collection_date_time), updated_at = CURRENT_TIMESTAMP
                    WHERE request_id = ?`,
-                  [staff, toBooleanFlag(body.sample_collected) ? 1 : 0, toBooleanFlag(body.sample_collected) ? 1 : 0, toMysqlDateTime(body.sample_collected_at), toMysqlDateTime(body.processing_started_at), toSafeText(body.specimen_type), toSafeText(body.sample_source), toMysqlDateTime(body.collection_date_time), requestId]
+                  [staff, toBooleanFlag(body.sample_collected) ? 1 : 0, toBooleanFlag(body.sample_collected) ? 1 : 0, toSqlDateTime(body.sample_collected_at), toSqlDateTime(body.processing_started_at), toSafeText(body.specimen_type), toSafeText(body.sample_source), toSqlDateTime(body.collection_date_time), requestId]
                 );
                 const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
                 await saveActivity(requestId, 'Processing Started', 'Sample collected and processing started.', staff);
@@ -3477,7 +4124,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                        result_reference_range = COALESCE(NULLIF(?, ''), result_reference_range), verified_by = CASE WHEN ? = 'Result Ready' THEN COALESCE(NULLIF(?, ''), verified_by, assigned_lab_staff) ELSE verified_by END,
                        verified_at = CASE WHEN ? = 'Result Ready' THEN COALESCE(?, CURRENT_TIMESTAMP) ELSE verified_at END, updated_at = CURRENT_TIMESTAMP
                    WHERE request_id = ?`,
-                  [finalize ? 'Result Ready' : 'In Progress', toSafeText(body.attachment_name), JSON.stringify(parseJsonRecord(body.encoded_values)), finalize ? 'Result Ready' : 'In Progress', toMysqlDateTime(body.result_encoded_at), toSafeText(body.result_reference_range), finalize ? 'Result Ready' : 'In Progress', toSafeText(body.verified_by), finalize ? 'Result Ready' : 'In Progress', toMysqlDateTime(body.verified_at), requestId]
+                  [finalize ? 'Result Ready' : 'In Progress', toSafeText(body.attachment_name), JSON.stringify(parseJsonRecord(body.encoded_values)), finalize ? 'Result Ready' : 'In Progress', toSqlDateTime(body.result_encoded_at), toSafeText(body.result_reference_range), finalize ? 'Result Ready' : 'In Progress', toSafeText(body.verified_by), finalize ? 'Result Ready' : 'In Progress', toSqlDateTime(body.verified_at), requestId]
                 );
                 const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
                 await saveActivity(requestId, finalize ? 'Result Finalized' : 'Draft Saved', summary, toSafeText(existing.assigned_lab_staff) || 'Lab Staff');
@@ -3490,7 +4137,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                   writeJson(res, 422, { ok: false, message: 'Only Result Ready requests can be released.' });
                   return;
                 }
-                await pool.query(`UPDATE laboratory_requests SET status = 'Completed', released_at = COALESCE(?, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE request_id = ?`, [toMysqlDateTime(body.released_at), requestId]);
+                await pool.query(`UPDATE laboratory_requests SET status = 'Completed', released_at = COALESCE(?, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE request_id = ?`, [toSqlDateTime(body.released_at), requestId]);
                 const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
                 await saveActivity(requestId, 'Report Released', 'Lab report released to doctor/check-up.', toSafeText(body.released_by) || 'Lab Staff');
                 await queueCashierIntegrationEvent(pool, {
@@ -3565,7 +4212,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 const sku = toSafeText(body.sku);
                 const medicineName = toSafeText(body.medicine_name);
                 const batchLotNo = toSafeText(body.batch_lot_no);
-                const expiryDate = toMysqlDate(body.expiry_date);
+                const expiryDate = toSqlDate(body.expiry_date);
                 if (!sku || !medicineName || !batchLotNo || !expiryDate) {
                   writeJson(res, 422, { ok: false, message: 'sku, medicine_name, batch_lot_no, and expiry_date are required.' });
                   return;
@@ -3579,7 +4226,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 await pool.query(
                   `INSERT INTO pharmacy_medicines (medicine_code, sku, medicine_name, brand_name, generic_name, category, medicine_type, dosage_strength, unit_of_measure, supplier_name, purchase_cost, selling_price, batch_lot_no, manufacturing_date, expiry_date, storage_requirements, reorder_level, low_stock_threshold, stock_capacity, stock_on_hand, stock_location, barcode)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                  [`MED-${Math.floor(10000 + Math.random() * 89999)}`, sku, medicineName, toSafeText(body.brand_name) || null, toSafeText(body.generic_name) || null, toSafeText(body.category) || 'Tablet', toSafeText(body.medicine_type) || 'General', toSafeText(body.dosage_strength) || null, toSafeText(body.unit_of_measure) || 'unit', toSafeText(body.supplier_name) || null, toSafeMoney(body.purchase_cost, 0), toSafeMoney(body.selling_price, 0), batchLotNo, toMysqlDate(body.manufacturing_date), expiryDate, toSafeText(body.storage_requirements) || null, Math.max(0, toSafeInt(body.reorder_level, 20)), Math.max(0, toSafeInt(body.low_stock_threshold, 20)), Math.max(0, toSafeInt(body.stock_capacity, 100)), initialStock, toSafeText(body.stock_location) || null, toSafeText(body.barcode) || null]
+                  [`MED-${Math.floor(10000 + Math.random() * 89999)}`, sku, medicineName, toSafeText(body.brand_name) || null, toSafeText(body.generic_name) || null, toSafeText(body.category) || 'Tablet', toSafeText(body.medicine_type) || 'General', toSafeText(body.dosage_strength) || null, toSafeText(body.unit_of_measure) || 'unit', toSafeText(body.supplier_name) || null, toSafeMoney(body.purchase_cost, 0), toSafeMoney(body.selling_price, 0), batchLotNo, toSqlDate(body.manufacturing_date), expiryDate, toSafeText(body.storage_requirements) || null, Math.max(0, toSafeInt(body.reorder_level, 20)), Math.max(0, toSafeInt(body.low_stock_threshold, 20)), Math.max(0, toSafeInt(body.stock_capacity, 100)), initialStock, toSafeText(body.stock_location) || null, toSafeText(body.barcode) || null]
                 );
                 const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM pharmacy_medicines WHERE sku = ? LIMIT 1`, [sku]);
                 const created = rows[0];
@@ -3595,7 +4242,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               }
 
               if (action === 'update_medicine') {
-                await pool.query(`UPDATE pharmacy_medicines SET category = COALESCE(?, category), medicine_type = COALESCE(?, medicine_type), supplier_name = COALESCE(?, supplier_name), dosage_strength = COALESCE(?, dosage_strength), unit_of_measure = COALESCE(?, unit_of_measure), stock_capacity = COALESCE(?, stock_capacity), low_stock_threshold = COALESCE(?, low_stock_threshold), reorder_level = COALESCE(?, reorder_level), expiry_date = COALESCE(?, expiry_date), stock_location = COALESCE(?, stock_location), storage_requirements = COALESCE(?, storage_requirements), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND is_archived = 0`, [toSafeText(body.category) || null, toSafeText(body.medicine_type) || null, toSafeText(body.supplier_name) || null, toSafeText(body.dosage_strength) || null, toSafeText(body.unit_of_measure) || null, Math.max(0, toSafeInt(body.stock_capacity, 0)) || null, Math.max(0, toSafeInt(body.low_stock_threshold, 0)) || null, Math.max(0, toSafeInt(body.reorder_level, 0)) || null, toMysqlDate(body.expiry_date), toSafeText(body.stock_location) || null, toSafeText(body.storage_requirements) || null, medicineId]);
+                await pool.query(`UPDATE pharmacy_medicines SET category = COALESCE(?, category), medicine_type = COALESCE(?, medicine_type), supplier_name = COALESCE(?, supplier_name), dosage_strength = COALESCE(?, dosage_strength), unit_of_measure = COALESCE(?, unit_of_measure), stock_capacity = COALESCE(?, stock_capacity), low_stock_threshold = COALESCE(?, low_stock_threshold), reorder_level = COALESCE(?, reorder_level), expiry_date = COALESCE(?, expiry_date), stock_location = COALESCE(?, stock_location), storage_requirements = COALESCE(?, storage_requirements), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND is_archived = 0`, [toSafeText(body.category) || null, toSafeText(body.medicine_type) || null, toSafeText(body.supplier_name) || null, toSafeText(body.dosage_strength) || null, toSafeText(body.unit_of_measure) || null, Math.max(0, toSafeInt(body.stock_capacity, 0)) || null, Math.max(0, toSafeInt(body.low_stock_threshold, 0)) || null, Math.max(0, toSafeInt(body.reorder_level, 0)) || null, toSqlDate(body.expiry_date), toSafeText(body.stock_location) || null, toSafeText(body.storage_requirements) || null, medicineId]);
                 await log('UPDATE_MEDICINE', `Medicine #${medicineId} updated`, 'success');
                 writeJson(res, 200, { ok: true, message: 'Medicine updated.' });
                 return;
@@ -3640,7 +4287,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                   if (mode === 'set') after = quantity;
                   delta = after - before;
                 }
-                await pool.query(`UPDATE pharmacy_medicines SET stock_on_hand = ?, supplier_name = COALESCE(?, supplier_name), batch_lot_no = COALESCE(?, batch_lot_no), expiry_date = COALESCE(?, expiry_date), purchase_cost = COALESCE(?, purchase_cost), stock_location = COALESCE(?, stock_location), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [after, toSafeText(body.supplier_name) || null, toSafeText(body.batch_lot_no) || null, toMysqlDate(body.expiry_date), toSafeMoney(body.purchase_cost, 0) || null, toSafeText(body.stock_location) || null, medicineId]);
+                await pool.query(`UPDATE pharmacy_medicines SET stock_on_hand = ?, supplier_name = COALESCE(?, supplier_name), batch_lot_no = COALESCE(?, batch_lot_no), expiry_date = COALESCE(?, expiry_date), purchase_cost = COALESCE(?, purchase_cost), stock_location = COALESCE(?, stock_location), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [after, toSafeText(body.supplier_name) || null, toSafeText(body.batch_lot_no) || null, toSqlDate(body.expiry_date), toSafeMoney(body.purchase_cost, 0) || null, toSafeText(body.stock_location) || null, medicineId]);
                 await movement(medicineId, action === 'restock' ? 'restock' : 'adjust', delta, before, after, toSafeText(body.reason) || (action === 'restock' ? 'Restocked' : 'Adjusted'), toSafeText(body.batch_lot_no) || toSafeText(medicine.batch_lot_no) || null, toSafeText(body.stock_location) || toSafeText(medicine.stock_location) || null);
                 await log(action === 'restock' ? 'RESTOCK' : 'ADJUST', `${medicine.medicine_name} ${action === 'restock' ? `restocked +${delta}` : `adjusted ${before} -> ${after}`}`, action === 'restock' ? 'success' : 'info');
                 writeJson(res, 200, { ok: true, message: action === 'restock' ? 'Medicine restocked.' : 'Stock adjusted.' });
@@ -3776,16 +4423,25 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 const patientName = toSafeText(body.patient_name);
                 const counselor = toSafeText(body.counselor);
                 const sessionType = toSafeText(body.session_type);
-                const appointmentAt = toMysqlDateTime(body.appointment_at);
+                const appointmentAt = toSqlDateTime(body.appointment_at);
                 if (!patientId || !patientName || !counselor || !sessionType || !appointmentAt) {
                   writeJson(res, 422, { ok: false, message: 'patient_id, patient_name, session_type, counselor, and appointment_at are required.' });
                   return;
                 }
-                await pool.query(`INSERT INTO mental_health_patients (patient_id, patient_name, patient_type, guardian_contact) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE patient_name = VALUES(patient_name), patient_type = VALUES(patient_type), guardian_contact = COALESCE(VALUES(guardian_contact), guardian_contact)`, [patientId, patientName, inferPatientType({ patientType: body.patient_type, patientName, patientId }), toSafeText(body.guardian_contact) || null]);
+                await pool.query(
+                  `INSERT INTO mental_health_patients (patient_id, patient_name, patient_type, guardian_contact)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT (patient_id) DO UPDATE SET
+                     patient_name = EXCLUDED.patient_name,
+                     patient_type = EXCLUDED.patient_type,
+                     guardian_contact = COALESCE(EXCLUDED.guardian_contact, mental_health_patients.guardian_contact),
+                     updated_at = CURRENT_TIMESTAMP`,
+                  [patientId, patientName, inferPatientType({ patientType: body.patient_type, patientName, patientId }), toSafeText(body.guardian_contact) || null]
+                );
                 const caseReference = `MHS-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
                 const riskLevel = (toSafeText(body.risk_level) || 'low').toLowerCase();
                 const status = toBooleanFlag(body.is_draft) ? 'create' : riskLevel === 'high' ? 'at_risk' : 'active';
-                await pool.query(`INSERT INTO mental_health_sessions (case_reference, patient_id, patient_name, patient_type, counselor, session_type, status, risk_level, diagnosis_condition, treatment_plan, session_goals, session_duration_minutes, session_mode, location_room, guardian_contact, emergency_contact, medication_reference, follow_up_frequency, escalation_reason, outcome_result, assessment_score, assessment_tool, appointment_at, next_follow_up_at, created_by_role, is_draft) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [caseReference, patientId, patientName, inferPatientType({ patientType: body.patient_type, patientName, patientId }), counselor, sessionType, status, riskLevel, toSafeText(body.diagnosis_condition) || null, toSafeText(body.treatment_plan) || null, toSafeText(body.session_goals) || null, Math.max(15, toSafeInt(body.session_duration_minutes, 45)), toSafeText(body.session_mode) || 'in_person', toSafeText(body.location_room) || null, toSafeText(body.guardian_contact) || null, toSafeText(body.emergency_contact) || null, toSafeText(body.medication_reference) || null, toSafeText(body.follow_up_frequency) || null, toSafeText(body.escalation_reason) || null, toSafeText(body.outcome_result) || null, body.assessment_score == null ? null : toSafeInt(body.assessment_score, 0), toSafeText(body.assessment_tool) || null, appointmentAt, toMysqlDateTime(body.next_follow_up_at), role, toBooleanFlag(body.is_draft) ? 1 : 0]);
+                await pool.query(`INSERT INTO mental_health_sessions (case_reference, patient_id, patient_name, patient_type, counselor, session_type, status, risk_level, diagnosis_condition, treatment_plan, session_goals, session_duration_minutes, session_mode, location_room, guardian_contact, emergency_contact, medication_reference, follow_up_frequency, escalation_reason, outcome_result, assessment_score, assessment_tool, appointment_at, next_follow_up_at, created_by_role, is_draft) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [caseReference, patientId, patientName, inferPatientType({ patientType: body.patient_type, patientName, patientId }), counselor, sessionType, status, riskLevel, toSafeText(body.diagnosis_condition) || null, toSafeText(body.treatment_plan) || null, toSafeText(body.session_goals) || null, Math.max(15, toSafeInt(body.session_duration_minutes, 45)), toSafeText(body.session_mode) || 'in_person', toSafeText(body.location_room) || null, toSafeText(body.guardian_contact) || null, toSafeText(body.emergency_contact) || null, toSafeText(body.medication_reference) || null, toSafeText(body.follow_up_frequency) || null, toSafeText(body.escalation_reason) || null, toSafeText(body.outcome_result) || null, body.assessment_score == null ? null : toSafeInt(body.assessment_score, 0), toSafeText(body.assessment_tool) || null, appointmentAt, toSqlDateTime(body.next_follow_up_at), role, toBooleanFlag(body.is_draft) ? 1 : 0]);
                 const [rows] = await pool.query<RowDataPacket[]>(`SELECT id FROM mental_health_sessions WHERE case_reference = ? LIMIT 1`, [caseReference]);
                 await saveActivity(Number(rows[0]?.id || 0), 'SESSION_CREATED', `Session ${caseReference} created with status ${status}.`);
                 writeJson(res, 200, { ok: true, message: 'Session created.' });
@@ -3802,7 +4458,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               if (action === 'update_session') {
                 const nextRisk = (toSafeText(body.risk_level) || toSafeText(existing.risk_level) || 'low').toLowerCase();
                 const nextStatus = toSafeText(body.status) || (nextRisk === 'high' && ['create', 'active', 'follow_up'].includes(toSafeText(existing.status)) ? 'at_risk' : toSafeText(existing.status));
-                await pool.query(`UPDATE mental_health_sessions SET counselor = COALESCE(?, counselor), session_type = COALESCE(?, session_type), status = COALESCE(?, status), risk_level = COALESCE(?, risk_level), diagnosis_condition = COALESCE(?, diagnosis_condition), treatment_plan = COALESCE(?, treatment_plan), session_goals = COALESCE(?, session_goals), session_duration_minutes = COALESCE(?, session_duration_minutes), session_mode = COALESCE(?, session_mode), location_room = COALESCE(?, location_room), guardian_contact = COALESCE(?, guardian_contact), emergency_contact = COALESCE(?, emergency_contact), medication_reference = COALESCE(?, medication_reference), follow_up_frequency = COALESCE(?, follow_up_frequency), assessment_score = COALESCE(?, assessment_score), assessment_tool = COALESCE(?, assessment_tool), escalation_reason = COALESCE(?, escalation_reason), outcome_result = COALESCE(?, outcome_result), appointment_at = COALESCE(?, appointment_at), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [toSafeText(body.counselor) || null, toSafeText(body.session_type) || null, nextStatus || null, nextRisk || null, toSafeText(body.diagnosis_condition) || null, toSafeText(body.treatment_plan) || null, toSafeText(body.session_goals) || null, toSafeInt(body.session_duration_minutes, 0) || null, toSafeText(body.session_mode) || null, toSafeText(body.location_room) || null, toSafeText(body.guardian_contact) || null, toSafeText(body.emergency_contact) || null, toSafeText(body.medication_reference) || null, toSafeText(body.follow_up_frequency) || null, body.assessment_score == null ? null : toSafeInt(body.assessment_score, 0), toSafeText(body.assessment_tool) || null, toSafeText(body.escalation_reason) || null, toSafeText(body.outcome_result) || null, toMysqlDateTime(body.appointment_at), sessionId]);
+                await pool.query(`UPDATE mental_health_sessions SET counselor = COALESCE(?, counselor), session_type = COALESCE(?, session_type), status = COALESCE(?, status), risk_level = COALESCE(?, risk_level), diagnosis_condition = COALESCE(?, diagnosis_condition), treatment_plan = COALESCE(?, treatment_plan), session_goals = COALESCE(?, session_goals), session_duration_minutes = COALESCE(?, session_duration_minutes), session_mode = COALESCE(?, session_mode), location_room = COALESCE(?, location_room), guardian_contact = COALESCE(?, guardian_contact), emergency_contact = COALESCE(?, emergency_contact), medication_reference = COALESCE(?, medication_reference), follow_up_frequency = COALESCE(?, follow_up_frequency), assessment_score = COALESCE(?, assessment_score), assessment_tool = COALESCE(?, assessment_tool), escalation_reason = COALESCE(?, escalation_reason), outcome_result = COALESCE(?, outcome_result), appointment_at = COALESCE(?, appointment_at), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [toSafeText(body.counselor) || null, toSafeText(body.session_type) || null, nextStatus || null, nextRisk || null, toSafeText(body.diagnosis_condition) || null, toSafeText(body.treatment_plan) || null, toSafeText(body.session_goals) || null, toSafeInt(body.session_duration_minutes, 0) || null, toSafeText(body.session_mode) || null, toSafeText(body.location_room) || null, toSafeText(body.guardian_contact) || null, toSafeText(body.emergency_contact) || null, toSafeText(body.medication_reference) || null, toSafeText(body.follow_up_frequency) || null, body.assessment_score == null ? null : toSafeInt(body.assessment_score, 0), toSafeText(body.assessment_tool) || null, toSafeText(body.escalation_reason) || null, toSafeText(body.outcome_result) || null, toSqlDateTime(body.appointment_at), sessionId]);
                 await saveActivity(sessionId, 'SESSION_UPDATED', `Session ${existing.case_reference} updated.`);
                 writeJson(res, 200, { ok: true, message: 'Session updated.' });
                 return;
@@ -3824,7 +4480,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               }
 
               const actionUpdates: Record<string, { sql: string; params: unknown[]; message: string }> = {
-                schedule_followup: { sql: `UPDATE mental_health_sessions SET status = CASE WHEN status IN ('completed', 'archived') THEN status ELSE 'follow_up' END, next_follow_up_at = ?, follow_up_frequency = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, params: [toMysqlDateTime(body.next_follow_up_at), toSafeText(body.follow_up_frequency), sessionId], message: 'Follow-up scheduled.' },
+                schedule_followup: { sql: `UPDATE mental_health_sessions SET status = CASE WHEN status IN ('completed', 'archived') THEN status ELSE 'follow_up' END, next_follow_up_at = ?, follow_up_frequency = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, params: [toSqlDateTime(body.next_follow_up_at), toSafeText(body.follow_up_frequency), sessionId], message: 'Follow-up scheduled.' },
                 set_at_risk: { sql: `UPDATE mental_health_sessions SET status = 'at_risk', risk_level = 'high', escalation_reason = COALESCE(?, escalation_reason), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, params: [toSafeText(body.escalation_reason) || null, sessionId], message: 'Session marked as at risk.' },
                 complete_session: { sql: `UPDATE mental_health_sessions SET status = 'completed', outcome_result = ?, is_draft = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, params: [toSafeText(body.outcome_result), sessionId], message: 'Session completed.' },
                 escalate_session: { sql: `UPDATE mental_health_sessions SET status = 'escalated', risk_level = 'high', escalation_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, params: [toSafeText(body.escalation_reason), sessionId], message: 'Session escalated.' },
@@ -3871,7 +4527,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
               const [totalRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM patient_master${whereSql}`, params);
               const total = Number(totalRows[0]?.total || 0);
               const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM patient_master${whereSql} ORDER BY COALESCE(last_seen_at, updated_at, created_at) DESC LIMIT ? OFFSET ?`, [...params, perPage, offset]);
-              const [analyticsRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total_patients, SUM(CASE WHEN risk_level = 'high' THEN 1 ELSE 0 END) AS high_risk, SUM(CASE WHEN appointment_count > 0 OR walkin_count > 0 OR checkup_count > 0 OR mental_count > 0 OR pharmacy_count > 0 THEN 1 ELSE 0 END) AS active_profiles, SUM(CASE WHEN COALESCE(last_seen_at, updated_at, created_at) >= DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 30 DAY) THEN 1 ELSE 0 END) AS active_30_days FROM patient_master`);
+              const [analyticsRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total_patients, SUM(CASE WHEN risk_level = 'high' THEN 1 ELSE 0 END) AS high_risk, SUM(CASE WHEN appointment_count > 0 OR walkin_count > 0 OR checkup_count > 0 OR mental_count > 0 OR pharmacy_count > 0 THEN 1 ELSE 0 END) AS active_profiles, SUM(CASE WHEN COALESCE(last_seen_at, updated_at, created_at) >= CURRENT_TIMESTAMP - INTERVAL '30 days' THEN 1 ELSE 0 END) AS active_30_days FROM patient_master`);
               writeJson(res, 200, { ok: true, data: { analytics: analyticsRows[0] || { total_patients: 0, high_risk: 0, active_profiles: 0, active_30_days: 0 }, items: rows.map(mapPatientRow), meta: { page, perPage, total, totalPages: Math.max(1, Math.ceil(total / perPage)) } } });
               return;
             }
@@ -3997,7 +4653,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 const doctorName = toSafeText(body.doctor_name);
                 const departmentName = toSafeText(body.department_name);
                 const visitType = toSafeText(body.visit_type);
-                const appointmentDate = toMysqlDate(body.appointment_date);
+                const appointmentDate = toSqlDate(body.appointment_date);
                 const preferredTime = toSafeText(body.preferred_time);
                 const requestedStatus = toSafeText(body.status || 'Pending') || 'Pending';
                 const priority = toSafeText(body.appointment_priority || 'Routine') || 'Routine';
@@ -4215,7 +4871,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
 
               const nextDoctorName = 'doctor_name' in body ? toSafeText(body.doctor_name) : String(existing.doctor_name || '');
               const nextDepartmentName = 'department_name' in body ? toSafeText(body.department_name) : String(existing.department_name || '');
-              const nextAppointmentDate = 'appointment_date' in body ? toMysqlDate(body.appointment_date) : toMysqlDate(existing.appointment_date);
+              const nextAppointmentDate = 'appointment_date' in body ? toSqlDate(body.appointment_date) : toSqlDate(existing.appointment_date);
               const nextPreferredTime = 'preferred_time' in body ? toSafeText(body.preferred_time) : String(existing.preferred_time || '');
               const nextStatus = 'status' in body ? toSafeText(body.status).toLowerCase() : '';
               const requiresCashierVerification = appointmentRequiresCashierVerification({
@@ -4269,7 +4925,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
                 ['doctor_name', 'doctor_name', body.doctor_name],
                 ['department_name', 'department_name', body.department_name],
                 ['visit_type', 'visit_type', body.visit_type],
-                ['appointment_date', 'appointment_date', toMysqlDate(body.appointment_date)],
+                ['appointment_date', 'appointment_date', toSqlDate(body.appointment_date)],
                 ['preferred_time', 'preferred_time', body.preferred_time],
                 ['visit_reason', 'visit_reason', body.visit_reason]
               ];
@@ -4413,7 +5069,7 @@ export function mysqlCompatibilityApiPlugin(options: MysqlApiOptions): Plugin {
 
           next();
         } catch (error) {
-          writeJson(res, 500, { ok: false, message: error instanceof Error ? error.message : 'MySQL compatibility route failed.' });
+          writeJson(res, 500, { ok: false, message: error instanceof Error ? error.message : 'Supabase API route failed.' });
         }
       });
     }

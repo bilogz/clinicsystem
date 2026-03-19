@@ -1,13 +1,12 @@
 # Cashier System Clone-to-Test Guide
 
-This guide covers the full local setup flow for the `cashier-system` project on Windows, from cloning the repository to testing the cashier workflow and optional clinic integration.
+This guide covers the full local setup flow for the `cashier-system` project on Windows, from cloning the repository to testing the cashier workflow and Supabase-backed clinic integration.
 
 ## What you need
 
 - `Git`
 - `Node.js` and `npm`
-- `XAMPP`
-- `MySQL` from XAMPP
+- A Supabase project (PostgreSQL)
 - PowerShell or VS Code terminal
 
 ## 1. Clone the repository
@@ -27,54 +26,18 @@ If you already have the project folder, just open:
 npm install
 ```
 
-## 3. Start XAMPP
+## 3. Create the database
 
-Open the `XAMPP Control Panel` and start:
+This project now targets Supabase (PostgreSQL) only.
 
-- `MySQL`
-- `Apache`
+1) In Supabase SQL editor, run:
 
-`Apache` is optional for the Vue + Node app itself, but useful for:
+- `supabase/schema.sql`
+- `supabase/seed.sql`
 
-- `phpMyAdmin`
-- PHP integration endpoints
-- clinic callback testing
+2) Configure `.env` (see `.env.example`) using `DATABASE_URL`.
 
-## 4. Create the database
-
-This project uses:
-
-- Database: `cashier_system`
-- Host: `127.0.0.1`
-- Port: `3306`
-- User: `root`
-- Password: blank by default in XAMPP
-
-Use one of these setup methods.
-
-### Option A: Import the ready SQL file
-
-```powershell
-"C:\xampp\mysql\bin\mysql.exe" -u root < database\mysql\cashier_system_mysql.sql
-```
-
-If your MySQL root user has a password:
-
-```powershell
-"C:\xampp\mysql\bin\mysql.exe" -u root -p < database\mysql\cashier_system_mysql.sql
-```
-
-### Option B: Seed an empty database with the Node script
-
-First create an empty `cashier_system` database in phpMyAdmin, then run:
-
-```powershell
-npm run db:seed
-```
-
-Use only one approach.
-
-## 5. Configure the backend
+## 4. Configure the backend
 
 The project root should contain `.env.server`.
 
@@ -84,15 +47,11 @@ Recommended contents:
 API_PORT=3001
 FRONTEND_ORIGIN=http://localhost:5173,http://localhost:5174
 
-MYSQL_HOST=127.0.0.1
-MYSQL_PORT=3306
-MYSQL_USER=root
-MYSQL_PASSWORD=
-MYSQL_DATABASE=cashier_system
-
-CLINIC_CALLBACK_URL=http://localhost/clinicsystem/backend/integrations/receive_cashier_payment_callback.php
-CLINIC_CALLBACK_TOKEN=replace-with-a-strong-shared-token
-CLINIC_CALLBACK_TIMEOUT_MS=8000
+DATABASE_URL=postgresql://postgres:your-password@db.your-project-ref.supabase.co:5432/postgres?sslmode=require
+CASHIER_INTEGRATION_ENABLED=true
+CASHIER_SYSTEM_BASE_URL=supabase://internal
+CASHIER_SYNC_MODE=auto
+CASHIER_SYSTEM_INBOUND_PATH=/api/integrations/cashier/payment-status
 
 SEED_ADMIN_USERNAME=admin@cashier.local
 SEED_ADMIN_PASSWORD=admin123
@@ -104,7 +63,7 @@ You can also copy from:
 server/.env.example
 ```
 
-## 6. Configure the frontend
+## 5. Configure the frontend
 
 The root `.env` should contain:
 
@@ -112,7 +71,7 @@ The root `.env` should contain:
 VITE_API_BASE_URL=http://localhost:3001/api
 ```
 
-## 7. Verify MySQL first
+## 6. Verify database connection
 
 Before running the app, check the connection:
 
@@ -123,13 +82,10 @@ npm run db:ping
 Expected result:
 
 ```text
-MySQL connection successful.
-Database: cashier_system
+PostgreSQL connection successful.
 ```
 
-If this fails, fix MySQL first before starting the frontend.
-
-## 8. Start the cashier backend
+## 7. Start the cashier backend
 
 Open a terminal in the project root:
 
@@ -147,7 +103,7 @@ http://localhost:3001/api/health
 
 Do not use just `http://localhost:3001` because the API health route is under `/api/health`.
 
-## 9. Start the cashier frontend
+## 8. Start the cashier frontend
 
 Open a second terminal:
 
@@ -250,7 +206,7 @@ Clinic-linked records are labeled in the billing queue and should move through t
 
 Use this order every time:
 
-1. Start `MySQL` in XAMPP
+1. Ensure `DATABASE_URL` is configured (Supabase/PostgreSQL)
 2. Run:
 
 open project
@@ -327,5 +283,4 @@ npm run build
 ## 17. Related docs
 
 - [local-development-setup.md](/C:/Users/Bilog/Projects/cashier-system/docs/local-development-setup.md)
-- [xampp-mysql-backend-setup.md](/C:/Users/Bilog/Projects/cashier-system/docs/xampp-mysql-backend-setup.md)
 - [php-integration-setup.md](/C:/Users/Bilog/Projects/cashier-system/docs/php-integration-setup.md)

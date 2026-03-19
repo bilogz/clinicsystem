@@ -4,11 +4,11 @@ Base URL:
 - `VITE_LAB_API_BASE_URL` (recommended)
 - fallback: `/admin/api/lab`
 
-## 1) GET `request.php`
+## 1) GET Request Queue
 
 Use:
-- Queue list: `GET /admin/api/lab/request.php`
-- Single request: `GET /admin/api/lab/request.php?id=1208`
+- Queue list: `GET /admin/api/lab/request`
+- Single request: `GET /admin/api/lab/request?id=1208`
 
 Optional query params for queue:
 - `search`
@@ -45,7 +45,7 @@ Single-request response can return either:
 - `data.request` object, or
 - `data` as request object directly.
 
-## 2) POST `start_processing.php`
+## 2) POST Start Processing
 
 Request body:
 ```json
@@ -63,7 +63,7 @@ Expected behavior:
 - Persist `processing_started_at`
 - Write to `activity_logs`
 
-## 3) POST `save_results.php`
+## 3) POST Save Results
 
 Request body:
 ```json
@@ -87,7 +87,7 @@ Expected behavior:
 - Persist `result_encoded_at`
 - Write to `activity_logs`
 
-## 4) POST `release_report.php`
+## 4) POST Release Report
 
 Request body:
 ```json
@@ -104,10 +104,10 @@ Expected behavior:
 - Persist `released_at`
 - Write to `activity_logs`
 
-## 5) GET `activity.php`
+## 5) GET Activity
 
 Use:
-- `GET /admin/api/lab/activity.php?id=1208`
+- `GET /admin/api/lab/activity?id=1208`
 
 Response shape:
 ```json

@@ -4,19 +4,33 @@ import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
-import { fetchReportsSnapshot, type ReportsActivityRow, type ReportsModuleTotal, type ReportsSnapshot, type ReportsTrendRow } from '@/services/reports';
+import { useRealtimeClock } from '@/composables/useRealtimeClock';
+import { formatDateTimeWithTimezone } from '@/utils/dateTime';
+import {
+  fetchReportsSnapshot,
+  sendReportsToPmed,
+  type ReportsActivityRow,
+  type ReportsModuleTotal,
+  type ReportsPmedRequestNotification,
+  type ReportsPmedSection,
+  type ReportsSnapshot,
+  type ReportsTrendRow
+} from '@/services/reports';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
 import { emitSuccessModal } from '@/composables/useSuccessModal';
 
 const loading = ref(true);
+const sendingToPmed = ref(false);
 const fromDate = ref('');
 const toDate = ref('');
 const snapshot = ref<ReportsSnapshot | null>(null);
 const moduleTotals = ref<ReportsModuleTotal[]>([]);
 const trend = ref<ReportsTrendRow[]>([]);
 const activity = ref<ReportsActivityRow[]>([]);
+const pmedRequestNotifications = ref<ReportsPmedRequestNotification[]>([]);
 const toast = reactive({ open: false, text: '', color: 'info' as 'success' | 'info' | 'warning' | 'error' });
 const realtime = useRealtimeListSync();
+const { compactDateTimeText, dateText, timeText } = useRealtimeClock(1000);
 
 let lastRequestId = 0;
 
@@ -33,6 +47,13 @@ const kpiCards = computed(() => {
   ];
 });
 
+const pmedPackage = computed(() => snapshot.value?.pmedPackage ?? null);
+const hasPmedRequests = computed(() => pmedRequestNotifications.value.length > 0);
+const snapshotGeneratedText = computed(() => {
+  if (!snapshot.value?.generatedAt) return 'Waiting for report snapshot';
+  return formatDate(snapshot.value.generatedAt);
+});
+
 function showToast(text: string, color: 'success' | 'info' | 'warning' | 'error' = 'info'): void {
   if (color === 'success') {
     emitSuccessModal({ title: 'Success', message: text, tone: 'success' });
@@ -44,28 +65,41 @@ function showToast(text: string, color: 'success' | 'info' | 'warning' | 'error'
 }
 
 function formatDate(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString();
+  return formatDateTimeWithTimezone(value);
 }
 
 function totalTrendRow(row: ReportsTrendRow): number {
   return row.appointments + row.walkin + row.checkup + row.mental + row.pharmacy;
 }
 
-async function load(options: { silent?: boolean } = {}): Promise<void> {
+function sourceLabel(value: string): string {
+  return value
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function sectionMetricPreview(section: ReportsPmedSection): string {
+  return section.metrics
+    .slice(0, 3)
+    .map((metric) => `${metric.label}: ${metric.total}`)
+    .join(' • ');
+}
+
+async function load(options: { silent?: boolean; forceRefresh?: boolean } = {}): Promise<void> {
   const requestId = ++lastRequestId;
   if (!options.silent) loading.value = true;
   try {
     const data = await fetchReportsSnapshot({
       from: fromDate.value || undefined,
-      to: toDate.value || undefined
+      to: toDate.value || undefined,
+      forceRefresh: options.forceRefresh ?? options.silent ?? false
     });
     if (requestId !== lastRequestId) return;
     snapshot.value = data;
     moduleTotals.value = data.moduleTotals;
     trend.value = data.dailyTrend;
     activity.value = data.recentActivity;
+    pmedRequestNotifications.value = data.pmedRequestNotifications || [];
     if (!fromDate.value) fromDate.value = data.window.from;
     if (!toDate.value) toDate.value = data.window.to;
   } catch (error) {
@@ -77,10 +111,23 @@ async function load(options: { silent?: boolean } = {}): Promise<void> {
   }
 }
 
+async function sendToPmed(): Promise<void> {
+  sendingToPmed.value = true;
+  try {
+    await sendReportsToPmed({ actor: 'Reports Admin' });
+    showToast('PMED-required reports sent successfully.', 'success');
+    await load({ silent: true });
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    sendingToPmed.value = false;
+  }
+}
+
 onMounted(async () => {
-  await load();
+  await load({ forceRefresh: true });
   realtime.startPolling(() => {
-    void load({ silent: true });
+    void load({ silent: true, forceRefresh: true });
   }, REALTIME_POLICY.polling.reportsMs);
 });
 
@@ -133,13 +180,134 @@ onUnmounted(() => {
       <v-card class="hero-card" variant="outlined">
         <v-card-text class="d-flex justify-space-between align-center flex-wrap ga-3">
           <div>
+            <div class="hero-kicker">Reporting Hub</div>
             <h1 class="text-h4 font-weight-black mb-1">Clinic Reports</h1>
-            <p class="text-medium-emphasis mb-0">Dynamic, MySQL-backed analytics across appointments, walk-in, check-up, mental health, and pharmacy.</p>
+            <p class="hero-subtitle mb-0">Dynamic, Supabase-backed analytics across appointments, walk-in, check-up, mental health, and pharmacy.</p>
+          </div>
+          <div class="d-flex ga-2 flex-wrap justify-end">
+            <v-chip class="hero-chip" color="primary" variant="flat">
+              Live now: {{ compactDateTimeText }}
+            </v-chip>
+            <v-chip class="hero-chip" color="info" variant="flat">
+              Snapshot: {{ snapshotGeneratedText }}
+            </v-chip>
           </div>
         </v-card-text>
       </v-card>
 
       <AnalyticsCardGrid :items="kpiCards" md="4" lg="3" />
+
+      <v-alert
+        v-if="hasPmedRequests"
+        type="info"
+        variant="tonal"
+        border="start"
+        class="surface-card"
+      >
+        <div class="font-weight-bold mb-2">PMED Report Requests</div>
+        <div class="text-body-2 mb-3">PMED has requested report submissions from the clinic reporting desk.</div>
+        <v-list class="transparent pa-0" density="compact">
+          <v-list-item
+            v-for="row in pmedRequestNotifications"
+            :key="`${row.entity_key}-${row.created_at}`"
+            class="px-0"
+          >
+            <template #title>{{ row.detail }}</template>
+            <template #subtitle>
+              {{ row.metadata.report_name || row.action }}
+            </template>
+            <template #append>
+              <div class="text-right">
+                <div class="text-caption">{{ row.actor }}</div>
+                <div class="text-caption text-medium-emphasis">{{ formatDate(row.created_at) }}</div>
+              </div>
+            </template>
+          </v-list-item>
+        </v-list>
+      </v-alert>
+
+      <v-card class="surface-card pmed-flow-card" variant="outlined">
+        <v-card-item>
+          <div>
+            <div class="text-overline font-weight-bold text-primary">PMED Flow</div>
+            <v-card-title class="px-0">Send Required Reports To PMED</v-card-title>
+            <div class="text-medium-emphasis">
+              Packages only the sections PMED needs: enrollment, finance, health services, counseling, discipline, laboratory, program activity, and HR performance.
+            </div>
+          </div>
+          <template #append>
+            <div class="d-flex ga-2 align-center flex-wrap justify-end">
+              <v-chip color="primary" variant="tonal">
+                {{ pmedPackage?.summary.section_count ?? 0 }} sections
+              </v-chip>
+              <v-chip color="info" variant="tonal">
+                {{ pmedPackage?.summary.source_count ?? 0 }} source modules
+              </v-chip>
+              <v-chip v-if="hasPmedRequests" color="warning" variant="tonal">
+                {{ pmedRequestNotifications.length }} PMED request{{ pmedRequestNotifications.length > 1 ? 's' : '' }}
+              </v-chip>
+              <v-chip color="secondary" variant="tonal">
+                {{ dateText }} | {{ timeText }}
+              </v-chip>
+              <v-btn
+                class="saas-btn saas-btn-primary"
+                prepend-icon="mdi-send"
+                :loading="sendingToPmed"
+                @click="sendToPmed"
+              >
+                Send To PMED
+              </v-btn>
+            </div>
+          </template>
+        </v-card-item>
+        <v-divider />
+        <v-card-text class="pt-4">
+          <v-row>
+            <v-col cols="12" md="7">
+              <div class="text-subtitle-1 font-weight-bold mb-3">PMED Required Sections</div>
+              <div class="d-flex flex-column ga-3">
+                <v-sheet
+                  v-for="section in pmedPackage?.sections || []"
+                  :key="section.key"
+                  class="pmed-section-card"
+                  border
+                  rounded="lg"
+                >
+                  <div class="d-flex justify-space-between align-start ga-3 flex-wrap">
+                    <div>
+                      <div class="font-weight-bold">{{ section.title }}</div>
+                      <div class="text-body-2 text-medium-emphasis">{{ sectionMetricPreview(section) || 'No metrics available.' }}</div>
+                    </div>
+                    <v-chip size="small" color="primary" variant="tonal">{{ sourceLabel(section.source) }}</v-chip>
+                  </div>
+                </v-sheet>
+              </div>
+            </v-col>
+            <v-col cols="12" md="5">
+              <div class="text-subtitle-1 font-weight-bold mb-3">Recent PMED Deliveries</div>
+              <v-list class="transparent pa-0" density="compact">
+                <v-list-item
+                  v-for="row in pmedPackage?.recent_deliveries || []"
+                  :key="`${row.entity_key}-${row.created_at}`"
+                  class="px-0"
+                >
+                  <template #title>{{ row.action }}</template>
+                  <template #subtitle>{{ row.detail }}</template>
+                  <template #append>
+                    <div class="text-right">
+                      <div class="text-caption">{{ row.actor }}</div>
+                      <div class="text-caption text-medium-emphasis">{{ formatDate(row.created_at) }}</div>
+                    </div>
+                  </template>
+                </v-list-item>
+                <v-list-item v-if="!(pmedPackage?.recent_deliveries?.length)">
+                  <template #title>No PMED report deliveries yet.</template>
+                </v-list-item>
+              </v-list>
+            </v-col>
+          </v-row>
+        </v-card-text>
+      </v-card>
 
       <v-row>
         <v-col cols="12" md="4">
@@ -230,8 +398,38 @@ onUnmounted(() => {
 
 <style scoped>
 .reports-page { display: grid; gap: 16px; }
-.hero-card { border-radius: 18px; border-color: #d7e4ff !important; background: linear-gradient(120deg, #f4f8ff 0%, #eef4ff 45%, #f8faff 100%); box-shadow: 0 10px 28px rgba(37, 99, 235, 0.08); }
+.hero-card {
+  border-radius: 18px;
+  border-color: rgba(18, 65, 112, 0.16) !important;
+  color: #ffffff;
+  background: linear-gradient(125deg, #124170 0%, #156ba6 55%, #2aa18a 100%);
+  box-shadow: 0 16px 30px rgba(14, 45, 84, 0.24);
+}
+.hero-kicker {
+  display: inline-flex;
+  margin-bottom: 10px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.14);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.55px;
+  text-transform: uppercase;
+}
+.hero-subtitle {
+  max-width: 700px;
+  color: rgba(255, 255, 255, 0.92);
+}
+.hero-chip {
+  color: #ffffff !important;
+  background: rgba(255, 255, 255, 0.16) !important;
+  border: 1px solid rgba(255, 255, 255, 0.24) !important;
+  backdrop-filter: blur(8px);
+}
 .surface-card { border-radius: 16px; border-color: #dbe4f2 !important; background: #fbfdff; }
+.pmed-flow-card { border-color: #cfe0ff !important; background: linear-gradient(135deg, #f7fbff 0%, #f2f7ff 100%); }
+.pmed-section-card { padding: 14px 16px; background: rgba(255, 255, 255, 0.82); border-color: #d7e4ff !important; }
 .metric-card { border-radius: 12px; color: #fff; min-height: 122px; box-shadow: 0 10px 18px rgba(16, 24, 40, 0.18); }
 .metric-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; font-weight: 700; }
 .metric-value { font-size: 30px; font-weight: 800; line-height: 1.1; margin-top: 2px; }

@@ -6,12 +6,9 @@ import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { emitSuccessModal } from '@/composables/useSuccessModal';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
 import {
-  dispatchPendingCashierEvents,
   fetchCashierDepartmentRecords,
   fetchCashierIntegrationStatus,
   fetchCashierQueue,
-  submitCashierDepartmentDecision,
-  updateCashierPaymentStatus,
   type CashierDepartmentRecord,
   type CashierIntegrationQueueItem,
   type CashierIntegrationStatus
@@ -19,30 +16,6 @@ import {
 
 type QueueSyncFilter = 'all' | 'pending' | 'sent' | 'acknowledged' | 'failed';
 type ClearanceStatusFilter = 'all' | 'pending' | 'approved' | 'hold' | 'rejected';
-type PaymentDialogState = {
-  open: boolean;
-  loading: boolean;
-  source_module: string;
-  source_key: string;
-  cashier_reference: string;
-  invoice_number: string;
-  official_receipt: string;
-  amount_due: number;
-  amount_paid: number;
-  balance_due: number;
-  payment_status: string;
-  paid_at: string;
-};
-type DecisionDialogState = {
-  open: boolean;
-  loading: boolean;
-  clearance_reference: string;
-  patient_name: string;
-  status: string;
-  remarks: string;
-  approver_name: string;
-  approver_role: string;
-};
 
 const loading = ref(true);
 const pageReady = ref(false);
@@ -61,32 +34,6 @@ const clearanceItems = ref<CashierDepartmentRecord[]>([]);
 const clearanceMeta = reactive({ page: 1, perPage: 10, total: 0, totalPages: 1 });
 const toast = reactive({ open: false, text: '', color: 'info' as 'success' | 'info' | 'warning' | 'error' });
 
-const paymentDialog = reactive<PaymentDialogState>({
-  open: false,
-  loading: false,
-  source_module: '',
-  source_key: '',
-  cashier_reference: '',
-  invoice_number: '',
-  official_receipt: '',
-  amount_due: 0,
-  amount_paid: 0,
-  balance_due: 0,
-  payment_status: 'unpaid',
-  paid_at: ''
-});
-
-const decisionDialog = reactive<DecisionDialogState>({
-  open: false,
-  loading: false,
-  clearance_reference: '',
-  patient_name: '',
-  status: 'approved',
-  remarks: '',
-  approver_name: 'Cashier Department',
-  approver_role: 'Cashier'
-});
-
 const realtime = useRealtimeListSync();
 
 const queueFilterItems = [
@@ -104,9 +51,6 @@ const clearanceFilterItems = [
   { label: 'On hold', value: 'hold' },
   { label: 'Rejected', value: 'rejected' }
 ] as const;
-
-const paymentStatusItems = ['unpaid', 'partial', 'paid', 'void', 'refunded'];
-const decisionStatusItems = ['approved', 'hold', 'rejected', 'pending'];
 
 const summaryCards = computed(() => {
   const currentStatus = status.value;
@@ -146,10 +90,19 @@ const summaryCards = computed(() => {
   ];
 });
 
+const isInternalSupabaseSync = computed(() => status.value?.baseUrl === 'supabase://internal');
+
+const syncModeLabel = computed(() => {
+  if (!status.value?.enabled) return 'Manual queue mode';
+  if (isInternalSupabaseSync.value) return 'Supabase live sync';
+  return 'Live endpoint enabled';
+});
+
 const queueStatusText = computed(() => {
   if (!status.value) return 'Loading cashier integration status...';
-  if (!status.value.enabled) return 'Cashier sync is in queue mode. Events can still be reviewed and dispatched manually.';
-  return `Cashier sync is live in ${status.value.syncMode} mode and ready to push events to the external cashier endpoint.`;
+  if (!status.value.enabled) return 'Read-only queue monitoring is active. Billing events, payment status, and cashier clearance data stay visible here while financial updates remain restricted to the cashier-side flow.';
+  if (isInternalSupabaseSync.value) return 'Cashier sync is live through the shared Supabase workflow. This page is now a read-only monitor for clinic, cashier, patient sync, and department clearance billing state.';
+  return `Cashier sync is live in ${status.value.syncMode} mode. This page remains read-only while external cashier handling continues through the integration flow.`;
 });
 
 const recentPaymentHighlights = computed(() => (status.value?.recentPayments || []).slice(0, 4));
@@ -264,91 +217,6 @@ async function loadDashboard(options: { silent?: boolean } = {}): Promise<void> 
   clearanceMeta.totalPages = data.departmentResult.meta.totalPages;
 }
 
-function openPaymentEditor(item: CashierIntegrationQueueItem): void {
-  paymentDialog.open = true;
-  paymentDialog.loading = false;
-  paymentDialog.source_module = item.source_module;
-  paymentDialog.source_key = item.source_key;
-  paymentDialog.cashier_reference = '';
-  paymentDialog.invoice_number = '';
-  paymentDialog.official_receipt = '';
-  paymentDialog.amount_due = item.amount_due;
-  paymentDialog.amount_paid = item.payment_status === 'paid' ? item.amount_due : 0;
-  paymentDialog.balance_due = item.payment_status === 'paid' ? 0 : item.amount_due;
-  paymentDialog.payment_status = item.payment_status || 'unpaid';
-  paymentDialog.paid_at = item.payment_status === 'paid' ? new Date().toISOString().slice(0, 16) : '';
-}
-
-async function submitPaymentUpdate(): Promise<void> {
-  paymentDialog.loading = true;
-  try {
-    await updateCashierPaymentStatus({
-      source_module: paymentDialog.source_module,
-      source_key: paymentDialog.source_key,
-      cashier_reference: paymentDialog.cashier_reference || null,
-      invoice_number: paymentDialog.invoice_number || null,
-      official_receipt: paymentDialog.official_receipt || null,
-      amount_due: paymentDialog.amount_due,
-      amount_paid: paymentDialog.amount_paid,
-      balance_due: paymentDialog.balance_due,
-      payment_status: paymentDialog.payment_status,
-      paid_at: paymentDialog.paid_at ? new Date(paymentDialog.paid_at).toISOString().slice(0, 19).replace('T', ' ') : null,
-      actor: 'Cashier Integration UI'
-    });
-    paymentDialog.open = false;
-    showToast('Cashier payment status updated.', 'success');
-    await loadDashboard({ silent: true });
-  } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error), 'error');
-  } finally {
-    paymentDialog.loading = false;
-  }
-}
-
-function openDecisionEditor(record: CashierDepartmentRecord): void {
-  decisionDialog.open = true;
-  decisionDialog.loading = false;
-  decisionDialog.clearance_reference = record.clearance_reference;
-  decisionDialog.patient_name = record.patient_name;
-  decisionDialog.status = record.status === 'approved' ? 'approved' : 'hold';
-  decisionDialog.remarks = record.remarks || '';
-  decisionDialog.approver_name = record.approver_name || 'Cashier Department';
-  decisionDialog.approver_role = record.approver_role || 'Cashier';
-}
-
-async function submitDecision(): Promise<void> {
-  decisionDialog.loading = true;
-  try {
-    await submitCashierDepartmentDecision({
-      clearance_reference: decisionDialog.clearance_reference,
-      status: decisionDialog.status,
-      remarks: decisionDialog.remarks || null,
-      approver_name: decisionDialog.approver_name || null,
-      approver_role: decisionDialog.approver_role || null,
-      metadata: {
-        updated_from: 'cashier_integration_ui'
-      }
-    });
-    decisionDialog.open = false;
-    showToast('Cashier clearance decision saved.', 'success');
-    await loadDashboard({ silent: true });
-  } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error), 'error');
-  } finally {
-    decisionDialog.loading = false;
-  }
-}
-
-async function dispatchQueue(): Promise<void> {
-  try {
-    await dispatchPendingCashierEvents(10);
-    showToast('Pending cashier events dispatched.', 'success');
-    await loadDashboard({ silent: true });
-  } catch (error) {
-    showToast(error instanceof Error ? error.message : String(error), 'error');
-  }
-}
-
 watch(queueSyncFilter, () => {
   queuePage.value = 1;
   void loadDashboard({ silent: true });
@@ -367,25 +235,12 @@ watch(clearancePage, () => {
   void loadDashboard({ silent: true });
 });
 
-watch(
-  () => paymentDialog.amount_paid,
-  (amountPaid) => {
-    const due = Number(paymentDialog.amount_due || 0);
-    paymentDialog.balance_due = Math.max(0, due - Number(amountPaid || 0));
-    if (paymentDialog.balance_due <= 0 && Number(amountPaid || 0) >= due) {
-      paymentDialog.payment_status = 'paid';
-    } else if (Number(amountPaid || 0) > 0) {
-      paymentDialog.payment_status = 'partial';
-    }
-  }
-);
-
 onMounted(async () => {
   await loadDashboard();
   realtime.startPolling(
     () => loadDashboard({ silent: true }),
     REALTIME_POLICY.polling.cashierMs,
-    { immediate: false, pauseWhenDialogOpen: true }
+    { immediate: false, pauseWhenDialogOpen: false }
   );
   requestAnimationFrame(() => {
     pageReady.value = true;
@@ -419,24 +274,20 @@ onUnmounted(() => {
         <v-card-text class="d-flex justify-space-between flex-wrap ga-4">
           <div class="hero-copy">
             <div class="hero-kicker">Cashier Integration</div>
-            <h1 class="text-h4 font-weight-black mb-2">Cashier Workbench</h1>
+            <h1 class="text-h5 font-weight-black mb-2">Cashier Monitor</h1>
             <p class="hero-subtitle mb-0">{{ queueStatusText }}</p>
           </div>
 
           <div class="hero-actions">
-            <v-chip :color="status?.enabled ? 'success' : 'warning'" variant="flat" size="large">
-              {{ status?.enabled ? 'Live endpoint enabled' : 'Queue review mode' }}
+            <v-chip :color="status?.enabled ? 'success' : 'warning'" variant="tonal" size="large">
+              {{ syncModeLabel }}
             </v-chip>
             <v-chip color="info" variant="tonal" size="large">
               Sync mode: {{ status?.syncMode || 'queue' }}
             </v-chip>
-            <v-btn class="saas-btn saas-btn-light" prepend-icon="mdi-refresh" :loading="refreshing" @click="loadDashboard({ silent: true })">
-              Refresh
-            </v-btn>
-            <v-btn class="saas-btn saas-btn-primary" prepend-icon="mdi-send-outline" @click="dispatchQueue">
-              Dispatch Pending
-            </v-btn>
-          </div>
+            <v-chip color="warning" variant="tonal" size="large">
+              Read-only access
+            </v-chip>          </div>
         </v-card-text>
       </v-card>
 
@@ -453,7 +304,7 @@ onUnmounted(() => {
               <div class="readiness-tile">
                 <span class="readiness-label">Cashier Endpoint</span>
                 <strong>{{ status?.baseUrl || 'Not configured' }}</strong>
-                <span class="text-medium-emphasis">{{ status?.inboundPath || '/api/integrations/clinic-events' }}</span>
+                <span class="text-medium-emphasis">{{ status?.inboundPath || '/api/integrations/cashier/payment-status' }}</span>
               </div>
               <div class="readiness-tile">
                 <span class="readiness-label">Queue Totals</span>
@@ -462,8 +313,8 @@ onUnmounted(() => {
               </div>
               <div class="readiness-tile">
                 <span class="readiness-label">UI Readiness</span>
-                <strong>Payment review, dispatch, and clearance actions are wired</strong>
-                <span class="text-medium-emphasis">This page can support a cashier desk workflow without route changes later.</span>
+                <strong>Read-only finance monitoring is active</strong>
+                <span class="text-medium-emphasis">Payment edits and cashier approval actions are intentionally hidden from this screen.</span>
               </div>
             </v-card-text>
           </v-card>
@@ -480,7 +331,7 @@ onUnmounted(() => {
                 <template #title>{{ payment.source_module }} / {{ payment.source_key }}</template>
                 <template #subtitle>
                   {{ formatMoney(payment.amount_paid, 'PHP') }} collected
-                  <span class="text-medium-emphasis"> • balance {{ formatMoney(payment.balance_due, 'PHP') }}</span>
+                  <span class="text-medium-emphasis"> - balance {{ formatMoney(payment.balance_due, 'PHP') }}</span>
                 </template>
                 <template #append>
                   <v-chip :color="paymentStatusColor(payment.payment_status)" size="small" variant="tonal">{{ payment.payment_status }}</v-chip>
@@ -532,7 +383,7 @@ onUnmounted(() => {
                       <th>Payment</th>
                       <th>Sync</th>
                       <th>Created</th>
-                      <th class="text-right">Actions</th>
+                      <th class="text-right">Access</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -558,9 +409,7 @@ onUnmounted(() => {
                       </td>
                       <td>{{ formatDateTime(item.created_at) }}</td>
                       <td class="text-right">
-                        <div class="action-row">
-                          <v-btn size="small" variant="tonal" color="primary" @click="openPaymentEditor(item)">Update Payment</v-btn>
-                        </div>
+                        <v-chip size="small" variant="tonal" color="warning">Read-only</v-chip>
                       </td>
                     </tr>
                     <tr v-if="!queueItems.length">
@@ -611,7 +460,7 @@ onUnmounted(() => {
                       <th>Status</th>
                       <th>Requested By</th>
                       <th>Decision</th>
-                      <th class="text-right">Action</th>
+                      <th class="text-right">Access</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -633,9 +482,7 @@ onUnmounted(() => {
                         <div class="text-caption text-medium-emphasis">{{ record.decided_at ? formatDateTime(record.decided_at) : 'No decision yet' }}</div>
                       </td>
                       <td class="text-right">
-                        <div class="action-row">
-                          <v-btn size="small" variant="tonal" color="primary" @click="openDecisionEditor(record)">Review</v-btn>
-                        </div>
+                        <v-chip size="small" variant="tonal" color="warning">Read-only</v-chip>
                       </td>
                     </tr>
                     <tr v-if="!clearanceItems.length">
@@ -683,7 +530,7 @@ onUnmounted(() => {
 
                       <div class="text-caption text-medium-emphasis">
                         Updated {{ formatDateTime(payment.updated_at) }}
-                        <span v-if="payment.official_receipt"> • OR {{ payment.official_receipt }}</span>
+                        <span v-if="payment.official_receipt"> - OR {{ payment.official_receipt }}</span>
                       </div>
                     </v-card-text>
                   </v-card>
@@ -699,80 +546,6 @@ onUnmounted(() => {
 
       <ModuleActivityLogs module="cashier_integration" title="Cashier Integration Activity" :per-page="10" />
     </div>
-
-    <v-dialog v-model="paymentDialog.open" max-width="640">
-      <v-card class="dialog-card">
-        <v-card-item>
-          <v-card-title>Update Cashier Payment</v-card-title>
-          <v-card-subtitle>{{ paymentDialog.source_module }} / {{ paymentDialog.source_key }}</v-card-subtitle>
-        </v-card-item>
-        <v-divider />
-        <v-card-text>
-          <v-row>
-            <v-col cols="12" md="6">
-              <v-text-field v-model="paymentDialog.cashier_reference" label="Cashier Reference" variant="outlined" density="comfortable" />
-            </v-col>
-            <v-col cols="12" md="6">
-              <v-text-field v-model="paymentDialog.invoice_number" label="Invoice Number" variant="outlined" density="comfortable" />
-            </v-col>
-            <v-col cols="12" md="6">
-              <v-text-field v-model="paymentDialog.official_receipt" label="Official Receipt" variant="outlined" density="comfortable" />
-            </v-col>
-            <v-col cols="12" md="6">
-              <v-select v-model="paymentDialog.payment_status" :items="paymentStatusItems" label="Payment Status" variant="outlined" density="comfortable" />
-            </v-col>
-            <v-col cols="12" md="4">
-              <v-text-field v-model.number="paymentDialog.amount_due" type="number" step="0.01" label="Amount Due" variant="outlined" density="comfortable" />
-            </v-col>
-            <v-col cols="12" md="4">
-              <v-text-field v-model.number="paymentDialog.amount_paid" type="number" step="0.01" label="Amount Paid" variant="outlined" density="comfortable" />
-            </v-col>
-            <v-col cols="12" md="4">
-              <v-text-field v-model.number="paymentDialog.balance_due" type="number" step="0.01" label="Balance Due" variant="outlined" density="comfortable" />
-            </v-col>
-            <v-col cols="12">
-              <v-text-field v-model="paymentDialog.paid_at" type="datetime-local" label="Paid At" variant="outlined" density="comfortable" />
-            </v-col>
-          </v-row>
-        </v-card-text>
-        <v-card-actions class="px-6 pb-5">
-          <v-spacer />
-          <v-btn class="saas-btn saas-btn-ghost" variant="text" @click="paymentDialog.open = false">Cancel</v-btn>
-          <v-btn class="saas-btn saas-btn-primary" :loading="paymentDialog.loading" @click="submitPaymentUpdate">Save Payment</v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
-
-    <v-dialog v-model="decisionDialog.open" max-width="640">
-      <v-card class="dialog-card">
-        <v-card-item>
-          <v-card-title>Cashier Clearance Decision</v-card-title>
-          <v-card-subtitle>{{ decisionDialog.clearance_reference }} • {{ decisionDialog.patient_name }}</v-card-subtitle>
-        </v-card-item>
-        <v-divider />
-        <v-card-text>
-          <v-row>
-            <v-col cols="12" md="6">
-              <v-select v-model="decisionDialog.status" :items="decisionStatusItems" label="Decision Status" variant="outlined" density="comfortable" />
-            </v-col>
-            <v-col cols="12" md="6">
-              <v-text-field v-model="decisionDialog.approver_name" label="Approver Name" variant="outlined" density="comfortable" />
-            </v-col>
-            <v-col cols="12" md="6">
-              <v-text-field v-model="decisionDialog.approver_role" label="Approver Role" variant="outlined" density="comfortable" />
-            </v-col>
-            <v-col cols="12">
-              <v-textarea v-model="decisionDialog.remarks" rows="3" label="Remarks" variant="outlined" density="comfortable" />
-            </v-col>
-          </v-row>
-        </v-card-text>
-        <v-card-actions class="px-6 pb-5">
-          <v-spacer />
-          <v-btn class="saas-btn saas-btn-ghost" variant="text" @click="decisionDialog.open = false">Cancel</v-btn>
-          <v-btn class="saas-btn saas-btn-primary" :loading="decisionDialog.loading" @click="submitDecision">Save Decision</v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
 
     <v-snackbar v-model="toast.open" :color="toast.color" timeout="2800">{{ toast.text }}</v-snackbar>
   </div>
@@ -802,10 +575,10 @@ onUnmounted(() => {
 
 .hero-card {
   border-radius: 18px;
-  border-color: rgba(65, 126, 214, 0.2) !important;
-  color: #fff;
-  background: linear-gradient(120deg, #104f63 0%, #1d7a75 45%, #2ea36a 100%);
-  box-shadow: 0 16px 34px rgba(16, 79, 99, 0.22);
+  border-color: #d7e4ff !important;
+  color: #1d3557;
+  background: linear-gradient(120deg, #f4f8ff 0%, #eef4ff 45%, #f8faff 100%);
+  box-shadow: 0 10px 28px rgba(37, 99, 235, 0.08);
 }
 
 .hero-copy {
@@ -817,8 +590,9 @@ onUnmounted(() => {
   margin-bottom: 10px;
   border-radius: 999px;
   padding: 4px 10px;
-  background: rgba(255, 255, 255, 0.16);
-  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(47, 128, 237, 0.08);
+  border: 1px solid rgba(47, 128, 237, 0.18);
+  color: #2f5c9f;
   font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.7px;
@@ -826,7 +600,7 @@ onUnmounted(() => {
 }
 
 .hero-subtitle {
-  color: rgba(255, 255, 255, 0.9);
+  color: #5b6f8e;
 }
 
 .hero-actions {
@@ -986,9 +760,9 @@ onUnmounted(() => {
 }
 
 .saas-btn-light {
-  background: rgba(255, 255, 255, 0.14) !important;
-  color: #fff !important;
-  border: 1px solid rgba(255, 255, 255, 0.18) !important;
+  background: #f5f9ff !important;
+  color: #345381 !important;
+  border: 1px solid rgba(52, 92, 168, 0.2) !important;
 }
 
 .saas-btn-ghost {
@@ -1020,3 +794,4 @@ onUnmounted(() => {
   }
 }
 </style>
+

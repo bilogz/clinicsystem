@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onBeforeUnmount, onMounted } from 'vue';
 import { useCustomizerStore } from '../../../stores/customizer';
 import sidebarItems from './sidebarItem';
 import { useAuthStore } from '@/stores/auth';
 import { filterSidebarItemsByAccess } from '@/config/accessControl';
+import { usePmedReportNotifications } from '@/composables/usePmedReportNotifications';
 
 import Logo from '../logo/LogoMain.vue';
 import NavCollapse from './NavCollapse/NavCollapse.vue';
@@ -12,7 +13,16 @@ import NavItem from './NavItem/NavItem.vue';
 
 const customizer = useCustomizerStore();
 const auth = useAuthStore();
+const { startPolling, stopPolling } = usePmedReportNotifications();
 const sidebarMenu = computed(() => filterSidebarItemsByAccess(sidebarItems, auth.user));
+
+onMounted(() => {
+  startPolling();
+});
+
+onBeforeUnmount(() => {
+  stopPolling();
+});
 </script>
 
 <template>

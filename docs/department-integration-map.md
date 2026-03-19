@@ -1,250 +1,91 @@
 # Department Integration Map
 
-This clinic system is now prepared for PHP-based integration across the BPM flow:
+This clinic system now uses a database-first integration model backed by Supabase.
 
-1. HR
-2. PMED
-3. Clinic
-4. Guidance
-5. Prefect
-6. Comlab
-7. CRAD
-8. Cashier
-9. Registrar
+## Shared API
 
-The clinic side now exposes:
+The clinic app exposes:
 
 - `GET /api/integrations/departments/map`
 - `GET /api/integrations/departments/records`
 - `POST /api/integrations/departments/records`
+- `GET /api/integrations/departments/report?department=pmed`
+- `POST /api/integrations/departments/report`
 
-And the PHP integration files are ready in:
+## Shared Database Tables
 
-- [backend/integrations/departments/hr.php](/c:/Users/Bilog/Projects/clinicsystem/backend/integrations/departments/hr.php)
-- [backend/integrations/departments/pmed.php](/c:/Users/Bilog/Projects/clinicsystem/backend/integrations/departments/pmed.php)
-- [backend/integrations/departments/clinic.php](/c:/Users/Bilog/Projects/clinicsystem/backend/integrations/departments/clinic.php)
-- [backend/integrations/departments/guidance.php](/c:/Users/Bilog/Projects/clinicsystem/backend/integrations/departments/guidance.php)
-- [backend/integrations/departments/prefect.php](/c:/Users/Bilog/Projects/clinicsystem/backend/integrations/departments/prefect.php)
-- [backend/integrations/departments/comlab.php](/c:/Users/Bilog/Projects/clinicsystem/backend/integrations/departments/comlab.php)
-- [backend/integrations/departments/crad.php](/c:/Users/Bilog/Projects/clinicsystem/backend/integrations/departments/crad.php)
-- [backend/integrations/departments/cashier.php](/c:/Users/Bilog/Projects/clinicsystem/backend/integrations/departments/cashier.php)
-- [backend/integrations/departments/registrar.php](/c:/Users/Bilog/Projects/clinicsystem/backend/integrations/departments/registrar.php)
-- [backend/integrations/departments/seed_clearance_flow.php](/c:/Users/Bilog/Projects/clinicsystem/backend/integrations/departments/seed_clearance_flow.php)
+- `clinic.department_flow_profiles`
+- `clinic.department_clearance_records`
+- `clinic.cashier_integration_events`
+- `clinic.cashier_payment_links`
+- `public.module_activity_logs`
 
-## Connection Analysis Per Department
+## Department Roles
 
-### 1. HR
+### Registrar
 
-Purpose:
-- verify employment or staff clearance status
+- Receives payment confirmation, medical clearance, counseling reports, discipline records, and activity participation records.
+- Sends student enrollment data, student personal information, student academic records, student list, and enrollment statistics.
 
-Best clinic-side connection:
-- `/api/patients`
-- `/api/module-activity`
-- `/api/integrations/departments/records?department=hr`
+### Cashier
 
-Why:
-- HR usually does not need deep clinical data
-- patient/staff identity, latest status, and activity audit are enough for clearance checkpoints
+- Receives student enrollment data and payroll data.
+- Sends payment confirmation and financial reports.
 
-Recommended PHP behavior:
-- read pending HR clearance records
-- approve/reject/hold through `POST /api/integrations/departments/records`
+### Clinic
 
-### 2. PMED
+- Receives student personal information and incident reports.
+- Sends medical clearance, health reports, and health service reports.
 
-Purpose:
-- initial compliance requirement and pre-evaluation
+### Guidance
 
-Best clinic-side connection:
-- `/api/registrations`
-- `/api/patients`
-- `/api/integrations/departments/records?department=pmed`
+- Receives student personal information and student academic records.
+- Sends counseling reports, health concerns, discipline reports, and student recommendations.
 
-Why:
-- PMED fits best with intake and registration validation
-- registration concerns and patient type are already available
+### Prefect
 
-Recommended PHP behavior:
-- read registration-linked clearances
-- mark pending, approved, rejected, or hold
+- Receives student personal information.
+- Sends discipline records, discipline reports, incident reports, and discipline statistics.
 
-### 3. Clinic
+### Computer Laboratory
 
-Purpose:
-- health clearance validation
+- Receives student list and staff list.
+- Sends laboratory usage reports.
 
-Best clinic-side connection:
-- `/api/appointments`
-- `/api/checkups`
-- `/api/patients`
-- `/api/integrations/departments/records?department=clinic`
+### CRAD
 
-Why:
-- clinic validation depends on active appointment and check-up outcomes
-- this is the closest department to the main operational health data
+- Receives student list and student recommendations.
+- Sends activity participation records and program activity reports.
 
-Recommended PHP behavior:
-- verify patient appointment/check-up status
-- issue approval only when the health workflow is completed
+### HR
 
-### 4. Guidance
+- Receives staff evaluation feedback.
+- Sends payroll data, staff list, and employee performance records.
 
-Purpose:
-- behavioral and records validation
+### PMED
 
-Best clinic-side connection:
-- `/api/mental-health`
-- `/api/patients`
-- `/api/module-activity`
-- `/api/integrations/departments/records?department=guidance`
+- Receives enrollment statistics, financial reports, health service reports, counseling reports, discipline statistics, laboratory usage reports, program activity reports, and employee performance records.
+- Sends evaluation reports to School Administration and staff evaluation feedback to HR.
 
-Why:
-- guidance may need counseling/behavior-related status, but should still remain separate from direct clinical management
+## PMED Reporting
 
-Recommended PHP behavior:
-- check if a student has pending guidance issues
-- post guidance approval or hold with remarks
+PMED is the consolidated reporting hub.
 
-### 5. Prefect
+- Use `GET /api/integrations/departments/report?department=pmed` to fetch the current PMED report package.
+- Use `POST /api/integrations/departments/report` with `action=dispatch_report` to record outbound report dispatches.
 
-Purpose:
-- discipline clearance
-
-Best clinic-side connection:
-- `/api/module-activity`
-- `/api/patients`
-- `/api/integrations/departments/records?department=prefect`
-
-Why:
-- prefect usually depends more on administrative discipline data than clinical records
-- clinic should only hold the clearance status and audit trail
-
-Recommended PHP behavior:
-- keep the prefect system as source of truth
-- push only the clearance result into the clinic system
-
-### 6. Comlab
-
-Purpose:
-- operational or departmental asset clearance
-
-Best clinic-side connection:
-- `/api/module-activity`
-- `/api/patients`
-- `/api/integrations/departments/records?department=comlab`
-
-Why:
-- Comlab is operational, not clinical
-- the clinic system should store clearance stage and remarks, not own the equipment logic
-
-Recommended PHP behavior:
-- comlab system checks asset/accountability state
-- PHP bridge submits result back into clinic clearance records
-
-### 7. CRAD
-
-Purpose:
-- records and documentation validation
-
-Best clinic-side connection:
-- `/api/patients`
-- `/api/module-activity`
-- `/api/integrations/departments/records?department=crad`
-
-Why:
-- CRAD mainly needs identity, record presence, and document status markers
-
-Recommended PHP behavior:
-- validate records in the CRAD system
-- update clinic clearance stage after completion
-
-### 8. Cashier
-
-Purpose:
-- financial settlement and payment processing
-
-Best clinic-side connection:
-- `/api/integrations/cashier/status`
-- `/api/integrations/cashier/queue`
-- `/api/integrations/cashier/sync`
-- `/api/integrations/cashier/payment-status`
-- `/api/integrations/departments/records?department=cashier`
-
-Why:
-- cashier already has dedicated event queue and payment-link support
-- this is the most mature external integration in the clinic system right now
-
-Recommended PHP behavior:
-- fetch billing queue
-- process payment in cashier system
-- push payment result back to clinic
-- optionally mark cashier department clearance approved after settlement
-
-### 9. Registrar
-
-Purpose:
-- final approval and official documentation release
-
-Best clinic-side connection:
-- `/api/integrations/departments/records?department=registrar`
-- `/api/patients`
-- `/api/registrations`
-
-Why:
-- registrar is the final gate, so it should read the combined clearance state from all previous departments
-
-Recommended PHP behavior:
-- confirm all prior stages are approved
-- mark final registrar decision as approved
-- use this as the final release checkpoint
-
-## Shared Data Model
-
-All departments can write into the same clinic-side table:
-
-- `department_clearance_records`
-
-Important fields:
-- `clearance_reference`
-- `patient_id`
-- `patient_code`
-- `patient_name`
-- `patient_type`
-- `department_key`
-- `department_name`
-- `stage_order`
-- `status`
-- `remarks`
-- `approver_name`
-- `approver_role`
-- `external_reference`
-
-This lets the clinic system act as the BPM status board while each department still keeps its own internal system.
-
-## Recommended Flow
-
-1. Use [seed_clearance_flow.php](/c:/Users/Bilog/Projects/clinicsystem/backend/integrations/departments/seed_clearance_flow.php) to create one pending clearance row for each department.
-2. Each department’s PHP app reads only its own file, like `guidance.php` or `registrar.php`.
-3. Each department updates only its own decision.
-4. Registrar checks that all previous stages are approved before final release.
-
-## Example POST Payload For Any Department
+Example payload:
 
 ```json
 {
-  "clearance_reference": "GUIDANCE-PAT-2026-0001",
-  "status": "approved",
-  "remarks": "No pending behavioral case.",
-  "approver_name": "Guidance Officer",
-  "approver_role": "Department Head",
-  "external_reference": "GUIDE-2026-991"
+  "action": "dispatch_report",
+  "department_key": "pmed",
+  "target_key": "school_admin",
+  "report_type": "evaluation_reports"
 }
 ```
 
-## Practical Advice
+## Source Of Truth
 
-- Keep each department system as source of truth for its own rules.
-- Use the clinic system as the shared BPM checkpoint board.
-- Do not force every department to write directly into clinic module tables.
-- Use the department PHP files as controlled bridge endpoints.
+- `supabase/seed.sql` owns the standardized department flow profile data.
+- Department-specific merge scripts should not redefine flow order.

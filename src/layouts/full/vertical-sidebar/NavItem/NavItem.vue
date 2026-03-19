@@ -1,9 +1,17 @@
 <script setup>
+import { computed } from 'vue';
 import { mdiCircleOutline } from '@mdi/js';
 import { useAuthStore } from '@/stores/auth';
+import { usePmedReportNotifications } from '@/composables/usePmedReportNotifications';
 
 const props = defineProps({ item: Object, level: Number });
 const authStore = useAuthStore();
+const { notificationCount } = usePmedReportNotifications();
+
+const reportsNotificationCount = computed(() => {
+  if (props.item?.to !== '/modules/reports') return 0;
+  return notificationCount.value;
+});
 
 function resolveIcon(item) {
   if (typeof item?.icon === 'string' && item.icon.length > 0) return item.icon;
@@ -41,16 +49,28 @@ async function handleClick(event) {
       {{ item.subCaption }}
     </v-list-item-subtitle>
     <!---If any chip or label-->
-    <template v-slot:append v-if="item.chip">
-      <v-chip
-        :color="item.chipColor"
-        class="sidebarchip hide-menu"
-        :size="item.chipIcon ? 'small' : 'default'"
-        :variant="item.chipVariant"
-        :prepend-icon="item.chipIcon"
-      >
-        {{ item.chip }}
-      </v-chip>
+    <template v-slot:append v-if="item.chip || reportsNotificationCount">
+      <div class="d-flex align-center ga-2">
+        <v-chip
+          v-if="reportsNotificationCount"
+          color="error"
+          class="hide-menu sidebar-alert-chip"
+          size="x-small"
+          variant="flat"
+        >
+          {{ reportsNotificationCount }}
+        </v-chip>
+        <v-chip
+          v-if="item.chip"
+          :color="item.chipColor"
+          class="sidebarchip hide-menu"
+          :size="item.chipIcon ? 'small' : 'default'"
+          :variant="item.chipVariant"
+          :prepend-icon="item.chipIcon"
+        >
+          {{ item.chip }}
+        </v-chip>
+      </div>
     </template>
   </v-list-item>
 </template>
@@ -64,5 +84,11 @@ async function handleClick(event) {
 
 .sidebar-item-icon {
   flex: 0 0 auto;
+}
+
+.sidebar-alert-chip {
+  min-width: 22px;
+  justify-content: center;
+  font-weight: 700;
 }
 </style>

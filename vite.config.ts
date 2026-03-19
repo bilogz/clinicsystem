@@ -2,7 +2,7 @@ import vue from '@vitejs/plugin-vue';
 import { fileURLToPath, URL } from 'url';
 import { defineConfig, loadEnv } from 'vite';
 import vuetify from 'vite-plugin-vuetify';
-import { mysqlCompatibilityApiPlugin } from './server/mysqlCompatibilityApi.js';
+import { supabaseApiPlugin } from './server/supabaseApi.js';
 
 function normalizePathPrefix(value: string): string {
   if (!value) return '';
@@ -17,13 +17,8 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [
-      mysqlCompatibilityApiPlugin({
-        dbClient: 'mysql',
-        host: env.MYSQL_HOST,
-        port: env.MYSQL_PORT,
-        database: env.MYSQL_DATABASE,
-        user: env.MYSQL_USER,
-        password: env.MYSQL_PASSWORD,
+      supabaseApiPlugin({
+        databaseUrl: env.DATABASE_URL,
         cashierEnabled: env.CASHIER_INTEGRATION_ENABLED,
         cashierBaseUrl: env.CASHIER_SYSTEM_BASE_URL,
         cashierSharedToken: env.CASHIER_SHARED_TOKEN,

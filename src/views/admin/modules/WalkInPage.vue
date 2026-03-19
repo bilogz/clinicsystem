@@ -5,6 +5,7 @@ import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField
 import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { createWalkIn, fetchWalkIns, runWalkInAction, type Severity, type WalkInCase, type WalkInStatus, type WalkInAnalytics } from '@/services/walkInAdmin';
+import { toLocalInputDateTime } from '@/composables/useRealtimeClock';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
 import { emitSuccessModal } from '@/composables/useSuccessModal';
@@ -277,7 +278,7 @@ function resetForm(): void {
     existingPatient: false,
     patientRef: '',
     visitDepartment: 'General OPD',
-    checkinTime: new Date().toISOString().slice(0, 16),
+    checkinTime: toLocalInputDateTime(),
     painScale: 0,
     temperatureC: null,
     bloodPressure: '',
@@ -304,7 +305,7 @@ function applyCaseToForm(item: WalkInCase): void {
     existingPatient: Boolean(item.patient_ref),
     patientRef: item.patient_ref || '',
     visitDepartment: (item.visit_department as WalkInForm['visitDepartment']) || 'General OPD',
-    checkinTime: item.checkin_time ? new Date(item.checkin_time).toISOString().slice(0, 16) : new Date(item.intake_time).toISOString().slice(0, 16),
+    checkinTime: toLocalInputDateTime(item.checkin_time || item.intake_time),
     painScale: item.pain_scale ?? 0,
     temperatureC: item.temperature_c ?? null,
     bloodPressure: item.blood_pressure || '',

@@ -95,9 +95,7 @@ function trimTrailingSlashes(value: string): string {
 function resolveApiUrl(): string {
   const directApi = import.meta.env.VITE_CHECKUPS_API_URL?.trim();
   if (directApi) {
-    const normalized = trimTrailingSlashes(directApi);
-    const looksLikePhpBackend = /\.php($|\?)/i.test(normalized) || /\/backend\//i.test(normalized) || /clinic%20system/i.test(normalized);
-    if (!looksLikePhpBackend) return normalized;
+    return trimTrailingSlashes(directApi);
   }
 
   // Force the local Vite middleware endpoint so the check-up module stays on the app API.
