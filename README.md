@@ -121,12 +121,13 @@ Open the URL printed by Vite, usually:
 
 ## 10. Default accounts
 
-Use these demo credentials:
+Use these seeded clinic admin credentials:
 
-- Admin: `admin@cashier.local` / `admin123`
-- Faculty or Staff: `staff@cashier.local` / `staff123`
-- Compliance: `compliance@cashier.local` / `compliance123`
-- Student Portal: `2024-0001` / `student123`
+- Super Admin: `joecelgarcia1@gmail.com` / `Admin#123`
+- Appointments: `appointments.admin@nexora.local` / `Admin#123`
+- Registration: `registration.admin@nexora.local` / `Admin#123`
+- Laboratory: `lab.admin@nexora.local` / `Admin#123`
+- Reports: `reports.admin@nexora.local` / `Admin#123`
 
 ## 11. What to test first
 
