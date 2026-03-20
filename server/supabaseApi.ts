@@ -9,6 +9,7 @@ type SupabaseApiOptions = {
   cashierSharedToken?: string;
   cashierSyncMode?: string;
   cashierInboundPath?: string;
+  departmentSharedToken?: string;
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -299,10 +300,6 @@ function matchesDateRange(period: string): { sql: string; params: string[] } | n
   return null;
 }
 
-function normalizeSqlForPostgres(sql: string): string {
-  return sql;
-}
-
 function convertQuestionMarksToDollarParams(sql: string): string {
   let index = 0;
   let inSingle = false;
@@ -476,10 +473,311 @@ function buildCashierEventKey(parts: Array<string | number | null | undefined>):
     .digest('hex');
 }
 
+type DepartmentFlowMessage = {
+  message: string;
+  from?: string;
+  to?: string;
+};
+
+type DepartmentFlowProfileSeed = {
+  departmentKey: string;
+  departmentName: string;
+  flowOrder: number;
+  clearanceStageOrder: number;
+  receives: DepartmentFlowMessage[];
+  sends: DepartmentFlowMessage[];
+  notes: string;
+};
+
+const DEFAULT_DEPARTMENT_FLOW_PROFILES: DepartmentFlowProfileSeed[] = [
+  {
+    departmentKey: 'clinic',
+    departmentName: 'Clinic',
+    flowOrder: 3,
+    clearanceStageOrder: 3,
+    receives: [
+      { message: 'Student identity data', from: 'registrar' },
+      { message: 'Staff identity data', from: 'hr' },
+      { message: 'Health incident reports', from: 'prefect' }
+    ],
+    sends: [
+      { message: 'Medical clearance status', to: 'registrar' },
+      { message: 'Visit history summary', to: 'pmed' }
+    ],
+    notes: 'Stores medical visits, consultations, health records, and clearances.'
+  }
+];
+
+let clinicIntegrationBootstrapPromise: Promise<void> | null = null;
+
+function normalizeSqlForPostgres(sql: string): string {
+  const replacements: Array<[string, string]> = [
+    ['department_flow_profiles', 'clinic.department_flow_profiles'],
+    ['department_clearance_records', 'clinic.department_clearance_records'],
+    ['cashier_integration_events', 'clinic.cashier_integration_events'],
+    ['cashier_payment_links', 'clinic.cashier_payment_links'],
+    ['clinic_cashier_sync_logs', 'clinic.clinic_cashier_sync_logs'],
+    ['clinic_cashier_audit_logs', 'clinic.clinic_cashier_audit_logs']
+  ];
+  let inSingle = false;
+  let inDouble = false;
+  let out = '';
+
+  const isIdentifierBoundary = (value: string | undefined): boolean => value == null || !/[A-Za-z0-9_$.]/.test(value);
+
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i];
+    if (ch === "'" && !inDouble) {
+      const prev = sql[i - 1];
+      if (prev !== '\\') inSingle = !inSingle;
+      out += ch;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      const prev = sql[i - 1];
+      if (prev !== '\\') inDouble = !inDouble;
+      out += ch;
+      continue;
+    }
+    if (!inSingle && !inDouble) {
+      const replacement = replacements.find(([source]) =>
+        sql.startsWith(source, i) && isIdentifierBoundary(sql[i - 1]) && isIdentifierBoundary(sql[i + source.length])
+      );
+      if (replacement) {
+        out += replacement[1];
+        i += replacement[0].length - 1;
+        continue;
+      }
+    }
+    out += ch;
+  }
+
+  return out;
+}
+
+async function bootstrapClinicIntegrationSchema(pool: Pool): Promise<void> {
+  await pool.query('CREATE SCHEMA IF NOT EXISTS clinic');
+  await pool.query(
+    `CREATE OR REPLACE FUNCTION clinic.set_updated_at_timestamp()
+     RETURNS trigger
+     LANGUAGE plpgsql
+     AS $$
+     BEGIN
+       NEW.updated_at = NOW();
+       RETURN NEW;
+     END;
+     $$;`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS clinic.department_flow_profiles (
+       department_key TEXT PRIMARY KEY,
+       department_name TEXT NOT NULL,
+       flow_order INT NOT NULL UNIQUE,
+       clearance_stage_order INT NOT NULL UNIQUE,
+       receives JSONB NOT NULL DEFAULT '[]'::jsonb,
+       sends JSONB NOT NULL DEFAULT '[]'::jsonb,
+       notes TEXT NULL,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+     )`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS clinic.department_clearance_records (
+       id BIGSERIAL PRIMARY KEY,
+       clearance_reference TEXT NOT NULL UNIQUE,
+       patient_id TEXT NULL,
+       patient_code TEXT NULL,
+       patient_name TEXT NOT NULL,
+       patient_type TEXT NOT NULL DEFAULT 'unknown',
+       department_key TEXT NOT NULL REFERENCES clinic.department_flow_profiles (department_key) ON DELETE RESTRICT,
+       department_name TEXT NOT NULL,
+       stage_order INT NOT NULL,
+       status TEXT NOT NULL DEFAULT 'pending',
+       remarks TEXT NULL,
+       approver_name TEXT NULL,
+       approver_role TEXT NULL,
+       external_reference TEXT NULL,
+       requested_by TEXT NULL,
+       decided_at TIMESTAMPTZ NULL,
+       metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+     )`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS clinic.cashier_integration_events (
+       id BIGSERIAL PRIMARY KEY,
+       event_key TEXT NOT NULL UNIQUE,
+       source_module TEXT NOT NULL,
+       source_entity TEXT NOT NULL,
+       source_key TEXT NOT NULL,
+       patient_name TEXT NULL,
+       patient_type TEXT NOT NULL DEFAULT 'unknown',
+       reference_no TEXT NULL,
+       amount_due NUMERIC(10, 2) NOT NULL DEFAULT 0,
+       currency_code TEXT NOT NULL DEFAULT 'PHP',
+       payment_status TEXT NOT NULL DEFAULT 'unpaid',
+       sync_status TEXT NOT NULL DEFAULT 'pending',
+       last_error TEXT NULL,
+       synced_at TIMESTAMPTZ NULL,
+       payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+     )`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS clinic.cashier_payment_links (
+       id BIGSERIAL PRIMARY KEY,
+       source_module TEXT NOT NULL,
+       source_key TEXT NOT NULL,
+       cashier_reference TEXT NULL,
+       cashier_billing_id BIGINT NULL,
+       invoice_number TEXT NULL,
+       official_receipt TEXT NULL,
+       amount_due NUMERIC(10, 2) NOT NULL DEFAULT 0,
+       amount_paid NUMERIC(10, 2) NOT NULL DEFAULT 0,
+       balance_due NUMERIC(10, 2) NOT NULL DEFAULT 0,
+       payment_status TEXT NOT NULL DEFAULT 'unpaid',
+       latest_payment_method TEXT NULL,
+       cashier_can_proceed SMALLINT NOT NULL DEFAULT 0,
+       cashier_verified_at TIMESTAMPTZ NULL,
+       paid_at TIMESTAMPTZ NULL,
+       metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       UNIQUE (source_module, source_key)
+     )`
+  );
+  await pool.query(
+    `ALTER TABLE clinic.department_clearance_records
+       DROP CONSTRAINT IF EXISTS department_clearance_records_patient_type_check`
+  );
+  await pool.query(
+    `ALTER TABLE clinic.department_clearance_records
+       ADD CONSTRAINT department_clearance_records_patient_type_check
+       CHECK (patient_type IN ('student', 'teacher', 'unknown')) NOT VALID`
+  );
+  await pool.query(
+    `ALTER TABLE clinic.cashier_integration_events
+       DROP CONSTRAINT IF EXISTS cashier_integration_events_patient_type_check`
+  );
+  await pool.query(
+    `ALTER TABLE clinic.cashier_integration_events
+       ADD CONSTRAINT cashier_integration_events_patient_type_check
+       CHECK (patient_type IN ('student', 'teacher', 'unknown')) NOT VALID`
+  );
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_clearance_department
+       ON clinic.department_clearance_records (department_key, status, created_at DESC)`
+  );
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_clearance_patient
+       ON clinic.department_clearance_records (patient_name, patient_code)`
+  );
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_cashier_events_sync_status
+       ON clinic.cashier_integration_events (sync_status, created_at DESC)`
+  );
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_cashier_events_source_lookup
+       ON clinic.cashier_integration_events (source_module, source_key)`
+  );
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS idx_cashier_reference
+       ON clinic.cashier_payment_links (cashier_reference)`
+  );
+  await pool.query(
+    `DROP TRIGGER IF EXISTS trg_department_flow_profiles_updated_at ON clinic.department_flow_profiles`
+  );
+  await pool.query(
+    `CREATE TRIGGER trg_department_flow_profiles_updated_at
+       BEFORE UPDATE ON clinic.department_flow_profiles
+       FOR EACH ROW
+       EXECUTE FUNCTION clinic.set_updated_at_timestamp()`
+  );
+  await pool.query(
+    `DROP TRIGGER IF EXISTS trg_department_clearance_records_updated_at ON clinic.department_clearance_records`
+  );
+  await pool.query(
+    `CREATE TRIGGER trg_department_clearance_records_updated_at
+       BEFORE UPDATE ON clinic.department_clearance_records
+       FOR EACH ROW
+       EXECUTE FUNCTION clinic.set_updated_at_timestamp()`
+  );
+  await pool.query(
+    `DROP TRIGGER IF EXISTS trg_cashier_integration_events_updated_at ON clinic.cashier_integration_events`
+  );
+  await pool.query(
+    `CREATE TRIGGER trg_cashier_integration_events_updated_at
+       BEFORE UPDATE ON clinic.cashier_integration_events
+       FOR EACH ROW
+       EXECUTE FUNCTION clinic.set_updated_at_timestamp()`
+  );
+  await pool.query(
+    `DROP TRIGGER IF EXISTS trg_cashier_payment_links_updated_at ON clinic.cashier_payment_links`
+  );
+  await pool.query(
+    `CREATE TRIGGER trg_cashier_payment_links_updated_at
+       BEFORE UPDATE ON clinic.cashier_payment_links
+       FOR EACH ROW
+       EXECUTE FUNCTION clinic.set_updated_at_timestamp()`
+  );
+  await pool.query(
+    `DO $$
+     BEGIN
+       IF to_regclass('public.department_flow_profiles') IS NULL THEN
+         EXECUTE 'CREATE VIEW public.department_flow_profiles AS SELECT * FROM clinic.department_flow_profiles';
+       END IF;
+       IF to_regclass('public.department_clearance_records') IS NULL THEN
+         EXECUTE 'CREATE VIEW public.department_clearance_records AS SELECT * FROM clinic.department_clearance_records';
+       END IF;
+       IF to_regclass('public.cashier_integration_events') IS NULL THEN
+         EXECUTE 'CREATE VIEW public.cashier_integration_events AS SELECT * FROM clinic.cashier_integration_events';
+       END IF;
+       IF to_regclass('public.cashier_payment_links') IS NULL THEN
+         EXECUTE 'CREATE VIEW public.cashier_payment_links AS SELECT * FROM clinic.cashier_payment_links';
+       END IF;
+     END $$;`
+  );
+
+  for (const profile of DEFAULT_DEPARTMENT_FLOW_PROFILES) {
+    await pool.query(
+      `INSERT INTO clinic.department_flow_profiles (
+         department_key, department_name, flow_order, clearance_stage_order, receives, sends, notes
+       ) VALUES (?, ?, ?, ?, ?::jsonb, ?::jsonb, ?)
+       ON CONFLICT (department_key) DO UPDATE SET
+         department_name = EXCLUDED.department_name,
+         flow_order = EXCLUDED.flow_order,
+         clearance_stage_order = EXCLUDED.clearance_stage_order,
+         receives = EXCLUDED.receives,
+         sends = EXCLUDED.sends,
+         notes = EXCLUDED.notes,
+         updated_at = NOW()`,
+      [
+        profile.departmentKey,
+        profile.departmentName,
+        profile.flowOrder,
+        profile.clearanceStageOrder,
+        JSON.stringify(profile.receives),
+        JSON.stringify(profile.sends),
+        profile.notes
+      ]
+    );
+  }
+}
+
+async function ensureClinicIntegrationBootstrap(pool: Pool): Promise<void> {
+  if (!clinicIntegrationBootstrapPromise) {
+    clinicIntegrationBootstrapPromise = bootstrapClinicIntegrationSchema(pool).catch((error) => {
+      clinicIntegrationBootstrapPromise = null;
+      throw error;
+    });
+  }
+  await clinicIntegrationBootstrapPromise;
+}
+
 async function ensureCashierIntegrationTables(pool: Pool): Promise<void> {
-  // Supabase-only: tables come from `supabase/schema.sql`.
-  void pool;
-  return;
+  await ensureClinicIntegrationBootstrap(pool);
 }
 
 async function syncAppointmentCashierColumnsFromLinks(pool: Pool, bookingId?: string): Promise<void> {
@@ -627,9 +925,7 @@ async function backfillAppointmentCashierEvents(pool: Pool, options: SupabaseApi
 }
 
 async function ensureDepartmentClearanceTables(pool: Pool): Promise<void> {
-  // Supabase-only: tables come from `supabase/schema.sql`.
-  void pool;
-  return;
+  await ensureClinicIntegrationBootstrap(pool);
 }
 
 function departmentIntegrationMap(): Array<{
@@ -643,7 +939,7 @@ function departmentIntegrationMap(): Array<{
   return [
     { key: 'hr', name: 'HR', stageOrder: 1, purpose: 'Employment and staff clearance verification', recommendedEndpoint: '/api/patients', clinicDataSources: ['patient_master', 'module_activity_logs'] },
     { key: 'pmed', name: 'PMED', stageOrder: 2, purpose: 'Evaluation and consolidated inter-department reporting', recommendedEndpoint: '/api/integrations/departments/report?department=pmed', clinicDataSources: ['patient_registrations', 'cashier_payment_links', 'checkup_visits', 'mental_health_sessions', 'laboratory_requests', 'department_clearance_records', 'module_activity_logs'] },
-    { key: 'clinic', name: 'Clinic', stageOrder: 3, purpose: 'Health clearance validation', recommendedEndpoint: '/api/checkups', clinicDataSources: ['patient_appointments', 'checkup_visits', 'patient_master'] },
+    { key: 'clinic', name: 'Clinic', stageOrder: 3, purpose: 'Receives student/staff identity data and stores medical visits, consultations, health records, and clearances.', recommendedEndpoint: '/api/checkups', clinicDataSources: ['patient_appointments', 'checkup_visits', 'patient_master', 'department_clearance_records'] },
     { key: 'guidance', name: 'Guidance', stageOrder: 4, purpose: 'Behavioral and records validation', recommendedEndpoint: '/api/mental-health', clinicDataSources: ['mental_health_sessions', 'module_activity_logs', 'patient_master'] },
     { key: 'prefect', name: 'Prefect', stageOrder: 5, purpose: 'Discipline clearance validation', recommendedEndpoint: '/api/module-activity', clinicDataSources: ['module_activity_logs', 'patient_master'] },
     { key: 'comlab', name: 'Comlab', stageOrder: 6, purpose: 'Operational and asset clearance', recommendedEndpoint: '/api/module-activity', clinicDataSources: ['module_activity_logs', 'patient_master'] },
@@ -667,6 +963,7 @@ async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise
      LIMIT 1`,
     [normalizedKey]
   );
+  const seededProfile = DEFAULT_DEPARTMENT_FLOW_PROFILES.find((item) => item.departmentKey === normalizedKey);
 
   const profile = profileRows[0]
     ? {
@@ -682,11 +979,11 @@ async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise
     : {
         department_key: department.key,
         department_name: department.name,
-        flow_order: department.stageOrder,
-        clearance_stage_order: department.stageOrder,
-        receives: [],
-        sends: [],
-        notes: department.purpose,
+        flow_order: seededProfile?.flowOrder ?? department.stageOrder,
+        clearance_stage_order: seededProfile?.clearanceStageOrder ?? department.stageOrder,
+        receives: seededProfile?.receives || [],
+        sends: seededProfile?.sends || [],
+        notes: seededProfile?.notes || department.purpose,
         updated_at: null
       };
 
@@ -2109,6 +2406,48 @@ async function resolveAdminSession(pool: Pool, req: any): Promise<RowDataPacket 
   return rows[0] || null;
 }
 
+function extractIntegrationToken(req: any): string {
+  const directHeader = req.headers?.['x-integration-token'];
+  const headerToken = Array.isArray(directHeader) ? toSafeText(directHeader[0]) : toSafeText(directHeader);
+  if (headerToken) return headerToken;
+
+  const authorization = Array.isArray(req.headers?.authorization)
+    ? toSafeText(req.headers.authorization[0])
+    : toSafeText(req.headers?.authorization);
+  const bearerMatch = authorization.match(/^Bearer\s+(.+)$/i);
+  return bearerMatch?.[1]?.trim() || '';
+}
+
+function secureTokenEquals(actual: string, expected: string): boolean {
+  const actualBuffer = Buffer.from(actual);
+  const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length) return false;
+  return timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function hasValidDepartmentIntegrationToken(req: any, options: SupabaseApiOptions): boolean {
+  const expected = toSafeText(options.departmentSharedToken);
+  const actual = extractIntegrationToken(req);
+  if (!expected || !actual) return false;
+  return secureTokenEquals(actual, expected);
+}
+
+function resolveDepartmentActor(
+  explicitActor: unknown,
+  departmentName: string,
+  adminSession: RowDataPacket | null,
+  tokenAuthenticated: boolean
+): string {
+  return (
+    toSafeText(explicitActor) ||
+    toSafeText(adminSession?.full_name) ||
+    toSafeText(adminSession?.username) ||
+    (tokenAuthenticated ? `${departmentName} Integration` : '') ||
+    departmentName ||
+    'System'
+  );
+}
+
 export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
   return {
     name: 'supabase-api',
@@ -2782,6 +3121,12 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               const targetKey = toSafeText(body.target_key).toLowerCase();
               const reportType = toSafeText(body.report_type).toLowerCase();
               const departmentDef = departmentIntegrationMap().find((item) => item.key === departmentKey);
+              const adminSession = await resolveAdminSession(pool, req);
+              const tokenAuthenticated = hasValidDepartmentIntegrationToken(req, options);
+              if (!adminSession && !tokenAuthenticated) {
+                writeJson(res, 401, { ok: false, message: 'Admin authentication or X-Integration-Token is required to dispatch department reports.' });
+                return;
+              }
               if (action !== 'dispatch_report' || !departmentDef || !targetKey || !reportType) {
                 writeJson(res, 422, { ok: false, message: 'action=dispatch_report, department_key, target_key, and report_type are required.' });
                 return;
@@ -2795,7 +3140,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 'department_reports',
                 'Report Dispatched',
                 detail,
-                toSafeText(body.actor) || departmentDef.name,
+                resolveDepartmentActor(body.actor, departmentDef.name, adminSession, tokenAuthenticated),
                 'department_report',
                 reportKey,
                 {
@@ -2861,11 +3206,14 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 data: {
                   items: rows.map((row) => ({
                     ...row,
-                    patient_type: inferPatientType({
-                      patientType: row.patient_type,
-                      patientName: row.patient_name,
-                      patientId: row.patient_id || row.patient_code || row.external_reference
-                    }),
+                    patient_type:
+                      toSafeText(row.patient_type) !== ''
+                        ? normalizePatientType(row.patient_type)
+                        : inferPatientType({
+                            patientType: row.patient_type,
+                            patientName: row.patient_name,
+                            patientId: row.patient_id || row.patient_code || row.external_reference
+                          }),
                     metadata: parseJsonRecord(row.metadata),
                     created_at: formatDateTimeCell(row.created_at),
                     updated_at: formatDateTimeCell(row.updated_at),
@@ -2883,18 +3231,25 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               const action = toSafeText(body.action).toLowerCase();
               const departmentKey = toSafeText(body.department_key).toLowerCase();
               const departmentDef = departmentIntegrationMap().find((item) => item.key === departmentKey);
+              const adminSession = await resolveAdminSession(pool, req);
+              const tokenAuthenticated = hasValidDepartmentIntegrationToken(req, options);
               if (!departmentDef && action !== 'seed_defaults') {
                 writeJson(res, 422, { ok: false, message: 'Valid department_key is required.' });
                 return;
               }
 
               if (action === 'request_clearance') {
+                if (!adminSession && !tokenAuthenticated) {
+                  writeJson(res, 401, { ok: false, message: 'Admin authentication or X-Integration-Token is required to create department clearance records.' });
+                  return;
+                }
                 const patientName = toSafeText(body.patient_name);
                 if (!patientName) {
                   writeJson(res, 422, { ok: false, message: 'patient_name is required.' });
                   return;
                 }
                 const clearanceReference = toSafeText(body.clearance_reference) || `CLR-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 899999)}`;
+                const requesterName = resolveDepartmentActor(body.requested_by, departmentDef?.name || 'Department', adminSession, tokenAuthenticated);
                 await pool.query(
                   `INSERT INTO department_clearance_records (
                     clearance_reference, patient_id, patient_code, patient_name, patient_type,
@@ -2930,18 +3285,17 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                     toSafeText(body.approver_name) || null,
                     toSafeText(body.approver_role) || null,
                     toSafeText(body.external_reference) || null,
-                    toSafeText(body.requested_by) || null,
+                    requesterName,
                     JSON.stringify(parseJsonRecord(body.metadata))
                   ]
                 );
-                await insertModuleActivity(pool, 'department_clearance', 'Clearance Requested', `Clearance requested from ${departmentDef?.name} for ${patientName}.`, toSafeText(body.requested_by) || 'System', 'clearance', clearanceReference, { department: departmentDef?.key });
+                await insertModuleActivity(pool, 'department_clearance', 'Clearance Requested', `Clearance requested from ${departmentDef?.name} for ${patientName}.`, requesterName, 'clearance', clearanceReference, { department: departmentDef?.key, auth_mode: tokenAuthenticated && !adminSession ? 'shared_token' : 'admin_session' });
                 writeJson(res, 200, { ok: true, message: 'Department clearance request saved.', data: { clearance_reference: clearanceReference } });
                 return;
               }
 
               if (action === 'submit_decision') {
                 if (departmentKey === 'cashier') {
-                  const adminSession = await resolveAdminSession(pool, req);
                   if (!adminSession) {
                     writeJson(res, 401, { ok: false, message: 'Admin authentication required.' });
                     return;
@@ -2950,6 +3304,9 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                     writeJson(res, 403, { ok: false, message: 'Only cashier or finance-authorized admins can submit cashier clearance decisions.' });
                     return;
                   }
+                } else if (!adminSession && !tokenAuthenticated) {
+                  writeJson(res, 401, { ok: false, message: 'Admin authentication or X-Integration-Token is required to submit department decisions.' });
+                  return;
                 }
                 const clearanceReference = toSafeText(body.clearance_reference);
                 const nextStatus = toSafeText(body.status).toLowerCase();
@@ -2957,6 +3314,11 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   writeJson(res, 422, { ok: false, message: 'clearance_reference and valid status are required.' });
                   return;
                 }
+                const approverName = resolveDepartmentActor(body.approver_name, departmentDef?.name || 'Department', adminSession, tokenAuthenticated);
+                const mergedMetadata = {
+                  ...parseJsonRecord(body.metadata),
+                  auth_mode: tokenAuthenticated && !adminSession ? 'shared_token' : 'admin_session'
+                };
                 await pool.query(
                   `UPDATE department_clearance_records
                    SET status = ?, remarks = ?, approver_name = ?, approver_role = ?, external_reference = COALESCE(?, external_reference),
@@ -2965,19 +3327,23 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   [
                     nextStatus,
                     toSafeText(body.remarks) || null,
-                    toSafeText(body.approver_name) || null,
-                    toSafeText(body.approver_role) || null,
+                    approverName,
+                    toSafeText(body.approver_role) || (tokenAuthenticated && !adminSession ? `${departmentDef?.name || 'Department'} API` : null),
                     toSafeText(body.external_reference) || null,
-                    JSON.stringify(parseJsonRecord(body.metadata)),
+                    JSON.stringify(mergedMetadata),
                     clearanceReference
                   ]
                 );
-                await insertModuleActivity(pool, 'department_clearance', `Clearance ${nextStatus}`, `${departmentDef?.name} marked ${clearanceReference} as ${nextStatus}.`, toSafeText(body.approver_name) || departmentDef?.name || 'External Department', 'clearance', clearanceReference, { department: departmentDef?.key, status: nextStatus });
+                await insertModuleActivity(pool, 'department_clearance', `Clearance ${nextStatus}`, `${departmentDef?.name} marked ${clearanceReference} as ${nextStatus}.`, approverName, 'clearance', clearanceReference, { department: departmentDef?.key, status: nextStatus, auth_mode: tokenAuthenticated && !adminSession ? 'shared_token' : 'admin_session' });
                 writeJson(res, 200, { ok: true, message: 'Department decision recorded.' });
                 return;
               }
 
               if (action === 'seed_defaults') {
+                if (!adminSession) {
+                  writeJson(res, 401, { ok: false, message: 'Admin authentication required to seed default department records.' });
+                  return;
+                }
                 const patientName = toSafeText(body.patient_name) || 'Integration Test Patient';
                 const patientCode = toSafeText(body.patient_code) || 'PAT-INTEGRATION-001';
                 const patientType = normalizePatientType(body.patient_type);

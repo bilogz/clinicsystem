@@ -1,4 +1,3 @@
-import { fetchApiData } from '@/services/apiClient';
 import { fetchAppointments, type AppointmentQuery, type AppointmentRow } from '@/services/appointmentsAdmin';
 
 export type AppointmentBookedByRole = 'student' | 'teacher' | 'admin' | 'unknown';
@@ -87,6 +86,14 @@ function buildSummary(items: AppointmentMonitorRow[]): AppointmentMonitorSummary
   );
 }
 
+export function buildAppointmentMonitorPayload(appointments: AppointmentRow[]): AppointmentMonitorPayload {
+  const items = appointments.map((item) => rowFromAppointment(item));
+  return {
+    summary: buildSummary(items),
+    items
+  };
+}
+
 export function appointmentBookingRoleLabel(role: AppointmentBookedByRole): string {
   if (role === 'student') return 'Booked by Student';
   if (role === 'teacher') return 'Booked by Teacher';
@@ -102,27 +109,6 @@ export function appointmentBookingRoleColor(role: AppointmentBookedByRole): stri
 }
 
 export async function fetchAppointmentMonitor(query: AppointmentQuery = {}): Promise<AppointmentMonitorPayload> {
-  try {
-    const params = new URLSearchParams();
-    Object.entries(query).forEach(([key, value]) => {
-      if (value === undefined || value === null || value === '') return;
-      const mapped = key === 'perPage' ? 'per_page' : key;
-      params.set(mapped, String(value));
-    });
-    const suffix = params.toString();
-    const endpoint = suffix ? `/api/appointment-monitor?${suffix}` : '/api/appointment-monitor';
-    const payload = await fetchApiData<{ summary?: AppointmentMonitorSummary; items?: Array<Record<string, unknown>> }>(endpoint, { ttlMs: 8_000 });
-    const items = Array.isArray(payload.items) ? payload.items.map((item) => normalizeMonitorRow(item)) : [];
-    return {
-      summary: payload.summary || buildSummary(items),
-      items
-    };
-  } catch {
-    const data = await fetchAppointments(query);
-    const items = data.items.map((item) => rowFromAppointment(item));
-    return {
-      summary: buildSummary(items),
-      items
-    };
-  }
+  const data = await fetchAppointments(query);
+  return buildAppointmentMonitorPayload(data.items);
 }

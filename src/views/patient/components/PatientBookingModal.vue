@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import { createAppointment, type CreateAppointmentPayload } from '@/services/appointmentsAdmin';
+import { listRegistrarPeople, type RegistrarDirectoryPerson } from '@/services/registrarDirectory';
 import {
   fetchDoctorTimeCatalog,
   fetchDoctorAvailability,
@@ -72,6 +73,9 @@ const submitting = ref(false);
 const step = ref<CreateStep>(1);
 const stepError = ref('');
 const appointedRole = ref<AppointedRole>('student');
+const registrarLookupLoading = ref(false);
+const registrarDirectory = ref<RegistrarDirectoryPerson[]>([]);
+const registrarLookupKey = ref('');
 const submitSuccess = ref<null | { bookingId: string; patientName: string; date: string; time: string }>(null);
 const errors = reactive<Record<string, string>>({});
 const PATIENT_BOOKING_COOKIE = 'patient_booking_draft';
@@ -124,7 +128,9 @@ const form = reactive<
   consent_acknowledged: false
 });
 
-const modalTitle = computed(() => (submitSuccess.value ? 'Booking Submitted' : 'Book Student Appointment'));
+const modalTitle = computed(() =>
+  submitSuccess.value ? 'Booking Submitted' : `Book ${appointedRole.value === 'teacher' ? 'Teacher' : 'Student'} Appointment`
+);
 const stepStatus = computed(() => ({ patient: step.value >= 1, schedule: step.value >= 2, review: step.value >= 3 }));
 const isMinor = computed(() => Number(form.patient_age || 0) > 0 && Number(form.patient_age || 0) < 18);
 
@@ -218,6 +224,21 @@ const reviewRows = computed(() => [
   { label: 'Schedule', value: `${form.appointment_date || '--'} ${form.preferred_time || ''}`.trim() },
   { label: 'Priority', value: form.appointment_priority || '--' }
 ]);
+
+const registrarLookupLabel = computed(() =>
+  appointedRole.value === 'teacher' ? 'Registrar Teacher Lookup' : 'Registrar Student Lookup'
+);
+
+const registrarLookupItems = computed(() =>
+  registrarDirectory.value.map((item) => ({
+    title: `${item.fullName} (${item.code})`,
+    value: item.code,
+    subtitle:
+      item.type === 'teacher'
+        ? item.department || 'Registrar instructor record'
+        : [item.program, item.yearLevel ? `Year ${item.yearLevel}` : ''].filter(Boolean).join(' • ')
+  }))
+);
 
 function toTimeMinutes(value: string): number {
   const [hh, mm] = String(value || '')
@@ -380,6 +401,7 @@ function resetForm(): void {
   submitSuccess.value = null;
   step.value = 1;
   appointedRole.value = 'student';
+  registrarLookupKey.value = '';
   form.patient_id = '';
   form.patient_name = props.patientContext?.fullName || '';
   form.patient_email = props.patientContext?.email || '';
@@ -406,6 +428,26 @@ function resetForm(): void {
     form.patient_id = props.patientContext.patientCode;
   }
   applyBookingDraftCookie();
+}
+
+async function loadRegistrarDirectory(): Promise<void> {
+  registrarLookupLoading.value = true;
+  try {
+    registrarDirectory.value = await listRegistrarPeople(appointedRole.value);
+  } catch {
+    registrarDirectory.value = [];
+  } finally {
+    registrarLookupLoading.value = false;
+  }
+}
+
+function applyRegistrarLookup(value: string | null): void {
+  registrarLookupKey.value = String(value || '').trim();
+  if (!registrarLookupKey.value) return;
+  const selected = registrarDirectory.value.find((item) => item.code === registrarLookupKey.value);
+  if (!selected) return;
+  form.patient_id = selected.code;
+  form.patient_name = selected.fullName;
 }
 
 function closeModal(): void {
@@ -714,7 +756,7 @@ watch(
     if (open) {
       isInitializing.value = true;
       resetForm();
-      await loadDoctorsCatalog();
+      await Promise.all([loadDoctorsCatalog(), loadRegistrarDirectory()]);
       isInitializing.value = false;
       queueRefreshScheduleSection(true);
       return;
@@ -733,6 +775,15 @@ watch(
     }
     if (!model.value || isInitializing.value) return;
     queueRefreshScheduleSection();
+  }
+);
+
+watch(
+  () => appointedRole.value,
+  () => {
+    registrarLookupKey.value = '';
+    if (!model.value || isInitializing.value) return;
+    void loadRegistrarDirectory();
   }
 );
 
@@ -825,7 +876,7 @@ watch(
       <v-card-text>
         <template v-if="!submitSuccess">
           <div class="modal-stepper" role="group" aria-label="Booking steps">
-            <div class="step" :class="{ active: stepStatus.patient, current: step === 1 }"><span>1</span><label>Student Info</label></div>
+            <div class="step" :class="{ active: stepStatus.patient, current: step === 1 }"><span>1</span><label>{{ appointedRole === 'teacher' ? 'Teacher Info' : 'Student Info' }}</label></div>
             <div class="line"></div>
             <div class="step" :class="{ active: stepStatus.schedule, current: step === 2 }"><span>2</span><label>Schedule</label></div>
             <div class="line"></div>
@@ -838,10 +889,10 @@ watch(
             <div class="grid-col span-12">
               <v-text-field
                 v-model="form.patient_id"
-                label="Student ID (optional)"
+                :label="appointedRole === 'teacher' ? 'Teacher ID (optional)' : 'Student ID (optional)'"
                 variant="outlined"
                 density="comfortable"
-                hint="If you already have a student ID, enter it here."
+                :hint="appointedRole === 'teacher' ? 'If you already have a teacher ID, enter it here.' : 'If you already have a student ID, enter it here.'"
                 persistent-hint
                 hide-details="auto"
               />
@@ -858,7 +909,23 @@ watch(
                 hide-details
               />
             </div>
-            <div class="grid-col span-6"><v-text-field v-model="form.patient_name" label="Student Name *" variant="outlined" density="comfortable" :error-messages="errors.patient_name" /></div>
+            <div class="grid-col span-6">
+              <v-autocomplete
+                :items="registrarLookupItems"
+                item-title="title"
+                item-value="value"
+                :model-value="registrarLookupKey"
+                :label="registrarLookupLabel"
+                variant="outlined"
+                density="comfortable"
+                :loading="registrarLookupLoading"
+                :hint="`Fetch ${appointedRole === 'teacher' ? 'teacher' : 'student'} records from Registrar.`"
+                persistent-hint
+                clearable
+                @update:model-value="applyRegistrarLookup"
+              />
+            </div>
+            <div class="grid-col span-6"><v-text-field v-model="form.patient_name" :label="appointedRole === 'teacher' ? 'Teacher Name *' : 'Student Name *'" variant="outlined" density="comfortable" :error-messages="errors.patient_name" /></div>
             <div class="grid-col span-6"><v-text-field v-model="form.patient_email" label="Email" variant="outlined" density="comfortable" hide-details /></div>
             <div class="grid-col span-6"><v-text-field v-model="form.phone_number" label="Phone Number *" variant="outlined" density="comfortable" :error-messages="errors.phone_number" /></div>
             <div class="grid-col span-3"><v-text-field v-model.number="form.patient_age" label="Age *" type="number" min="0" variant="outlined" density="comfortable" :error-messages="errors.patient_age" /></div>

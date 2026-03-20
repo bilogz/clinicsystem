@@ -23,7 +23,8 @@ export default defineConfig(({ mode }) => {
         cashierBaseUrl: env.CASHIER_SYSTEM_BASE_URL,
         cashierSharedToken: env.CASHIER_SHARED_TOKEN,
         cashierSyncMode: env.CASHIER_SYNC_MODE,
-        cashierInboundPath: env.CASHIER_SYSTEM_INBOUND_PATH
+        cashierInboundPath: env.CASHIER_SYSTEM_INBOUND_PATH,
+        departmentSharedToken: env.DEPARTMENT_INTEGRATION_SHARED_TOKEN
       }),
       vue({
         template: {

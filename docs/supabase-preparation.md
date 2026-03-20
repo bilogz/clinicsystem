@@ -19,7 +19,7 @@ The table below reflects the handoff list you provided.
 | --- | --- | --- |
 | Registrar | Payment confirmation, medical clearance, counseling reports, discipline records, activity participation records | Student enrollment data to Cashier; student personal information to Clinic, Guidance, and Prefect; student list to Computer Laboratory and CRAD; enrollment statistics to PMED |
 | Cashier | Student enrollment data, payroll data | Payment confirmation to Registrar; financial reports to PMED |
-| Clinic | Student personal information, health incident reports | Medical clearance to Registrar; health reports to Guidance; health service reports to PMED |
+| Clinic | Student identity data from Registrar, staff identity data from HR, health incident reports | Medical clearance status to Registrar; visit history summary to PMED |
 | Guidance Office | Student personal information, student academic records | Counseling reports to Registrar; counseling reports to PMED; health concerns to Clinic; discipline reports to Prefect; student recommendations to CRAD |
 | Prefect Office | Student personal information | Discipline records to Registrar; discipline reports to Guidance; incident reports to Clinic; discipline statistics to PMED |
 | Computer Laboratory | Student list, staff list | Laboratory usage reports to PMED |

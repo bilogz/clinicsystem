@@ -998,15 +998,15 @@ VALUES
     3,
     3,
     jsonb_build_array(
-      jsonb_build_object('message', 'Student personal information', 'from', 'registrar'),
+      jsonb_build_object('message', 'Student identity data', 'from', 'registrar'),
+      jsonb_build_object('message', 'Staff identity data', 'from', 'hr'),
       jsonb_build_object('message', 'Health incident reports', 'from', 'prefect')
     ),
     jsonb_build_array(
-      jsonb_build_object('message', 'Medical clearance', 'to', 'registrar'),
-      jsonb_build_object('message', 'Health reports', 'to', 'guidance'),
-      jsonb_build_object('message', 'Health service reports', 'to', 'pmed')
+      jsonb_build_object('message', 'Medical clearance status', 'to', 'registrar'),
+      jsonb_build_object('message', 'Visit history summary', 'to', 'pmed')
     ),
-    'Maintains the health clearance and service branch.'
+    'Stores medical visits, consultations, health records, and clearances.'
   ),
   (
     'guidance',

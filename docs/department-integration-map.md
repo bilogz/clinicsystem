@@ -12,6 +12,12 @@ The clinic app exposes:
 - `GET /api/integrations/departments/report?department=pmed`
 - `POST /api/integrations/departments/report`
 
+## Write Access
+
+- `GET` integration endpoints stay readable from the shared app runtime.
+- `POST /api/integrations/departments/records` and `POST /api/integrations/departments/report` now require either a clinic admin session or `X-Integration-Token`.
+- Set the same `DEPARTMENT_INTEGRATION_SHARED_TOKEN` in the clinic app and any trusted external department app such as HR.
+
 ## Shared Database Tables
 
 - `clinic.department_flow_profiles`
@@ -34,8 +40,9 @@ The clinic app exposes:
 
 ### Clinic
 
-- Receives student personal information and incident reports.
-- Sends medical clearance, health reports, and health service reports.
+- Receives student/staff identity data and incident reports.
+- Stores medical visits, consultations, health records, and clearances.
+- Can share medical clearance status and visit history summary.
 
 ### Guidance
 
@@ -61,6 +68,38 @@ The clinic app exposes:
 
 - Receives staff evaluation feedback.
 - Sends payroll data, staff list, and employee performance records.
+
+HR can use the clinic API in either of these patterns:
+
+- Shared-database mode: point both apps to the same Supabase project and run the clinic schema plus the HR merge migration.
+- API mode: call the clinic app with `X-Integration-Token: <DEPARTMENT_INTEGRATION_SHARED_TOKEN>` when creating clearance records or submitting HR decisions.
+
+Example HR clearance request:
+
+```json
+{
+  "action": "request_clearance",
+  "department_key": "hr",
+  "patient_name": "Carlo Diaz",
+  "patient_id": "EMP-2001",
+  "patient_code": "EMP-2001",
+  "patient_type": "teacher",
+  "requested_by": "HR Integration"
+}
+```
+
+Example HR decision:
+
+```json
+{
+  "action": "submit_decision",
+  "department_key": "hr",
+  "clearance_reference": "HR-EMP-2001",
+  "status": "approved",
+  "remarks": "Personnel file verified.",
+  "approver_name": "HR Integration"
+}
+```
 
 ### PMED
 

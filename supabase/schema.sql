@@ -397,7 +397,7 @@ CREATE TABLE IF NOT EXISTS clinic.department_clearance_records (
   patient_id TEXT NULL,
   patient_code TEXT NULL,
   patient_name TEXT NOT NULL,
-  patient_type TEXT NOT NULL DEFAULT 'student' CHECK (patient_type IN ('student', 'teacher')),
+  patient_type TEXT NOT NULL DEFAULT 'unknown',
   department_key TEXT NOT NULL REFERENCES clinic.department_flow_profiles (department_key) ON DELETE RESTRICT,
   department_name TEXT NOT NULL,
   stage_order INT NOT NULL,
@@ -419,7 +419,7 @@ CREATE TABLE IF NOT EXISTS clinic.cashier_integration_events (
   source_entity TEXT NOT NULL,
   source_key TEXT NOT NULL,
   patient_name TEXT NULL,
-  patient_type TEXT NOT NULL DEFAULT 'student' CHECK (patient_type IN ('student', 'teacher')),
+  patient_type TEXT NOT NULL DEFAULT 'unknown',
   reference_no TEXT NULL,
   amount_due NUMERIC(10, 2) NOT NULL DEFAULT 0,
   currency_code TEXT NOT NULL DEFAULT 'PHP',
@@ -539,8 +539,8 @@ ALTER TABLE laboratory_requests ALTER COLUMN patient_type SET DEFAULT 'student';
 ALTER TABLE mental_health_patients ALTER COLUMN patient_type SET DEFAULT 'student';
 ALTER TABLE mental_health_sessions ALTER COLUMN patient_type SET DEFAULT 'student';
 ALTER TABLE patient_master ALTER COLUMN patient_type SET DEFAULT 'student';
-ALTER TABLE clinic.department_clearance_records ALTER COLUMN patient_type SET DEFAULT 'student';
-ALTER TABLE clinic.cashier_integration_events ALTER COLUMN patient_type SET DEFAULT 'student';
+ALTER TABLE clinic.department_clearance_records ALTER COLUMN patient_type SET DEFAULT 'unknown';
+ALTER TABLE clinic.cashier_integration_events ALTER COLUMN patient_type SET DEFAULT 'unknown';
 
 ALTER TABLE patient_appointments DROP CONSTRAINT IF EXISTS patient_appointments_patient_type_check;
 ALTER TABLE patient_appointments ADD CONSTRAINT patient_appointments_patient_type_check CHECK (patient_type IN ('student', 'teacher')) NOT VALID;
@@ -559,9 +559,9 @@ ALTER TABLE mental_health_sessions ADD CONSTRAINT mental_health_sessions_patient
 ALTER TABLE patient_master DROP CONSTRAINT IF EXISTS patient_master_patient_type_check;
 ALTER TABLE patient_master ADD CONSTRAINT patient_master_patient_type_check CHECK (patient_type IN ('student', 'teacher')) NOT VALID;
 ALTER TABLE clinic.department_clearance_records DROP CONSTRAINT IF EXISTS department_clearance_records_patient_type_check;
-ALTER TABLE clinic.department_clearance_records ADD CONSTRAINT department_clearance_records_patient_type_check CHECK (patient_type IN ('student', 'teacher')) NOT VALID;
+ALTER TABLE clinic.department_clearance_records ADD CONSTRAINT department_clearance_records_patient_type_check CHECK (patient_type IN ('student', 'teacher', 'unknown')) NOT VALID;
 ALTER TABLE clinic.cashier_integration_events DROP CONSTRAINT IF EXISTS cashier_integration_events_patient_type_check;
-ALTER TABLE clinic.cashier_integration_events ADD CONSTRAINT cashier_integration_events_patient_type_check CHECK (patient_type IN ('student', 'teacher')) NOT VALID;
+ALTER TABLE clinic.cashier_integration_events ADD CONSTRAINT cashier_integration_events_patient_type_check CHECK (patient_type IN ('student', 'teacher', 'unknown')) NOT VALID;
 
 CREATE OR REPLACE FUNCTION set_updated_at_timestamp()
 RETURNS trigger

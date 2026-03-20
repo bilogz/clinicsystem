@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { fetchClinicDashboard, type ClinicDashboardPayload } from '@/services/clinicDashboard';
+import { fetchAppointments } from '@/services/appointmentsAdmin';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
 import {
   appointmentBookingRoleColor,
   appointmentBookingRoleLabel,
-  fetchAppointmentMonitor,
+  buildAppointmentMonitorPayload,
   type AppointmentMonitorRow,
   type AppointmentMonitorSummary
 } from '@/services/appointmentMonitor';
@@ -232,7 +233,9 @@ async function loadDashboard(options: { silent?: boolean } = {}): Promise<void> 
     async () => {
       const [dashboardPayload, monitorPayload] = await Promise.all([
         fetchClinicDashboard(),
-        fetchAppointmentMonitor({ period: 'Upcoming', page: 1, perPage: 100 })
+        fetchAppointments({ period: 'Upcoming', page: 1, perPage: 100 }).then((payload) =>
+          buildAppointmentMonitorPayload(payload.items)
+        )
       ]);
       return { dashboardPayload, monitorPayload };
     },

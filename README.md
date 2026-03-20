@@ -34,6 +34,7 @@ This project now targets Supabase (PostgreSQL) only.
 
 - `supabase/schema.sql`
 - `supabase/seed.sql`
+- Existing clinic databases should also run `supabase/migrations/20260320194500_prepare_clinic_hr_integration.sql` before connecting the HR app.
 
 2) Configure `.env` (see `.env.example`) using `DATABASE_URL`.
 
@@ -52,6 +53,8 @@ CASHIER_INTEGRATION_ENABLED=true
 CASHIER_SYSTEM_BASE_URL=supabase://internal
 CASHIER_SYNC_MODE=auto
 CASHIER_SYSTEM_INBOUND_PATH=/api/integrations/cashier/payment-status
+CASHIER_SHARED_TOKEN=
+DEPARTMENT_INTEGRATION_SHARED_TOKEN=
 
 SEED_ADMIN_USERNAME=admin@cashier.local
 SEED_ADMIN_PASSWORD=admin123

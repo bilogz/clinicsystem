@@ -14,6 +14,7 @@ import {
   type DoctorAvailabilitySnapshot
 } from '@/services/doctorAvailability';
 import { listDoctors, upsertDoctor, type DoctorRow } from '@/services/doctors';
+import { listRegistrarPeople, type RegistrarDirectoryPerson } from '@/services/registrarDirectory';
 import {
   createAppointment,
   fetchAppointments,
@@ -26,7 +27,7 @@ import {
 import {
   appointmentBookingRoleColor,
   appointmentBookingRoleLabel,
-  fetchAppointmentMonitor,
+  buildAppointmentMonitorPayload,
   type AppointmentBookedByRole,
   type AppointmentMonitorRow,
   type AppointmentMonitorSummary
@@ -160,6 +161,8 @@ const addForm = reactive<CreateAppointmentPayload>({
 const addFormErrors = reactive<Record<string, string>>({});
 const useExistingPatient = ref(false);
 const patientLookupKey = ref('');
+const registrarLookupLoading = ref(false);
+const registrarDirectory = ref<RegistrarDirectoryPerson[]>([]);
 const selectedSymptomTags = ref<string[]>([]);
 const addBookedByRole = ref<'student' | 'teacher'>('student');
 const addBookerLabel = computed(() => (addBookedByRole.value === 'teacher' ? 'Teacher' : 'Student'));
@@ -325,20 +328,15 @@ function dayOfWeekLabel(value: number): string {
 }
 
 const existingPatientOptions = computed(() => {
-  const seen = new Set<string>();
-  return rows.value
-    .map((row) => {
-      const pid = row.patientId || '';
-      const key = pid || `${row.patientName}|${row.phoneNumber}`;
-      if (seen.has(key)) return null;
-      seen.add(key);
-      return {
-        title: pid ? `${row.patientName} (${pid})` : `${row.patientName} (${row.phoneNumber})`,
-        value: key,
-        row
-      };
-    })
-    .filter((item): item is { title: string; value: string; row: AppointmentRow } => Boolean(item));
+  return registrarDirectory.value.map((item) => ({
+    title: `${item.fullName} (${item.code})`,
+    value: item.code,
+    subtitle:
+      item.type === 'teacher'
+        ? item.department || 'Registrar instructor record'
+        : [item.program, item.yearLevel ? `Year ${item.yearLevel}` : ''].filter(Boolean).join(' • '),
+    row: item
+  }));
 });
 
 function normalizeDepartment(value: unknown): string {
@@ -407,7 +405,8 @@ async function loadAppointments(options: { silent?: boolean } = {}): Promise<voi
       page: page.value,
       perPage
     };
-    const [payload, monitor] = await Promise.all([fetchAppointments(query), fetchAppointmentMonitor(query)]);
+    const payload = await fetchAppointments(query);
+    const monitor = buildAppointmentMonitorPayload(payload.items);
     rows.value = payload.items;
     analytics.value = payload.analytics;
     totalItems.value = payload.meta.total;
@@ -681,6 +680,7 @@ function openAddDialog(): void {
   useExistingPatient.value = false;
   addBookedByRole.value = 'student';
   patientLookupKey.value = '';
+  registrarDirectory.value = [];
   selectedSymptomTags.value = [];
   addForm.patient_id = '';
   addForm.patient_name = '';
@@ -704,6 +704,17 @@ function openAddDialog(): void {
   addForm.status = 'New';
   addDialog.value = true;
   void loadAddDoctorAvailability();
+}
+
+async function loadRegistrarDirectory(): Promise<void> {
+  registrarLookupLoading.value = true;
+  try {
+    registrarDirectory.value = await listRegistrarPeople(addBookedByRole.value);
+  } catch {
+    registrarDirectory.value = [];
+  } finally {
+    registrarLookupLoading.value = false;
+  }
 }
 
 async function saveEdit(): Promise<void> {
@@ -810,10 +821,8 @@ function applyExistingPatientLookup(value: string): void {
   const target = existingPatientOptions.value.find((item) => item.value === value);
   if (!target) return;
   const row = target.row;
-  addForm.patient_id = row.patientId || '';
-  addForm.patient_name = row.patientName;
-  addForm.patient_email = row.patientEmail || '';
-  addForm.phone_number = row.phoneNumber || '';
+  addForm.patient_id = row.code || '';
+  addForm.patient_name = row.fullName;
 }
 
 function onDepartmentChange(value: string): void {
@@ -843,6 +852,15 @@ watch(
   () => {
     if (!addDialog.value) return;
     void loadAddDoctorAvailability();
+  }
+);
+
+watch(
+  () => [addDialog.value, addBookedByRole.value, useExistingPatient.value],
+  ([isOpen, , lookupEnabled]) => {
+    if (!isOpen || !lookupEnabled) return;
+    patientLookupKey.value = '';
+    void loadRegistrarDirectory();
   }
 );
 
@@ -1250,10 +1268,10 @@ onBeforeUnmount(() => {
               />
             </v-col>
             <v-col cols="12" md="5">
-              <v-switch v-model="useExistingPatient" inset color="primary" :label="`Existing ${addBookerLabel} Lookup`" hide-details />
+              <v-switch v-model="useExistingPatient" inset color="primary" :label="`Registrar ${addBookerLabel} Lookup`" hide-details />
             </v-col>
             <v-col cols="12" md="7" v-if="useExistingPatient">
-              <v-select
+              <v-autocomplete
                 :items="existingPatientOptions"
                 item-title="title"
                 item-value="value"
@@ -1261,10 +1279,15 @@ onBeforeUnmount(() => {
                 :label="`Search Existing ${addBookerLabel}`"
                 variant="outlined"
                 density="comfortable"
-                :hint="`Select ${addBookerLabel.toLowerCase()} from previous appointment records`"
+                :loading="registrarLookupLoading"
+                :hint="`Fetch ${addBookerLabel.toLowerCase()} records from Registrar`"
                 persistent-hint
                 @update:model-value="applyExistingPatientLookup"
-              />
+              >
+                <template #item="{ props: itemProps, item }">
+                  <v-list-item v-bind="itemProps" :title="item.raw.title" :subtitle="item.raw.subtitle" />
+                </template>
+              </v-autocomplete>
             </v-col>
             <v-col cols="12" md="4">
               <v-text-field

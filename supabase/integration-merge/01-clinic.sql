@@ -182,9 +182,16 @@ VALUES (
   'Clinic',
   3,
   3,
-  '["pmed"]'::jsonb,
-  '["guidance"]'::jsonb,
-  'Health clearance validation.'
+  '[
+    {"message":"Student identity data","from":"registrar"},
+    {"message":"Staff identity data","from":"hr"},
+    {"message":"Health incident reports","from":"prefect"}
+  ]'::jsonb,
+  '[
+    {"message":"Medical clearance status","to":"registrar"},
+    {"message":"Visit history summary","to":"pmed"}
+  ]'::jsonb,
+  'Stores medical visits, consultations, health records, and clearances.'
 )
 ON CONFLICT (department_key) DO UPDATE
 SET
