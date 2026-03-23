@@ -70,6 +70,12 @@ export type MentalHealthSnapshot = {
   patients: MentalHealthPatient[];
   notes: MentalHealthNote[];
   activities: MentalHealthActivity[];
+  meta: {
+    page: number;
+    perPage: number;
+    total: number;
+    totalPages: number;
+  };
   analytics: {
     active: number;
     follow_up: number;
@@ -93,7 +99,33 @@ function resolveApiUrl(): string {
 }
 
 export async function fetchMentalHealthSnapshot(): Promise<MentalHealthSnapshot> {
-  return await fetchApiData<MentalHealthSnapshot>(resolveApiUrl(), { ttlMs: 10_000 });
+  return await fetchMentalHealthSnapshotWithQuery();
+}
+
+export async function fetchMentalHealthSnapshotWithQuery(filters: {
+  search?: string;
+  status?: string;
+  risk?: string;
+  page?: number;
+  perPage?: number;
+} = {}): Promise<MentalHealthSnapshot> {
+  const params = new URLSearchParams();
+  if (filters.search) params.set('search', filters.search);
+  if (filters.status) params.set('status', filters.status);
+  if (filters.risk) params.set('risk', filters.risk);
+  if (filters.page) params.set('page', String(filters.page));
+  if (filters.perPage) params.set('per_page', String(filters.perPage));
+  const suffix = params.toString();
+  const url = suffix ? `${resolveApiUrl()}?${suffix}` : resolveApiUrl();
+  const data = await fetchApiData<Partial<MentalHealthSnapshot>>(url, { ttlMs: 10_000 });
+  return {
+    sessions: data.sessions || [],
+    patients: data.patients || [],
+    notes: data.notes || [],
+    activities: data.activities || [],
+    meta: data.meta || { page: filters.page || 1, perPage: filters.perPage || 8, total: 0, totalPages: 1 },
+    analytics: data.analytics || { active: 0, follow_up: 0, at_risk: 0, completed: 0, escalated: 0, archived: 0 }
+  };
 }
 
 export async function dispatchMentalHealthAction(payload: Record<string, unknown>): Promise<void> {

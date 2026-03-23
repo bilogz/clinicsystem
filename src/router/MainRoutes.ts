@@ -52,9 +52,14 @@ const MainRoutes = {
       component: () => import('@/views/admin/modules/ReportsPage.vue')
     },
     {
-      name: 'Cashier Integration',
-      path: '/modules/cashier',
-      component: () => import('@/views/admin/modules/CashierIntegrationPage.vue')
+      name: 'Request Doctor/Nurse',
+      path: '/modules/hr-staff-request',
+      component: () => import('@/views/admin/modules/HrStaffRequestPage.vue')
+    },
+    {
+      name: 'Doctors/Nurse',
+      path: '/modules/doctors-nurse',
+      component: () => import('@/views/admin/modules/DoctorsNursePage.vue')
     },
     {
       name: 'My Profile',

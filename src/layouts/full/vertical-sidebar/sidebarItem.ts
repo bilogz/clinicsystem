@@ -2,9 +2,10 @@ import {
   mdiAccountGroupOutline,
   mdiAccountHeartOutline,
   mdiAccountOutline,
+  mdiAccountMultipleOutline,
+  mdiAccountSwitchOutline,
   mdiCogOutline,
   mdiCalendarClockOutline,
-  mdiCashRegister,
   mdiChartLine,
   mdiClipboardTextOutline,
   mdiFlaskOutline,
@@ -89,9 +90,14 @@ const sidebarItem: menu[] = [
   { divider: true },
   { header: 'Integration' },
   {
-    title: 'Cashier Integration',
-    icon: mdiCashRegister,
-    to: '/modules/cashier'
+    title: 'Request Doctor/Nurse',
+    icon: mdiAccountSwitchOutline,
+    to: '/modules/hr-staff-request'
+  },
+  {
+    title: 'Doctors/Nurse',
+    icon: mdiAccountMultipleOutline,
+    to: '/modules/doctors-nurse'
   },
   { divider: true },
   { header: 'Account' },

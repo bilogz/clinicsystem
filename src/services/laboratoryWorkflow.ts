@@ -12,6 +12,26 @@ export type LabQueueFilterParams = {
   doctor?: string;
   fromDate?: string;
   toDate?: string;
+  page?: number;
+  per_page?: number;
+};
+
+export type PaginatedLabQueue = {
+  items: LabQueueRequest[];
+  meta: {
+    page: number;
+    perPage: number;
+    total: number;
+    totalPages: number;
+  };
+  analytics?: {
+    totalRequests: number;
+    pending: number;
+    inProgress: number;
+    completedToday: number;
+    urgent: number;
+    completed: number;
+  };
 };
 
 export type LabQueueRequest = {
@@ -618,7 +638,7 @@ export async function createLabRequest(payload: CreateLabRequestPayload): Promis
   }
 }
 
-export async function fetchLabQueue(params: LabQueueFilterParams = {}): Promise<LabQueueRequest[]> {
+export async function fetchLabQueue(params: LabQueueFilterParams = {}): Promise<PaginatedLabQueue> {
   try {
     const query = new URLSearchParams();
     if (params.search) query.set('search', params.search);
@@ -628,11 +648,26 @@ export async function fetchLabQueue(params: LabQueueFilterParams = {}): Promise<
     if (params.doctor) query.set('doctor', params.doctor);
     if (params.fromDate) query.set('fromDate', params.fromDate);
     if (params.toDate) query.set('toDate', params.toDate);
-    const data = await fetchApiData<any[]>(`${resolveApiUrl()}${query.toString() ? `?${query.toString()}` : ''}`, {
+    if (params.page) query.set('page', String(params.page));
+    if (params.per_page) query.set('per_page', String(params.per_page));
+    
+    const data = await fetchApiData<any>(`${resolveApiUrl()}${query.toString() ? `?${query.toString()}` : ''}`, {
       ttlMs: 7_000,
       timeoutMs: 12_000
     });
-    return Array.isArray(data) ? data.map((item) => toQueueFromApi(item)) : [];
+    
+    if (data?.items) {
+      return {
+        items: data.items.map((item: any) => toQueueFromApi(item)),
+        meta: data.meta || { page: params.page || 1, perPage: params.per_page || 10, total: 0, totalPages: 1 },
+        analytics: data.analytics
+      };
+    }
+    return { 
+      items: [], 
+      meta: { page: params.page || 1, perPage: params.per_page || 10, total: 0, totalPages: 1 },
+      analytics: { totalRequests: 0, pending: 0, inProgress: 0, completedToday: 0, urgent: 0, completed: 0 }
+    };
   } catch {
     const store = readStore();
     const q = (params.search || '').trim().toLowerCase();
@@ -641,7 +676,7 @@ export async function fetchLabQueue(params: LabQueueFilterParams = {}): Promise<
     const priority = (params.priority || '').trim().toLowerCase();
     const doctor = (params.doctor || '').trim().toLowerCase();
 
-    return store.requests
+    const filtered = store.requests
       .filter((item) => {
         if (status && status !== 'all') {
           if (status === 'in_progress') {
@@ -663,6 +698,24 @@ export async function fetchLabQueue(params: LabQueueFilterParams = {}): Promise<
       })
       .sort((a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime())
       .map(toQueueItem);
+      
+    
+    const page = params.page || 1;
+    const perPage = params.per_page || 10;
+    const total = filtered.length;
+    
+    return {
+      items: filtered.slice((page - 1) * perPage, page * perPage),
+      meta: { page, perPage, total, totalPages: Math.max(1, Math.ceil(total / perPage)) },
+      analytics: {
+        totalRequests: store.requests.length,
+        pending: store.requests.filter(r => r.status === 'Pending').length,
+        inProgress: store.requests.filter(r => r.status === 'In Progress' || r.status === 'Result Ready').length,
+        completedToday: store.requests.filter(r => r.status === 'Completed').length,
+        urgent: store.requests.filter(r => (r.priority === 'Urgent' || r.priority === 'STAT') && r.status !== 'Completed').length,
+        completed: store.requests.filter(r => r.status === 'Completed').length
+      }
+    };
   }
 }
 

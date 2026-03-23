@@ -58,6 +58,21 @@ export type PharmacySnapshot = {
   requests: PharmacyDispenseRequest[];
   logs: PharmacyInventoryLog[];
   history: Record<number, PharmacyStockHistoryEntry[]>;
+  analytics: {
+    totalMedicines: number;
+    out: number;
+    low: number;
+    healthy: number;
+    expiring: number;
+    pending: number;
+    categories: string[];
+  };
+  meta: {
+    page: number;
+    perPage: number;
+    total: number;
+    totalPages: number;
+  };
 };
 
 function trimTrailingSlashes(value: string): string {
@@ -78,13 +93,47 @@ function toTimeText(value: string): string {
   return new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit' }).format(parsed);
 }
 
-export async function fetchPharmacySnapshot(): Promise<PharmacySnapshot> {
+export async function fetchPharmacySnapshot(filters: {
+  search?: string;
+  category?: string;
+  stock?: string;
+  quickFilter?: string;
+  sort?: string;
+  dir?: string;
+  page?: number;
+  perPage?: number;
+} = {}): Promise<PharmacySnapshot> {
+  const query = new URLSearchParams();
+  if (filters.search) query.set('search', filters.search);
+  if (filters.category) query.set('category', filters.category);
+  if (filters.stock) query.set('stock', filters.stock);
+  if (filters.quickFilter) query.set('quick_filter', filters.quickFilter);
+  if (filters.sort) query.set('sort', filters.sort);
+  if (filters.dir) query.set('dir', filters.dir);
+  if (filters.page) query.set('page', String(filters.page));
+  if (filters.perPage) query.set('per_page', String(filters.perPage));
+  const suffix = query.toString();
   const data = await fetchApiData<{
     medicines: any[];
     requests: any[];
     logs: any[];
     movements: any[];
-  }>(resolveApiUrl(), { ttlMs: 8_000 });
+    analytics?: {
+      totalMedicines: number;
+      out: number;
+      low: number;
+      healthy: number;
+      expiring: number;
+      pending: number;
+      categories: string[];
+    };
+    meta?: {
+      page: number;
+      perPage: number;
+      total: number;
+      totalPages: number;
+    };
+  }>(`${resolveApiUrl()}${suffix ? `?${suffix}` : ''}`, { ttlMs: 8_000 });
 
   const medicines: PharmacyMedicine[] = (data.medicines || []).map((item) => ({
     id: Number(item.id || 0),
@@ -145,7 +194,14 @@ export async function fetchPharmacySnapshot(): Promise<PharmacySnapshot> {
     });
   });
 
-  return { medicines, requests, logs, history };
+  return {
+    medicines,
+    requests,
+    logs,
+    history,
+    analytics: data.analytics || { totalMedicines: 0, out: 0, low: 0, healthy: 0, expiring: 0, pending: 0, categories: [] },
+    meta: data.meta || { page: 1, perPage: 6, total: medicines.length, totalPages: 1 }
+  };
 }
 
 export async function dispatchPharmacyAction(payload: Record<string, unknown>): Promise<void> {

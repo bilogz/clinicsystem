@@ -6,7 +6,15 @@ import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
 import { toLocalInputDateTime } from '@/composables/useRealtimeClock';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
-import { dispatchMentalHealthAction, fetchMentalHealthSnapshot, type MentalHealthActivity, type MentalHealthNote, type MentalHealthPatient, type MentalHealthSession, type MentalHealthStatus } from '@/services/mentalHealth';
+import {
+  dispatchMentalHealthAction,
+  fetchMentalHealthSnapshotWithQuery,
+  type MentalHealthActivity,
+  type MentalHealthNote,
+  type MentalHealthPatient,
+  type MentalHealthSession,
+  type MentalHealthStatus
+} from '@/services/mentalHealth';
 import { emitSuccessModal } from '@/composables/useSuccessModal';
 
 type SessionRole = 'Admin' | 'Counselor' | 'Nurse' | 'Doctor' | 'Receptionist';
@@ -20,6 +28,9 @@ const role = ref<SessionRole>('Counselor');
 const search = ref('');
 const statusFilter = ref<'all' | MentalHealthStatus>('all');
 const riskFilter = ref<'all' | 'low' | 'medium' | 'high'>('all');
+const listPage = ref(1);
+const perPage = ref(8);
+const meta = ref({ page: 1, perPage: 8, total: 0, totalPages: 1 });
 
 const sessions = ref<MentalHealthSession[]>([]);
 const patients = ref<MentalHealthPatient[]>([]);
@@ -73,21 +84,19 @@ const patientLookupItems = computed(() => patients.value.map((p) => ({ title: `$
 const selectedPatientHistory = computed(() => patients.value.find((p) => p.patient_id === sessionForm.patient_id) || null);
 watch(() => sessionForm.patient_id, (patientId) => { const patient = patients.value.find((item) => item.patient_id === patientId); if (patient) sessionForm.patient_name = patient.patient_name; });
 
-const filteredSessions = computed(() => {
-  const query = search.value.trim().toLowerCase();
-  return sessions.value.filter((item) => {
-    if (statusFilter.value !== 'all' && item.status !== statusFilter.value) return false;
-    if (riskFilter.value !== 'all' && item.risk_level !== riskFilter.value) return false;
-    if (!query) return true;
-    return `${item.case_reference} ${item.patient_name} ${item.patient_id} ${item.counselor} ${item.session_type}`.toLowerCase().includes(query);
-  });
-});
+const filteredSessions = computed(() => sessions.value);
 
 const sessionNotes = computed(() => (!selectedSession.value ? [] : notes.value.filter((n) => n.session_id === selectedSession.value?.id)));
 const sessionActivity = computed(() => (!selectedSession.value ? [] : activities.value.filter((a) => a.session_id === selectedSession.value?.id).slice(0, 12)));
 const upcomingFollowups = computed(() => sessions.value.filter((s) => s.next_follow_up_at).sort((a, b) => String(a.next_follow_up_at).localeCompare(String(b.next_follow_up_at))).slice(0, 6));
 const riskAlerts = computed(() => sessions.value.filter((s) => s.status === 'at_risk' || s.status === 'escalated').slice(0, 6));
 const recentActivity = computed(() => activities.value.slice(0, 8));
+const listCountText = computed(() => {
+  if (meta.value.total === 0) return 'Showing 0-0 of 0 sessions';
+  const first = (meta.value.page - 1) * meta.value.perPage + 1;
+  const last = Math.min(meta.value.page * meta.value.perPage, meta.value.total);
+  return `Showing ${first}-${last} of ${meta.value.total} sessions`;
+});
 const analyticsCards = computed(() => [
   { title: 'Active', value: analytics.value.active, subtitle: 'Ongoing sessions', className: 'analytics-card-blue', icon: 'mdi-account-heart-outline' },
   { title: 'Follow-Up', value: analytics.value.follow_up, subtitle: 'Scheduled for review', className: 'analytics-card-cyan', icon: 'mdi-calendar-sync-outline' },
@@ -162,7 +171,14 @@ function applySessionToForm(session: MentalHealthSession): void {
 
 async function loadData(options: { silent?: boolean } = {}): Promise<void> {
   const snapshot = await realtime.runLatest(
-    async () => fetchMentalHealthSnapshot(),
+    async () =>
+      fetchMentalHealthSnapshotWithQuery({
+        search: search.value.trim() || undefined,
+        status: statusFilter.value === 'all' ? undefined : statusFilter.value,
+        risk: riskFilter.value === 'all' ? undefined : riskFilter.value,
+        page: listPage.value,
+        perPage: perPage.value
+      }),
     {
       silent: options.silent,
       onError: (error) => {
@@ -176,6 +192,7 @@ async function loadData(options: { silent?: boolean } = {}): Promise<void> {
   notes.value = snapshot.notes;
   activities.value = snapshot.activities;
   analytics.value = snapshot.analytics;
+  meta.value = snapshot.meta;
 }
 
 function openCreate(): void { if (!can('create')) return showToast(`Role ${role.value} is not allowed to create sessions.`, 'warning'); isEditMode.value = false; selectedSession.value = null; clearErrors(); resetSessionForm(); sessionDialog.value = true; }
@@ -322,7 +339,26 @@ onMounted(async () => {
   }
 });
 
+let searchDebounce: ReturnType<typeof setTimeout> | null = null;
+watch(search, () => {
+  if (searchDebounce) clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    listPage.value = 1;
+    void loadData();
+  }, REALTIME_POLICY.debounce.registrationSearchMs);
+});
+
+watch([statusFilter, riskFilter, perPage], () => {
+  listPage.value = 1;
+  void loadData();
+});
+
+watch(listPage, () => {
+  void loadData();
+});
+
 onUnmounted(() => {
+  if (searchDebounce) clearTimeout(searchDebounce);
   realtime.stopPolling();
   realtime.invalidatePending();
 });
@@ -466,6 +502,12 @@ onUnmounted(() => {
                   <tr v-if="!filteredSessions.length"><td colspan="8" class="text-center text-medium-emphasis py-6">No sessions matched the current filters.</td></tr>
                 </tbody>
               </v-table>
+              <div class="d-flex align-center mt-3 text-caption text-medium-emphasis">
+                <span>{{ listCountText }}</span>
+                <v-spacer />
+                <v-select v-model="perPage" :items="[8, 12, 20]" density="compact" variant="outlined" hide-details style="max-width: 96px" class="mr-2" />
+                <v-pagination v-model="listPage" :length="meta.totalPages" density="comfortable" total-visible="6" />
+              </div>
             </v-card-text>
           </v-card>
         </v-col>
@@ -475,7 +517,7 @@ onUnmounted(() => {
             <v-card-item><v-card-title>Upcoming Follow-Ups</v-card-title></v-card-item>
             <v-divider />
             <v-list density="compact">
-              <v-list-item v-for="item in upcomingFollowups" :key="`f-${item.id}`" :title="item.patient_name" :subtitle="`${item.case_reference} • ${formatDateTime(item.next_follow_up_at)}`" />
+              <v-list-item v-for="item in upcomingFollowups" :key="`f-${item.id}`" :title="item.patient_name" :subtitle="`${item.case_reference} ï¿½ ${formatDateTime(item.next_follow_up_at)}`" />
               <v-list-item v-if="!upcomingFollowups.length" title="No follow-ups scheduled." />
             </v-list>
           </v-card>
@@ -493,7 +535,7 @@ onUnmounted(() => {
             <v-card-item><v-card-title>Activity Log</v-card-title></v-card-item>
             <v-divider />
             <v-list density="compact">
-              <v-list-item v-for="item in recentActivity" :key="`a-${item.id}`" :title="item.action" :subtitle="`${item.detail} • ${formatDateTime(item.created_at)}`" />
+              <v-list-item v-for="item in recentActivity" :key="`a-${item.id}`" :title="item.action" :subtitle="`${item.detail} ï¿½ ${formatDateTime(item.created_at)}`" />
               <v-list-item v-if="!recentActivity.length" title="No activity yet." />
             </v-list>
           </v-card>
@@ -559,8 +601,8 @@ onUnmounted(() => {
             <v-col cols="12" md="8">
               <div class="flow-steps mb-3"><span class="step active">Create Session</span><span class="step active">Record Notes</span><span class="step">Plan Follow-Up</span><span class="step">Complete / Escalate</span></div>
               <v-alert variant="tonal" color="info" class="mb-3">{{ selectedSession.treatment_plan || 'No treatment plan documented.' }}</v-alert>
-              <v-card variant="outlined" class="mb-3"><v-card-item><v-card-title class="text-subtitle-1">Structured Notes</v-card-title></v-card-item><v-divider /><v-list density="compact"><v-list-item v-for="item in sessionNotes.slice(0, 6)" :key="`n-${item.id}`" :title="`${item.note_type} • ${item.created_by_role}`" :subtitle="`${item.note_content}${item.attachment_name ? ` • Attachment: ${item.attachment_name}` : ''}`" /><v-list-item v-if="!sessionNotes.length" title="No notes for this session." /></v-list></v-card>
-              <v-card variant="outlined"><v-card-item><v-card-title class="text-subtitle-1">Timeline / Audit</v-card-title></v-card-item><v-divider /><v-list density="compact"><v-list-item v-for="item in sessionActivity" :key="`ac-${item.id}`" :title="item.action" :subtitle="`${item.detail} • ${item.actor_role} • ${formatDateTime(item.created_at)}`" /><v-list-item v-if="!sessionActivity.length" title="No activity yet." /></v-list></v-card>
+              <v-card variant="outlined" class="mb-3"><v-card-item><v-card-title class="text-subtitle-1">Structured Notes</v-card-title></v-card-item><v-divider /><v-list density="compact"><v-list-item v-for="item in sessionNotes.slice(0, 6)" :key="`n-${item.id}`" :title="`${item.note_type} ï¿½ ${item.created_by_role}`" :subtitle="`${item.note_content}${item.attachment_name ? ` ï¿½ Attachment: ${item.attachment_name}` : ''}`" /><v-list-item v-if="!sessionNotes.length" title="No notes for this session." /></v-list></v-card>
+              <v-card variant="outlined"><v-card-item><v-card-title class="text-subtitle-1">Timeline / Audit</v-card-title></v-card-item><v-divider /><v-list density="compact"><v-list-item v-for="item in sessionActivity" :key="`ac-${item.id}`" :title="item.action" :subtitle="`${item.detail} ï¿½ ${item.actor_role} ï¿½ ${formatDateTime(item.created_at)}`" /><v-list-item v-if="!sessionActivity.length" title="No activity yet." /></v-list></v-card>
             </v-col>
           </v-row>
         </v-card-text>

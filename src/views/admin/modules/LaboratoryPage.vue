@@ -129,6 +129,8 @@ const filterToDate = ref('');
 
 const listPage = ref(1);
 const pageSize = 6;
+const totalItems = ref(0);
+const serverAnalytics = ref({ totalRequests: 0, pending: 0, inProgress: 0, completedToday: 0, urgent: 0, completed: 0 });
 
 const queueRows = ref<LabQueueRequest[]>([]);
 const workflowCache = reactive<Record<number, WorkflowRecord>>({});
@@ -282,32 +284,15 @@ const canVerifyAndRelease = computed(() => ['Admin', 'Lab Manager'].includes(cur
 const priorityItems: Array<'All' | LabPriority> = ['All', 'Normal', 'Urgent', 'STAT'];
 
 const tabCounts = computed(() => {
-  const pending = queueRows.value.filter((row) => row.status === 'Pending').length;
-  const inProgress = queueRows.value.filter((row) => row.status === 'In Progress' || row.status === 'Result Ready').length;
-  const completed = queueRows.value.filter((row) => row.status === 'Completed').length;
   return {
-    all: queueRows.value.length,
-    pending,
-    inProgress,
-    completed
+    all: serverAnalytics.value.totalRequests,
+    pending: serverAnalytics.value.pending,
+    inProgress: serverAnalytics.value.inProgress,
+    completed: serverAnalytics.value.completed
   };
 });
 
-const metrics = computed(() => {
-  const totalRequests = queueRows.value.length;
-  const pending = queueRows.value.filter((row) => row.status === 'Pending').length;
-  const inProgress = queueRows.value.filter((row) => row.status === 'In Progress' || row.status === 'Result Ready').length;
-  const completedToday = queueRows.value.filter((row) => {
-    if (row.status !== 'Completed') {
-      return false;
-    }
-    const workflow = workflowCache[row.requestId];
-    return isSameDay(workflow?.releasedAt || row.requestedAt, new Date());
-  }).length;
-  const urgent = queueRows.value.filter((row) => (row.priority === 'Urgent' || row.priority === 'STAT') && row.status !== 'Completed').length;
-
-  return { totalRequests, pending, inProgress, completedToday, urgent };
-});
+const metrics = computed(() => serverAnalytics.value);
 
 const analyticsCards = computed(() => [
   { title: 'Total Requests', value: metrics.value.totalRequests, subtitle: 'All queued laboratory requests', className: 'analytics-card-blue', icon: 'mdi-flask-outline' },
@@ -317,47 +302,18 @@ const analyticsCards = computed(() => [
   { title: 'Urgent', value: metrics.value.urgent, subtitle: 'Priority requests needing attention', className: 'analytics-card-red', icon: 'mdi-alert-circle-outline' }
 ]);
 
-const filteredRows = computed(() => {
-  const query = searchQuery.value.trim().toLowerCase();
+const filteredRows = computed(() => queueRows.value);
 
-  return queueRows.value
-    .filter((row) => {
-      if (statusTab.value === 'pending' && row.status !== 'Pending') return false;
-      if (statusTab.value === 'in_progress' && row.status !== 'In Progress' && row.status !== 'Result Ready') return false;
-      if (statusTab.value === 'completed' && row.status !== 'Completed') return false;
-      if (filterCategory.value !== 'All' && row.category !== filterCategory.value) return false;
-      if (filterPriority.value !== 'All' && row.priority !== filterPriority.value) return false;
-      if (filterDoctor.value !== 'All' && row.requestedByDoctor !== filterDoctor.value) return false;
-
-      if (filterFromDate.value) {
-        const startDate = new Date(`${filterFromDate.value}T00:00:00`);
-        const rowDate = toDate(row.requestedAt);
-        if (rowDate && rowDate < startDate) return false;
-      }
-
-      if (filterToDate.value) {
-        const endDate = new Date(`${filterToDate.value}T23:59:59`);
-        const rowDate = toDate(row.requestedAt);
-        if (rowDate && rowDate > endDate) return false;
-      }
-
-      if (!query) return true;
-      const target = `${row.requestId} ${row.visitId} ${row.patientId} ${row.patientName} ${row.category} ${row.priority} ${row.status} ${row.requestedByDoctor}`.toLowerCase();
-      return target.includes(query);
-    })
-    .sort((a, b) => (toDate(b.requestedAt)?.getTime() || 0) - (toDate(a.requestedAt)?.getTime() || 0));
-});
-
-const pageCount = computed(() => Math.max(1, Math.ceil(filteredRows.value.length / pageSize)));
-const pagedRows = computed(() => filteredRows.value.slice((listPage.value - 1) * pageSize, listPage.value * pageSize));
+const pageCount = computed(() => Math.max(1, Math.ceil(totalItems.value / pageSize)));
+const pagedRows = computed(() => queueRows.value);
 
 const showingText = computed(() => {
-  if (filteredRows.value.length === 0) {
+  if (totalItems.value === 0) {
     return 'Showing 0 of 0 requests';
   }
   const start = (listPage.value - 1) * pageSize + 1;
-  const end = Math.min(listPage.value * pageSize, filteredRows.value.length);
-  return `Showing ${start}-${end} of ${filteredRows.value.length} requests`;
+  const end = Math.min(listPage.value * pageSize, totalItems.value);
+  return `Showing ${start}-${end} of ${totalItems.value} requests`;
 });
 
 const emptyStateTitle = computed(() => {
@@ -396,7 +352,7 @@ onBeforeUnmount(() => {
 
 watch(pageCount, (value) => {
   if (listPage.value > value) {
-    listPage.value = value;
+    listPage.value = Math.max(1, value);
   }
 });
 
@@ -411,15 +367,17 @@ watch(
     filterDoctor.value = readQueryString(query.lab_doctor) || 'All';
     filterFromDate.value = readQueryString(query.lab_from);
     filterToDate.value = readQueryString(query.lab_to);
+    listPage.value = Math.max(1, toSafeInt(readQueryString(query.page), 1));
     syncLock.value = false;
+    void loadQueue();
   },
   { immediate: true }
 );
 
-watch([searchQuery, statusTab, filterCategory, filterPriority, filterDoctor, filterFromDate, filterToDate], () => {
-  listPage.value = 1;
+watch([searchQuery, statusTab, filterCategory, filterPriority, filterDoctor, filterFromDate, filterToDate, listPage], () => {
   if (!syncLock.value) {
     pushFiltersToQuery();
+    void loadQueue();
   }
 });
 
@@ -559,6 +517,7 @@ function pushFiltersToQuery(): void {
   if (filterDoctor.value !== 'All') nextQuery.lab_doctor = filterDoctor.value;
   if (filterFromDate.value) nextQuery.lab_from = filterFromDate.value;
   if (filterToDate.value) nextQuery.lab_to = filterToDate.value;
+  if (listPage.value > 1) nextQuery.page = String(listPage.value);
 
   void router.replace({ query: nextQuery });
 }
@@ -979,7 +938,9 @@ async function loadQueue(options: { silent?: boolean } = {}): Promise<void> {
         priority: filterPriority.value !== 'All' ? filterPriority.value : undefined,
         doctor: filterDoctor.value !== 'All' ? filterDoctor.value : undefined,
         fromDate: filterFromDate.value || undefined,
-        toDate: filterToDate.value || undefined
+        toDate: filterToDate.value || undefined,
+        page: listPage.value,
+        per_page: pageSize
       }),
     {
       silent: options.silent,
@@ -1000,18 +961,22 @@ async function loadQueue(options: { silent?: boolean } = {}): Promise<void> {
   );
 
   if (!remoteQueue) return;
-  queueRows.value = remoteQueue;
-  remoteQueue.forEach((row) => ensureWorkflowForQueueRow(row));
+  queueRows.value = remoteQueue.items;
+  totalItems.value = remoteQueue.meta.total;
+  if (remoteQueue.analytics) {
+    serverAnalytics.value = remoteQueue.analytics as any;
+  }
+  remoteQueue.items.forEach((row) => ensureWorkflowForQueueRow(row));
   backendMode.value = 'connected';
 
-  if (remoteQueue.length === 0) {
+  if (remoteQueue.items.length === 0) {
     selectedRequestId.value = null;
     return;
   }
 
   const selectedStillExists =
     previousSelectedRequestId != null &&
-    remoteQueue.some((row) => row.requestId === previousSelectedRequestId);
+    remoteQueue.items.some((row) => row.requestId === previousSelectedRequestId);
 
   // Keep currently selected workflow during background refresh to avoid modal/form resets.
   if (selectedStillExists) {
@@ -1019,7 +984,7 @@ async function loadQueue(options: { silent?: boolean } = {}): Promise<void> {
     return;
   }
 
-  selectedRequestId.value = remoteQueue[0].requestId;
+  selectedRequestId.value = remoteQueue.items[0].requestId;
 }
 
 function resetEncodeErrors(): void {

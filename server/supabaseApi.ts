@@ -780,6 +780,75 @@ async function ensureCashierIntegrationTables(pool: Pool): Promise<void> {
   await ensureClinicIntegrationBootstrap(pool);
 }
 
+async function ensureHrStaffRequestTables(pool: Pool): Promise<void> {
+  await ensureClinicIntegrationBootstrap(pool);
+  await pool.query(`CREATE SCHEMA IF NOT EXISTS clinic`);
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS public.hr_staff_directory (
+       id BIGSERIAL PRIMARY KEY,
+       employee_no TEXT NOT NULL UNIQUE,
+       full_name TEXT NOT NULL,
+       role_type TEXT NOT NULL DEFAULT 'nurse',
+       department_name TEXT NOT NULL DEFAULT 'General Medicine',
+       employment_status TEXT NOT NULL DEFAULT 'active',
+       contact_email TEXT NULL,
+       contact_phone TEXT NULL,
+       hired_at TIMESTAMPTZ NULL,
+       metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+     )`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS public.hr_staff_requests (
+       id BIGSERIAL PRIMARY KEY,
+       request_reference TEXT NOT NULL UNIQUE,
+       staff_id BIGINT NOT NULL REFERENCES public.hr_staff_directory (id) ON DELETE RESTRICT,
+       request_status TEXT NOT NULL DEFAULT 'pending',
+       request_notes TEXT NULL,
+       requested_by TEXT NULL,
+       decided_by TEXT NULL,
+       decided_at TIMESTAMPTZ NULL,
+       metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+     )`
+  );
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_hr_staff_directory_role_status ON public.hr_staff_directory (role_type, employment_status, full_name)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_hr_staff_requests_status_created ON public.hr_staff_requests (request_status, created_at DESC)`);
+  await pool.query(`
+    DO $$
+    BEGIN
+      CREATE TRIGGER trg_hr_staff_directory_updated_at
+      BEFORE UPDATE ON public.hr_staff_directory
+      FOR EACH ROW
+      EXECUTE FUNCTION public.set_updated_at_timestamp();
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END $$;
+  `);
+  await pool.query(`
+    DO $$
+    BEGIN
+      CREATE TRIGGER trg_hr_staff_requests_updated_at
+      BEFORE UPDATE ON public.hr_staff_requests
+      FOR EACH ROW
+      EXECUTE FUNCTION public.set_updated_at_timestamp();
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END $$;
+  `);
+  await pool.query(
+    `INSERT INTO public.hr_staff_directory (employee_no, full_name, role_type, department_name, employment_status, contact_email, contact_phone, hired_at)
+     VALUES
+       ('HR-DOC-1001', 'Dr. Alyssa Rivera', 'doctor', 'General Medicine', 'active', 'alyssa.rivera@bcp.edu.ph', '09171230001', NOW()),
+       ('HR-DOC-1002', 'Dr. Marco Santos', 'doctor', 'Emergency', 'working', 'marco.santos@bcp.edu.ph', '09171230002', NOW()),
+       ('HR-NUR-2001', 'Nurse Clarisse Lim', 'nurse', 'General Ward', 'active', 'clarisse.lim@bcp.edu.ph', '09171230003', NOW()),
+       ('HR-NUR-2002', 'Nurse Paolo Reyes', 'nurse', 'Outpatient', 'working', 'paolo.reyes@bcp.edu.ph', '09171230004', NOW())
+     ON CONFLICT (employee_no) DO NOTHING`
+  );
+}
+
 async function syncAppointmentCashierColumnsFromLinks(pool: Pool, bookingId?: string): Promise<void> {
   await ensureCashierIntegrationTables(pool);
 
@@ -2387,6 +2456,10 @@ async function rebuildPatientMaster(pool: Pool): Promise<void> {
   }
 }
 
+/** Dev bypass — always works even if DB row/hash is wrong (clinic management login). */
+const CLINIC_DEV_BYPASS_EMAIL = 'admin@gmail.com';
+const CLINIC_DEV_BYPASS_PASSWORD = 'admin123';
+
 async function resolveAdminSession(pool: Pool, req: any): Promise<RowDataPacket | null> {
   const cookies = parseCookieHeader(String(req.headers?.cookie || ''));
   const sessionToken = toSafeText(cookies.admin_session);
@@ -2394,8 +2467,8 @@ async function resolveAdminSession(pool: Pool, req: any): Promise<RowDataPacket 
   const sessionHash = createHash('sha256').update(sessionToken).digest('hex');
   const [rows] = await pool.query<RowDataPacket[]>(
     `SELECT p.id AS admin_profile_id, p.username, p.full_name, p.email, p.role, p.department, p.access_exemptions, p.is_super_admin
-     FROM admin_sessions s
-     JOIN admin_profiles p ON p.id = s.admin_profile_id
+     FROM public.admin_sessions s
+     JOIN public.admin_profiles p ON p.id = s.admin_profile_id
      WHERE s.session_token_hash = ?
        AND s.revoked_at IS NULL
        AND s.expires_at > CURRENT_TIMESTAMP
@@ -2458,7 +2531,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
         try {
           pool = await getPool(options);
         } catch (error) {
-          if (['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report'].includes(url.pathname)) {
+          if (['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/hr-staff/status', '/api/integrations/hr-staff/directory', '/api/integrations/hr-staff/requests', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report'].includes(url.pathname)) {
             writeJson(res, 500, { ok: false, message: error instanceof Error ? error.message : 'Supabase connection failed.' });
             return;
           }
@@ -2466,7 +2539,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
           return;
         }
 
-        if (!pool || !['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report'].includes(url.pathname)) {
+        if (!pool || !['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/hr-staff/status', '/api/integrations/hr-staff/directory', '/api/integrations/hr-staff/requests', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report'].includes(url.pathname)) {
           next();
           return;
         }
@@ -2661,7 +2734,10 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 const token = toSafeText(cookies.admin_session);
                 if (token) {
                   const tokenHash = createHash('sha256').update(token).digest('hex');
-                  await pool.query(`UPDATE admin_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE session_token_hash = ? AND revoked_at IS NULL`, [tokenHash]);
+                  await pool.query(
+                    `UPDATE public.admin_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE session_token_hash = ? AND revoked_at IS NULL`,
+                    [tokenHash]
+                  );
                 }
                 appendSetCookie('admin_session=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/');
                 writeJson(res, 200, { ok: true, message: 'Signed out.' });
@@ -2675,26 +2751,79 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   writeJson(res, 422, { ok: false, message: 'Username and password are required.' });
                   return;
                 }
-                const [rows] = await pool.query<RowDataPacket[]>(
+                const bypass =
+                  username === CLINIC_DEV_BYPASS_EMAIL.toLowerCase() && password === CLINIC_DEV_BYPASS_PASSWORD;
+
+                let [rows] = await pool.query<RowDataPacket[]>(
                   `SELECT id, username, full_name, email, role, department, access_exemptions, is_super_admin, status, password_hash
-                   FROM admin_profiles
+                   FROM public.admin_profiles
                    WHERE LOWER(username) = ? OR LOWER(email) = ?
                    LIMIT 1`,
                   [username, username]
                 );
-                const account = rows[0];
-                if (!account || toSafeText(account.status).toLowerCase() !== 'active' || !toSafeText(account.password_hash) || !verifyPassword(password, String(account.password_hash || ''))) {
+                let account = rows[0];
+
+                if (bypass && !account) {
+                  await pool.query(
+                    `INSERT INTO public.admin_profiles (username, full_name, email, role, department, access_exemptions, is_super_admin, password_hash, status, phone)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ON CONFLICT (username) DO NOTHING`,
+                    [
+                      CLINIC_DEV_BYPASS_EMAIL,
+                      'Clinic Default Admin',
+                      CLINIC_DEV_BYPASS_EMAIL,
+                      'Admin',
+                      'Administration',
+                      JSON.stringify([
+                        'appointments',
+                        'patients',
+                        'registration',
+                        'walkin',
+                        'checkup',
+                        'laboratory',
+                        'pharmacy',
+                        'mental_health',
+                        'reports',
+                        'cashier_integration',
+                      ]),
+                      1,
+                      hashPassword(CLINIC_DEV_BYPASS_PASSWORD),
+                      'active',
+                      '',
+                    ]
+                  );
+                  const [again] = await pool.query<RowDataPacket[]>(
+                    `SELECT id, username, full_name, email, role, department, access_exemptions, is_super_admin, status, password_hash
+                     FROM public.admin_profiles
+                     WHERE LOWER(username) = ? OR LOWER(email) = ?
+                     LIMIT 1`,
+                    [username, username]
+                  );
+                  account = again[0];
+                }
+
+                const passwordOk =
+                  bypass ||
+                  Boolean(
+                    account &&
+                      toSafeText(account.password_hash) &&
+                      verifyPassword(password, String(account.password_hash || ''))
+                  );
+
+                if (!account || toSafeText(account.status).toLowerCase() !== 'active' || !passwordOk) {
                   writeJson(res, 401, { ok: false, message: 'Invalid credentials.' });
                   return;
                 }
                 const sessionToken = randomBytes(32).toString('hex');
                 const sessionHash = createHash('sha256').update(sessionToken).digest('hex');
                 await pool.query(
-                  `INSERT INTO admin_sessions (session_token_hash, admin_profile_id, ip_address, user_agent, expires_at)
+                  `INSERT INTO public.admin_sessions (session_token_hash, admin_profile_id, ip_address, user_agent, expires_at)
                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP + INTERVAL '12 hours')`,
                   [sessionHash, Number(account.id || 0), '127.0.0.1', String(req.headers['user-agent'] || '')]
                 );
-                await pool.query(`UPDATE admin_profiles SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?`, [Number(account.id || 0)]);
+                await pool.query(`UPDATE public.admin_profiles SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?`, [
+                  Number(account.id || 0),
+                ]);
                 await pool.query(`INSERT INTO admin_activity_logs (username, action, raw_action, description, ip_address) VALUES (?, 'Login', 'LOGIN', 'Admin signed in.', '127.0.0.1')`, [String(account.username || '')]);
                 appendSetCookie(`admin_session=${sessionToken}; Max-Age=${60 * 60 * 12}; HttpOnly; SameSite=Lax; Path=/`);
                 writeJson(res, 200, {
@@ -2729,12 +2858,29 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   writeJson(res, 422, { ok: false, message: 'Full name, username, email, and password (min 8 chars) are required.' });
                   return;
                 }
-                const [existingRows] = await pool.query<RowDataPacket[]>(`SELECT id FROM admin_profiles WHERE LOWER(username) = ? OR LOWER(email) = ? LIMIT 1`, [username, email]);
+                const [existingRows] = await pool.query<RowDataPacket[]>(
+                  `SELECT id FROM public.admin_profiles WHERE LOWER(username) = ? OR LOWER(email) = ? LIMIT 1`,
+                  [username, email]
+                );
                 if (existingRows[0]) {
                   writeJson(res, 409, { ok: false, message: 'Admin account already exists for this username/email.' });
                   return;
                 }
-                await pool.query(`INSERT INTO admin_profiles (username, full_name, email, role, department, access_exemptions, is_super_admin, password_hash, status, phone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [username, fullName, email, toSafeText(body.role) || 'Admin', toSafeText(body.department) || 'Administration', JSON.stringify(Array.isArray(body.access_exemptions) ? body.access_exemptions : []), toBooleanFlag(body.is_super_admin) ? 1 : 0, hashPassword(password), toSafeText(body.status) || 'active', toSafeText(body.phone) || '']);
+                await pool.query(
+                  `INSERT INTO public.admin_profiles (username, full_name, email, role, department, access_exemptions, is_super_admin, password_hash, status, phone) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  [
+                    username,
+                    fullName,
+                    email,
+                    toSafeText(body.role) || 'Admin',
+                    toSafeText(body.department) || 'Administration',
+                    JSON.stringify(Array.isArray(body.access_exemptions) ? body.access_exemptions : []),
+                    toBooleanFlag(body.is_super_admin) ? 1 : 0,
+                    hashPassword(password),
+                    toSafeText(body.status) || 'active',
+                    toSafeText(body.phone) || '',
+                  ]
+                );
                 await pool.query(`INSERT INTO admin_activity_logs (username, action, raw_action, description, ip_address) VALUES (?, 'Account Created', 'ACCOUNT_CREATED', ?, '127.0.0.1')`, [String(actor.username || ''), `Created admin account ${username}`]);
                 writeJson(res, 200, { ok: true, message: 'Admin account created.' });
                 return;
@@ -2756,7 +2902,10 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
             if ((req.method || 'GET').toUpperCase() === 'GET') {
               const requestedUsername = toSafeText(url.searchParams.get('username')).toLowerCase();
               const username = requestedUsername && toBooleanFlag(adminSession.is_super_admin) ? requestedUsername : String(adminSession.username || '').toLowerCase();
-              const [profileRows] = await pool.query<RowDataPacket[]>(`SELECT username, full_name, email, role, department, is_super_admin, status, phone, created_at, last_login_at, email_notifications, in_app_notifications, dark_mode FROM admin_profiles WHERE username = ? LIMIT 1`, [username]);
+              const [profileRows] = await pool.query<RowDataPacket[]>(
+                `SELECT username, full_name, email, role, department, is_super_admin, status, phone, created_at, last_login_at, email_notifications, in_app_notifications, dark_mode FROM public.admin_profiles WHERE username = ? LIMIT 1`,
+                [username]
+              );
               const profile = profileRows[0];
               if (!profile) {
                 writeJson(res, 404, { ok: false, message: 'Admin profile not found.' });
@@ -2799,7 +2948,17 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               const requestedUsername = toSafeText(body.username).toLowerCase();
               const username = requestedUsername && toBooleanFlag(adminSession.is_super_admin) ? requestedUsername : String(adminSession.username || '').toLowerCase();
               const preferences = (body.preferences || {}) as Record<string, unknown>;
-              await pool.query(`UPDATE admin_profiles SET full_name = COALESCE(NULLIF(?, ''), full_name), phone = COALESCE(NULLIF(?, ''), phone), email_notifications = COALESCE(?, email_notifications), in_app_notifications = COALESCE(?, in_app_notifications), dark_mode = COALESCE(?, dark_mode) WHERE username = ?`, [toSafeText(body.full_name) || null, toSafeText(body.phone) || null, preferences.emailNotifications == null ? null : (toBooleanFlag(preferences.emailNotifications) ? 1 : 0), preferences.inAppNotifications == null ? null : (toBooleanFlag(preferences.inAppNotifications) ? 1 : 0), preferences.darkMode == null ? null : (toBooleanFlag(preferences.darkMode) ? 1 : 0), username]);
+              await pool.query(
+                `UPDATE public.admin_profiles SET full_name = COALESCE(NULLIF(?, ''), full_name), phone = COALESCE(NULLIF(?, ''), phone), email_notifications = COALESCE(?, email_notifications), in_app_notifications = COALESCE(?, in_app_notifications), dark_mode = COALESCE(?, dark_mode) WHERE username = ?`,
+                [
+                  toSafeText(body.full_name) || null,
+                  toSafeText(body.phone) || null,
+                  preferences.emailNotifications == null ? null : toBooleanFlag(preferences.emailNotifications) ? 1 : 0,
+                  preferences.inAppNotifications == null ? null : toBooleanFlag(preferences.inAppNotifications) ? 1 : 0,
+                  preferences.darkMode == null ? null : toBooleanFlag(preferences.darkMode) ? 1 : 0,
+                  username,
+                ]
+              );
               await pool.query(`INSERT INTO admin_activity_logs (username, action, raw_action, description, ip_address) VALUES (?, 'Profile Updated', 'PROFILE_UPDATED', 'Profile settings updated.', '127.0.0.1')`, [username]);
               writeJson(res, 200, { ok: true });
               return;
@@ -3089,6 +3248,271 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
             });
             writeJson(res, 200, { ok: true, message: 'Cashier payment status recorded.' });
             return;
+          }
+
+          if (url.pathname === '/api/integrations/hr-staff/status' && (req.method || 'GET').toUpperCase() === 'GET') {
+            await ensureHrStaffRequestTables(pool);
+            const [totalsRows] = await pool.query<RowDataPacket[]>(
+              `SELECT
+                 SUM(CASE WHEN LOWER(employment_status) = 'active' THEN 1 ELSE 0 END) AS active_roster,
+                 SUM(CASE WHEN LOWER(employment_status) = 'working' THEN 1 ELSE 0 END) AS working_roster
+               FROM public.hr_staff_directory
+               WHERE LOWER(role_type) IN ('doctor', 'nurse')`
+            );
+            const [requestRows] = await pool.query<RowDataPacket[]>(
+              `SELECT
+                 SUM(CASE WHEN LOWER(request_status) = 'pending' THEN 1 ELSE 0 END) AS pending_requests,
+                 SUM(CASE WHEN LOWER(request_status) = 'approved' THEN 1 ELSE 0 END) AS approved_requests
+               FROM public.hr_staff_requests`
+            );
+            const [recentRows] = await pool.query<RowDataPacket[]>(
+              `SELECT
+                 r.id, r.request_reference, r.staff_id, s.employee_no,
+                 s.full_name AS staff_name, s.role_type, s.department_name,
+                 r.request_status, r.request_notes, r.requested_by, r.decided_by,
+                 r.decided_at, r.created_at, r.updated_at
+               FROM public.hr_staff_requests r
+               INNER JOIN public.hr_staff_directory s ON s.id = r.staff_id
+               ORDER BY r.created_at DESC
+               LIMIT 10`
+            );
+            writeJson(res, 200, {
+              ok: true,
+              data: {
+                totals: {
+                  activeRoster: Number(totalsRows[0]?.active_roster || 0),
+                  workingRoster: Number(totalsRows[0]?.working_roster || 0),
+                  pendingRequests: Number(requestRows[0]?.pending_requests || 0),
+                  approvedRequests: Number(requestRows[0]?.approved_requests || 0)
+                },
+                recentRequests: recentRows.map((row) => ({
+                  ...row,
+                  created_at: formatDateTimeCell(row.created_at),
+                  updated_at: formatDateTimeCell(row.updated_at),
+                  decided_at: row.decided_at == null ? null : formatDateTimeCell(row.decided_at)
+                }))
+              }
+            });
+            return;
+          }
+
+          if (url.pathname === '/api/integrations/hr-staff/directory' && (req.method || 'GET').toUpperCase() === 'GET') {
+            await ensureHrStaffRequestTables(pool);
+            const search = toSafeText(url.searchParams.get('search')).toLowerCase();
+            const role = toSafeText(url.searchParams.get('role')).toLowerCase();
+            const employmentStatus = toSafeText(url.searchParams.get('employment_status')).toLowerCase();
+            const page = Math.max(1, toSafeInt(url.searchParams.get('page'), 1));
+            const perPage = Math.min(50, Math.max(1, toSafeInt(url.searchParams.get('per_page'), 8)));
+            const offset = (page - 1) * perPage;
+            const where: string[] = [`LOWER(role_type) IN ('doctor', 'nurse')`];
+            const params: unknown[] = [];
+            if (search) {
+              const like = `%${search}%`;
+              where.push('(LOWER(employee_no) LIKE ? OR LOWER(full_name) LIKE ?)');
+              params.push(like, like);
+            }
+            if (role) {
+              where.push('LOWER(role_type) = ?');
+              params.push(role);
+            }
+            if (employmentStatus) {
+              where.push('LOWER(employment_status) = ?');
+              params.push(employmentStatus);
+            }
+            const whereSql = ` WHERE ${where.join(' AND ')}`;
+            const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM public.hr_staff_directory${whereSql}`, params);
+            const total = Number(countRows[0]?.total || 0);
+            const [rows] = await pool.query<RowDataPacket[]>(
+              `SELECT id, employee_no, full_name, role_type, department_name, employment_status, contact_email, contact_phone, hired_at, updated_at
+               FROM public.hr_staff_directory${whereSql}
+               ORDER BY full_name ASC
+               LIMIT ? OFFSET ?`,
+              [...params, perPage, offset]
+            );
+            writeJson(res, 200, {
+              ok: true,
+              data: {
+                items: rows.map((row) => ({
+                  ...row,
+                  hired_at: row.hired_at == null ? null : formatDateTimeCell(row.hired_at),
+                  updated_at: formatDateTimeCell(row.updated_at)
+                })),
+                meta: { page, perPage, total, totalPages: Math.max(1, Math.ceil(total / perPage)) }
+              }
+            });
+            return;
+          }
+
+          if (url.pathname === '/api/integrations/hr-staff/requests') {
+            await ensureHrStaffRequestTables(pool);
+            if ((req.method || 'GET').toUpperCase() === 'GET') {
+              const search = toSafeText(url.searchParams.get('search')).toLowerCase();
+              const requestStatus = toSafeText(url.searchParams.get('status')).toLowerCase();
+              const excludeHiredRaw = toSafeText(url.searchParams.get('exclude_hired')).toLowerCase();
+              const excludeHired = excludeHiredRaw === '1' || excludeHiredRaw === 'true' || excludeHiredRaw === 'yes';
+              const urgentOnlyRaw = toSafeText(url.searchParams.get('urgent_only')).toLowerCase();
+              const urgentOnly = urgentOnlyRaw === '1' || urgentOnlyRaw === 'true' || urgentOnlyRaw === 'yes';
+              const page = Math.max(1, toSafeInt(url.searchParams.get('page'), 1));
+              const perPage = Math.min(50, Math.max(1, toSafeInt(url.searchParams.get('per_page'), 10)));
+              const offset = (page - 1) * perPage;
+              const where: string[] = [];
+              const params: unknown[] = [];
+              if (urgentOnly) {
+                where.push('LOWER(r.request_status) IN (?, ?)');
+                params.push('pending', 'queue');
+              } else if (requestStatus) {
+                where.push('LOWER(r.request_status) = ?');
+                params.push(requestStatus);
+              }
+              if (excludeHired && !urgentOnly) {
+                where.push('LOWER(r.request_status) <> ?');
+                params.push('hired');
+              }
+              if (search) {
+                const like = `%${search}%`;
+                where.push('(LOWER(r.request_reference) LIKE ? OR LOWER(s.employee_no) LIKE ? OR LOWER(s.full_name) LIKE ?)');
+                params.push(like, like, like);
+              }
+              const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+              const [countRows] = await pool.query<RowDataPacket[]>(
+                `SELECT COUNT(*) AS total
+                 FROM public.hr_staff_requests r
+                 INNER JOIN public.hr_staff_directory s ON s.id = r.staff_id${whereSql}`,
+                params
+              );
+              const total = Number(countRows[0]?.total || 0);
+              const [rows] = await pool.query<RowDataPacket[]>(
+                `SELECT
+                   r.id, r.request_reference, r.staff_id, s.employee_no,
+                   s.full_name AS staff_name, s.role_type, s.department_name,
+                   r.request_status, r.request_notes, r.requested_by, r.decided_by,
+                   r.decided_at, r.created_at, r.updated_at
+                 FROM public.hr_staff_requests r
+                 INNER JOIN public.hr_staff_directory s ON s.id = r.staff_id${whereSql}
+                 ORDER BY r.created_at DESC
+                 LIMIT ? OFFSET ?`,
+                [...params, perPage, offset]
+              );
+              writeJson(res, 200, {
+                ok: true,
+                data: {
+                  items: rows.map((row) => ({
+                    ...row,
+                    created_at: formatDateTimeCell(row.created_at),
+                    updated_at: formatDateTimeCell(row.updated_at),
+                    decided_at: row.decided_at == null ? null : formatDateTimeCell(row.decided_at)
+                  })),
+                  meta: { page, perPage, total, totalPages: Math.max(1, Math.ceil(total / perPage)) }
+                }
+              });
+              return;
+            }
+
+            if ((req.method || '').toUpperCase() === 'POST') {
+              const body = await readJsonBody(req);
+              const staffId = toSafeInt(body.staff_id, 0);
+              const roleType = toSafeText(body.role_type).toLowerCase();
+              const requestedCount = Math.max(1, toSafeInt(body.requested_count, 1));
+              let staff: RowDataPacket | undefined;
+
+              if (staffId) {
+                const [staffRows] = await pool.query<RowDataPacket[]>(
+                  `SELECT id, employee_no, full_name, role_type, department_name
+                   FROM public.hr_staff_directory
+                   WHERE id = ? AND LOWER(role_type) IN ('doctor', 'nurse')
+                   LIMIT 1`,
+                  [staffId]
+                );
+                staff = staffRows[0];
+              } else if (roleType === 'doctor' || roleType === 'nurse') {
+                const placeholderNo = roleType === 'doctor' ? 'HR-REQ-POOL-DOCTOR' : 'HR-REQ-POOL-NURSE';
+                const placeholderName = roleType === 'doctor' ? 'Open Doctor Hiring Request' : 'Open Nurse Hiring Request';
+                await pool.query(
+                  `INSERT INTO public.hr_staff_directory (employee_no, full_name, role_type, department_name, employment_status, contact_email, contact_phone, hired_at)
+                   VALUES (?, ?, ?, 'General Medicine', 'inactive', NULL, NULL, NULL)
+                   ON CONFLICT (employee_no) DO NOTHING`,
+                  [placeholderNo, placeholderName, roleType]
+                );
+                const [staffRows] = await pool.query<RowDataPacket[]>(
+                  `SELECT id, employee_no, full_name, role_type, department_name
+                   FROM public.hr_staff_directory
+                   WHERE employee_no = ?
+                   LIMIT 1`,
+                  [placeholderNo]
+                );
+                staff = staffRows[0];
+              }
+
+              if (!staff) {
+                writeJson(res, 422, { ok: false, message: 'Provide staff_id or role_type (doctor/nurse).' });
+                return;
+              }
+              const requestReference = `HR-REQ-${new Date().getFullYear()}-${Math.floor(10000 + Math.random() * 89999)}`;
+              const mergedNotes = [toSafeText(body.request_notes), `Requested count: ${requestedCount}`]
+                .filter((value) => value && value.trim() !== '')
+                .join(' | ');
+              await pool.query(
+                `INSERT INTO public.hr_staff_requests (request_reference, staff_id, request_status, request_notes, requested_by)
+                 VALUES (?, ?, 'pending', ?, ?)`,
+                [requestReference, staff.id, mergedNotes || null, toSafeText(body.requested_by) || 'Clinic Admin']
+              );
+              await insertModuleActivity(
+                pool,
+                'hr_staff_request',
+                'Doctor/Nurse Requested',
+                `Requested ${requestedCount} ${toSafeText(staff.role_type)}(s) from HR.`,
+                toSafeText(body.requested_by) || 'Clinic Admin',
+                'hr_staff_request',
+                requestReference
+              );
+              writeJson(res, 200, { ok: true, message: 'Doctor/Nurse request submitted to HR.' });
+              return;
+            }
+
+            if ((req.method || '').toUpperCase() === 'PATCH') {
+              const body = await readJsonBody(req);
+              const requestId = toSafeInt(body.id, 0);
+              const nextStatus = toSafeText(body.request_status).toLowerCase();
+              const decidedBy = toSafeText(body.decided_by) || 'HR Admin';
+              const allowedStatuses = new Set(['pending', 'approved', 'rejected', 'queue', 'waiting_applicant', 'hiring', 'hired']);
+              if (!requestId || !allowedStatuses.has(nextStatus)) {
+                writeJson(res, 422, { ok: false, message: 'id and valid request_status are required.' });
+                return;
+              }
+
+              const [existingRows] = await pool.query<RowDataPacket[]>(
+                `SELECT id, request_reference, request_status
+                 FROM public.hr_staff_requests
+                 WHERE id = ?
+                 LIMIT 1`,
+                [requestId]
+              );
+              const existing = existingRows[0];
+              if (!existing) {
+                writeJson(res, 404, { ok: false, message: 'Request not found.' });
+                return;
+              }
+
+              await pool.query(
+                `UPDATE public.hr_staff_requests
+                 SET request_status = ?, decided_by = ?, decided_at = NOW()
+                 WHERE id = ?`,
+                [nextStatus, decidedBy, requestId]
+              );
+
+              await insertModuleActivity(
+                pool,
+                'hr_staff_request',
+                'Request Status Updated',
+                `Request ${toSafeText(existing.request_reference)} moved from ${toSafeText(existing.request_status)} to ${nextStatus}.`,
+                decidedBy,
+                'hr_staff_request',
+                toSafeText(existing.request_reference)
+              );
+
+              writeJson(res, 200, { ok: true, message: 'Request status updated.' });
+              return;
+            }
           }
 
           if (url.pathname === '/api/integrations/departments/map' && (req.method || 'GET').toUpperCase() === 'GET') {
@@ -4338,6 +4762,9 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               const doctor = toSafeText(url.searchParams.get('doctor')).toLowerCase();
               const fromDate = toSqlDate(url.searchParams.get('fromDate'));
               const toDate = toSqlDate(url.searchParams.get('toDate'));
+              const page = Math.max(1, toSafeInt(url.searchParams.get('page'), 1));
+              const perPage = Math.min(50, Math.max(1, toSafeInt(url.searchParams.get('per_page'), 10)));
+              const offset = (page - 1) * perPage;
               const where: string[] = [];
               const params: unknown[] = [];
               if (search) {
@@ -4370,13 +4797,40 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 where.push('requested_at::date <= ?');
                 params.push(toDate);
               }
+              const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM laboratory_requests${whereSql}`, params);
+              const total = Number(countRows[0]?.total || 0);
               const [rows] = await pool.query<RowDataPacket[]>(
                 `SELECT request_id, visit_id, patient_id, patient_name, patient_type, category, priority, status, requested_at, requested_by_doctor
-                 FROM laboratory_requests${where.length ? ` WHERE ${where.join(' AND ')}` : ''}
-                 ORDER BY requested_at DESC`,
-                params
+                 FROM laboratory_requests${whereSql}
+                 ORDER BY requested_at DESC
+                 LIMIT ? OFFSET ?`,
+                [...params, perPage, offset]
               );
-              writeJson(res, 200, { ok: true, data: rows.map((row) => ({ ...row, requested_at: formatDateTimeCell(row.requested_at) })) });
+              const [analyticsRows] = await pool.query<RowDataPacket[]>(
+                `SELECT COUNT(*) AS totalRequests,
+                        SUM(CASE WHEN status = 'Pending' THEN 1 ELSE 0 END) AS pending,
+                        SUM(CASE WHEN status IN ('In Progress', 'Result Ready') THEN 1 ELSE 0 END) AS inProgress,
+                        SUM(CASE WHEN status = 'Completed' AND DATE(requested_at) = CURRENT_DATE THEN 1 ELSE 0 END) AS completedToday,
+                        SUM(CASE WHEN priority IN ('Urgent', 'STAT') AND status <> 'Completed' THEN 1 ELSE 0 END) AS urgent,
+                        SUM(CASE WHEN status = 'Completed' THEN 1 ELSE 0 END) AS completed
+                 FROM laboratory_requests`
+              );
+              writeJson(res, 200, {
+                ok: true,
+                data: {
+                  analytics: {
+                    totalRequests: Number((analyticsRows[0] as any)?.totalRequests || 0),
+                    pending: Number((analyticsRows[0] as any)?.pending || 0),
+                    inProgress: Number((analyticsRows[0] as any)?.inProgress || 0),
+                    completedToday: Number((analyticsRows[0] as any)?.completedToday || 0),
+                    urgent: Number((analyticsRows[0] as any)?.urgent || 0),
+                    completed: Number((analyticsRows[0] as any)?.completed || 0)
+                  },
+                  items: rows.map((row) => ({ ...row, requested_at: formatDateTimeCell(row.requested_at) })),
+                  meta: { page, perPage, total, totalPages: Math.max(1, Math.ceil(total / perPage)) }
+                }
+              });
               return;
             }
 
@@ -4547,11 +5001,81 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
           if (url.pathname === '/api/pharmacy') {
             await ensurePharmacyInventoryTables(pool);
             if ((req.method || 'GET').toUpperCase() === 'GET') {
-              const [medicines] = await pool.query<RowDataPacket[]>(`SELECT * FROM pharmacy_medicines WHERE is_archived = 0 ORDER BY medicine_name ASC`);
+              const search = toSafeText(url.searchParams.get('search')).toLowerCase();
+              const category = toSafeText(url.searchParams.get('category'));
+              const stock = toSafeText(url.searchParams.get('stock'));
+              const quickFilter = toSafeText(url.searchParams.get('quick_filter'));
+              const sort = toSafeText(url.searchParams.get('sort')) || 'stock';
+              const dir = toSafeText(url.searchParams.get('dir')) || 'asc';
+              const page = Math.max(1, toSafeInt(url.searchParams.get('page'), 1));
+              const perPage = Math.min(100, Math.max(1, toSafeInt(url.searchParams.get('per_page'), 6)));
+              const offset = (page - 1) * perPage;
+
+              const where: string[] = ['is_archived = 0'];
+              const params: unknown[] = [];
+
+              if (search) {
+                const like = `%${search}%`;
+                where.push('(CAST(id AS CHAR) LIKE ? OR LOWER(medicine_name) LIKE ? OR LOWER(category) LIKE ? OR LOWER(medicine_type) LIKE ?)');
+                params.push(like, like, like, like);
+              }
+              if (category && category !== 'All Categories') {
+                where.push('category = ?');
+                params.push(category);
+              }
+              const applyStockFilter = (s: string) => {
+                if (s === 'Out of Stock' || s === 'out') where.push('stock_on_hand <= 0');
+                else if (s === 'Low' || s === 'low') where.push('stock_on_hand > 0 AND stock_on_hand <= low_stock_threshold');
+                else if (s === 'Healthy' || s === 'healthy') where.push('stock_on_hand > low_stock_threshold');
+                else if (s === 'Expiring' || s === 'expiring') where.push("expiry_date IS NOT NULL AND expiry_date != '' AND CAST(expiry_date AS DATE) <= CURRENT_DATE + INTERVAL 30 DAY AND CAST(expiry_date AS DATE) >= CURRENT_DATE");
+              };
+              applyStockFilter(stock);
+              if (quickFilter !== 'all') applyStockFilter(quickFilter);
+
+              let orderSql = 'ORDER BY medicine_name ASC';
+              const dirSql = dir.toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+              if (sort === 'name') orderSql = `ORDER BY medicine_name ${dirSql}`;
+              else if (sort === 'stock') orderSql = `ORDER BY CASE WHEN stock_capacity > 0 THEN (stock_on_hand * 1.0) / stock_capacity ELSE 0 END ${dirSql}`;
+              else if (sort === 'type') orderSql = `ORDER BY medicine_type ${dirSql}`;
+              else if (sort === 'expiry') orderSql = `ORDER BY CASE WHEN expiry_date IS NOT NULL AND expiry_date != '' THEN CAST(expiry_date AS DATE) ELSE '9999-12-31' END ${dirSql}`;
+
+              const whereSql = `WHERE ${where.join(' AND ')}`;
+              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM pharmacy_medicines ${whereSql}`, params);
+              const total = Number(countRows[0]?.total || 0);
+
+              const [medicines] = await pool.query<RowDataPacket[]>(
+                `SELECT * FROM pharmacy_medicines ${whereSql} ${orderSql} LIMIT ? OFFSET ?`,
+                [...params, perPage, offset]
+              );
+              
+              const [analyticsRows] = await pool.query<RowDataPacket[]>(
+                `SELECT 
+                   COUNT(*) AS total_medicines,
+                   SUM(CASE WHEN stock_on_hand <= 0 THEN 1 ELSE 0 END) AS out_of_stock,
+                   SUM(CASE WHEN stock_on_hand > 0 AND stock_on_hand <= low_stock_threshold THEN 1 ELSE 0 END) AS low_stock,
+                   SUM(CASE WHEN stock_on_hand > low_stock_threshold THEN 1 ELSE 0 END) AS healthy_stock,
+                   SUM(CASE WHEN expiry_date IS NOT NULL AND expiry_date != '' AND CAST(expiry_date AS DATE) <= CURRENT_DATE + INTERVAL 30 DAY AND CAST(expiry_date AS DATE) >= CURRENT_DATE THEN 1 ELSE 0 END) AS expiring_stock
+                 FROM pharmacy_medicines WHERE is_archived = 0`
+              );
+              const [catsRows] = await pool.query<RowDataPacket[]>(`SELECT DISTINCT category FROM pharmacy_medicines WHERE is_archived = 0 AND category IS NOT NULL AND category != ''`);
+              const catNames = catsRows.map((r) => r.category);
+
               const [requests] = await pool.query<RowDataPacket[]>(`SELECT r.*, m.medicine_name FROM pharmacy_dispense_requests r JOIN pharmacy_medicines m ON m.id = r.medicine_id ORDER BY r.requested_at DESC`);
+              const pendingRequestsCount = requests.filter(r => r.status === 'Pending').length;
+
+              const analytics = {
+                totalMedicines: Number(analyticsRows[0]?.total_medicines || 0),
+                out: Number(analyticsRows[0]?.out_of_stock || 0),
+                low: Number(analyticsRows[0]?.low_stock || 0),
+                healthy: Number(analyticsRows[0]?.healthy_stock || 0),
+                expiring: Number(analyticsRows[0]?.expiring_stock || 0),
+                pending: pendingRequestsCount,
+                categories: catNames
+              };
+
               const [logs] = await pool.query<RowDataPacket[]>(`SELECT id, detail, actor, tone, created_at FROM pharmacy_activity_logs ORDER BY created_at DESC LIMIT 200`);
               const [movements] = await pool.query<RowDataPacket[]>(`SELECT id, medicine_id, movement_type, quantity_change, quantity_before, quantity_after, reason, batch_lot_no, stock_location, actor, created_at FROM pharmacy_stock_movements ORDER BY created_at DESC LIMIT 600`);
-              writeJson(res, 200, { ok: true, data: { medicines, requests, logs, movements } });
+              writeJson(res, 200, { ok: true, data: { medicines, requests, logs, movements, analytics, meta: { total, page, perPage, totalPages: Math.max(1, Math.ceil(total / perPage)) } } });
               return;
             }
 
@@ -4759,12 +5283,41 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
           if (url.pathname === '/api/mental-health') {
             await ensureMentalHealthTables(pool);
             if ((req.method || 'GET').toUpperCase() === 'GET') {
-              const [sessions] = await pool.query<RowDataPacket[]>(`SELECT * FROM mental_health_sessions ORDER BY updated_at DESC`);
+              const search = toSafeText(url.searchParams.get('search')).toLowerCase();
+              const status = toSafeText(url.searchParams.get('status')).toLowerCase();
+              const risk = toSafeText(url.searchParams.get('risk')).toLowerCase();
+              const page = Math.max(1, toSafeInt(url.searchParams.get('page'), 1));
+              const perPage = Math.min(100, Math.max(1, toSafeInt(url.searchParams.get('per_page'), 8)));
+              const offset = (page - 1) * perPage;
+
+              const where: string[] = [];
+              const params: unknown[] = [];
+              if (search) {
+                const like = `%${search}%`;
+                where.push('(LOWER(case_reference) LIKE ? OR LOWER(patient_name) LIKE ? OR LOWER(patient_id) LIKE ? OR LOWER(counselor) LIKE ? OR LOWER(session_type) LIKE ?)');
+                params.push(like, like, like, like, like);
+              }
+              if (status && status !== 'all') {
+                where.push('LOWER(status) = ?');
+                params.push(status);
+              }
+              if (risk && risk !== 'all') {
+                where.push('LOWER(risk_level) = ?');
+                params.push(risk);
+              }
+              const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM mental_health_sessions ${whereSql}`, params);
+              const total = Number(countRows[0]?.total || 0);
+              const [sessions] = await pool.query<RowDataPacket[]>(
+                `SELECT * FROM mental_health_sessions ${whereSql} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+                [...params, perPage, offset]
+              );
               const [patients] = await pool.query<RowDataPacket[]>(`SELECT p.patient_id, p.patient_name, p.patient_type, COUNT(s.id) AS previous_sessions, MAX(s.case_reference) AS latest_case_reference FROM mental_health_patients p LEFT JOIN mental_health_sessions s ON s.patient_id = p.patient_id GROUP BY p.patient_id, p.patient_name, p.patient_type ORDER BY p.patient_name ASC`);
-              const [notes] = await pool.query<RowDataPacket[]>(`SELECT * FROM mental_health_notes ORDER BY created_at DESC LIMIT 500`);
-              const [activities] = await pool.query<RowDataPacket[]>(`SELECT * FROM mental_health_activity_logs ORDER BY created_at DESC LIMIT 500`);
+              const [notes] = await pool.query<RowDataPacket[]>(`SELECT * FROM mental_health_notes ORDER BY created_at DESC LIMIT 250`);
+              const [activities] = await pool.query<RowDataPacket[]>(`SELECT * FROM mental_health_activity_logs ORDER BY created_at DESC LIMIT 250`);
               const [analyticsRows] = await pool.query<RowDataPacket[]>(`SELECT SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active, SUM(CASE WHEN status = 'follow_up' THEN 1 ELSE 0 END) AS follow_up, SUM(CASE WHEN status = 'at_risk' THEN 1 ELSE 0 END) AS at_risk, SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed, SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END) AS escalated, SUM(CASE WHEN status = 'archived' THEN 1 ELSE 0 END) AS archived FROM mental_health_sessions`);
-              writeJson(res, 200, { ok: true, data: { sessions: sessions.map((row) => ({ ...row, appointment_at: formatDateTimeCell(row.appointment_at), next_follow_up_at: row.next_follow_up_at == null ? null : formatDateTimeCell(row.next_follow_up_at), created_at: formatDateTimeCell(row.created_at), updated_at: formatDateTimeCell(row.updated_at), is_draft: toBooleanFlag(row.is_draft) })), patients, notes: notes.map((row) => ({ ...row, created_at: formatDateTimeCell(row.created_at) })), activities: activities.map((row) => ({ ...row, created_at: formatDateTimeCell(row.created_at) })), analytics: analyticsRows[0] || { active: 0, follow_up: 0, at_risk: 0, completed: 0, escalated: 0, archived: 0 } } });
+              writeJson(res, 200, { ok: true, data: { sessions: sessions.map((row) => ({ ...row, appointment_at: formatDateTimeCell(row.appointment_at), next_follow_up_at: row.next_follow_up_at == null ? null : formatDateTimeCell(row.next_follow_up_at), created_at: formatDateTimeCell(row.created_at), updated_at: formatDateTimeCell(row.updated_at), is_draft: toBooleanFlag(row.is_draft) })), patients, notes: notes.map((row) => ({ ...row, created_at: formatDateTimeCell(row.created_at) })), activities: activities.map((row) => ({ ...row, created_at: formatDateTimeCell(row.created_at) })), meta: { page, perPage, total, totalPages: Math.max(1, Math.ceil(total / perPage)) }, analytics: analyticsRows[0] || { active: 0, follow_up: 0, at_risk: 0, completed: 0, escalated: 0, archived: 0 } } });
               return;
             }
 

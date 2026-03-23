@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
@@ -82,6 +82,8 @@ const sortDirection = ref<SortDirection>('asc');
 const listPage = ref(1);
 const pageSize = ref(6);
 const pageSizeOptions = [6, 10, 20];
+const meta = ref({ page: 1, perPage: 6, total: 0, totalPages: 1 });
+const serverAnalytics = ref({ totalMedicines: 0, out: 0, low: 0, healthy: 0, expiring: 0, pending: 0, categories: [] as string[] });
 const selectedMedicineId = ref<number | null>(null);
 const historyDrawer = ref(false);
 const historyMedicineId = ref<number | null>(null);
@@ -390,8 +392,7 @@ const rolePermissions: Record<InventoryRole, ActionType[]> = {
   Doctor: []
 };
 const categoryItems = computed(() => {
-  const dynamic = Array.from(new Set(medicines.value.map((item) => item.category)));
-  const all = Array.from(new Set([...Object.keys(categoryTypeMap), ...dynamic]));
+  const all = Array.from(new Set([...(serverAnalytics.value.categories || []), ...Object.keys(categoryTypeMap)]));
   return ['All Categories', ...all];
 });
 const typeItemsForAdd = computed(() => categoryTypeMap[addForm.category] || ['General']);
@@ -400,7 +401,17 @@ const realtime = useRealtimeListSync();
 
 async function loadPharmacyData(options: { silent?: boolean } = {}): Promise<void> {
   const snapshot = await realtime.runLatest(
-    async () => fetchPharmacySnapshot(),
+    async () =>
+      fetchPharmacySnapshot({
+        search: searchQuery.value.trim() || undefined,
+        category: categoryFilter.value === 'All Categories' ? undefined : categoryFilter.value,
+        stock: stockFilter.value === 'All' ? undefined : stockFilter.value,
+        quickFilter: quickFilter.value,
+        sort: sortBy.value,
+        dir: sortDirection.value,
+        page: listPage.value,
+        perPage: pageSize.value
+      }),
     {
       silent: options.silent,
       onError: (error) => {
@@ -413,6 +424,8 @@ async function loadPharmacyData(options: { silent?: boolean } = {}): Promise<voi
   dispenseRequests.value = snapshot.requests as DispenseRequest[];
   inventoryLogs.value = snapshot.logs as InventoryLog[];
   stockHistory.value = snapshot.history as Record<number, StockHistoryEntry[]>;
+  meta.value = snapshot.meta;
+  serverAnalytics.value = snapshot.analytics;
   const stillExists = medicines.value.some((item) => item.id === selectedMedicineId.value);
   if (!stillExists) {
     selectedMedicineId.value = medicines.value[0]?.id ?? null;
@@ -431,6 +444,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  if (searchDebounce) clearTimeout(searchDebounce);
   realtime.stopPolling();
   realtime.invalidatePending();
 });
@@ -479,10 +493,10 @@ function stockToneByPercent(percent: number): string {
 }
 
 const totals = computed(() => {
-  const total = medicines.value.length;
-  const low = medicines.value.filter((item) => stockState(item) === 'Low').length;
-  const out = medicines.value.filter((item) => stockState(item) === 'Out of Stock').length;
-  const pending = dispenseRequests.value.filter((req) => req.status === 'Pending').length;
+  const total = Number(serverAnalytics.value.totalMedicines || 0);
+  const low = Number(serverAnalytics.value.low || 0);
+  const out = Number(serverAnalytics.value.out || 0);
+  const pending = Number(serverAnalytics.value.pending || 0);
   return { total, low, out, pending };
 });
 
@@ -509,57 +523,8 @@ const summaryAlerts = computed(() => {
   };
 });
 
-const filteredMedicines = computed(() => {
-  let rows = [...medicines.value];
-  const query = searchQuery.value.trim().toLowerCase();
-
-  if (categoryFilter.value !== 'All Categories') {
-    rows = rows.filter((item) => item.category === categoryFilter.value);
-  }
-
-  if (stockFilter.value !== 'All') {
-    rows = rows.filter((item) => stockState(item) === stockFilter.value);
-  }
-
-  if (quickFilter.value === 'out') {
-    rows = rows.filter((item) => stockState(item) === 'Out of Stock');
-  } else if (quickFilter.value === 'low') {
-    rows = rows.filter((item) => stockState(item) === 'Low');
-  } else if (quickFilter.value === 'healthy') {
-    rows = rows.filter((item) => stockState(item) === 'Healthy');
-  } else if (quickFilter.value === 'expiring') {
-    rows = rows.filter((item) => expiryState(item) === 'Expiring Soon');
-  }
-
-  if (query) {
-    rows = rows.filter((item) => {
-      const target = `${item.id} ${item.name} ${item.category} ${item.type} ${item.expiryDate}`.toLowerCase();
-      return target.includes(query);
-    });
-  }
-
-  return rows.sort((a, b) => {
-    if (sortBy.value === 'name') {
-      return sortDirection.value === 'asc' ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name);
-    }
-
-    if (sortBy.value === 'stock') {
-      return sortDirection.value === 'asc' ? stockPercent(a) - stockPercent(b) : stockPercent(b) - stockPercent(a);
-    }
-
-    if (sortBy.value === 'type') {
-      return sortDirection.value === 'asc' ? a.type.localeCompare(b.type) : b.type.localeCompare(a.type);
-    }
-
-    return sortDirection.value === 'asc' ? expiryDateValue(a) - expiryDateValue(b) : expiryDateValue(b) - expiryDateValue(a);
-  });
-});
-
-const pageCount = computed(() => Math.max(1, Math.ceil(filteredMedicines.value.length / pageSize.value)));
-const pagedMedicines = computed(() => {
-  const start = (listPage.value - 1) * pageSize.value;
-  return filteredMedicines.value.slice(start, start + pageSize.value);
-});
+const pageCount = computed(() => Math.max(1, Number(meta.value.totalPages || 1)));
+const pagedMedicines = computed(() => medicines.value);
 
 const selectedMedicine = computed(() => medicines.value.find((item) => item.id === selectedMedicineId.value) || null);
 const actionMedicine = computed(() => medicines.value.find((item) => item.id === actionMedicineId.value) || null);
@@ -575,21 +540,22 @@ const historyItems = computed(() => {
   return stockHistory.value[historyMedicineId.value] || [];
 });
 const showingText = computed(() => {
-  if (filteredMedicines.value.length === 0) return 'Showing 0-0 of 0 medicines';
-  const start = (listPage.value - 1) * pageSize.value + 1;
-  const end = Math.min(listPage.value * pageSize.value, filteredMedicines.value.length);
-  return `Showing ${start}-${end} of ${filteredMedicines.value.length} medicines`;
+  if (meta.value.total === 0) return 'Showing 0-0 of 0 medicines';
+  const start = (meta.value.page - 1) * meta.value.perPage + 1;
+  const end = Math.min(meta.value.page * meta.value.perPage, meta.value.total);
+  return `Showing ${start}-${end} of ${meta.value.total} medicines`;
 });
 
-watch([searchQuery, categoryFilter, stockFilter, quickFilter, pageSize], () => {
+watch([categoryFilter, stockFilter, quickFilter, pageSize], () => {
   listPage.value = 1;
+  void loadPharmacyData();
 });
 
 watch(pageCount, (count) => {
   if (listPage.value > count) listPage.value = count;
 });
 
-watch(filteredMedicines, (rows) => {
+watch(medicines, (rows) => {
   if (rows.length === 0) {
     selectedMedicineId.value = null;
     return;
@@ -597,6 +563,24 @@ watch(filteredMedicines, (rows) => {
 
   const exists = rows.some((row) => row.id === selectedMedicineId.value);
   if (!exists) selectedMedicineId.value = rows[0].id;
+});
+
+watch([sortBy, sortDirection], () => {
+  listPage.value = 1;
+  void loadPharmacyData();
+});
+
+watch(listPage, () => {
+  void loadPharmacyData();
+});
+
+let searchDebounce: ReturnType<typeof setTimeout> | null = null;
+watch(searchQuery, () => {
+  if (searchDebounce) clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    listPage.value = 1;
+    void loadPharmacyData();
+  }, REALTIME_POLICY.debounce.registrationSearchMs);
 });
 
 watch(
