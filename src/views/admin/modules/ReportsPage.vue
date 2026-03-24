@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import AnalyticsCardGrid from '@/components/shared/AnalyticsCardGrid.vue';
 import SaasDateTimePickerField from '@/components/shared/SaasDateTimePickerField.vue';
 import ModuleActivityLogs from '@/components/shared/ModuleActivityLogs.vue';
+import ClinicHealthReportModal from '@/components/shared/ClinicHealthReportModal.vue';
 import { useRealtimeListSync } from '@/composables/useRealtimeListSync';
 import { useRealtimeClock } from '@/composables/useRealtimeClock';
 import { formatDateTimeWithTimezone } from '@/utils/dateTime';
@@ -16,6 +17,7 @@ import {
   type ReportsSnapshot,
   type ReportsTrendRow
 } from '@/services/reports';
+import { fetchHealthReports, type ClinicHealthReport } from '@/services/clinicHealthReports';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
 import { emitSuccessModal } from '@/composables/useSuccessModal';
 import { fetchModuleActivity } from '@/services/moduleActivity';
@@ -35,6 +37,14 @@ const prefectTotal = ref(0);
 const toast = reactive({ open: false, text: '', color: 'info' as 'success' | 'info' | 'warning' | 'error' });
 const realtime = useRealtimeListSync();
 const { compactDateTimeText, dateText, timeText } = useRealtimeClock(1000);
+
+// Health reports
+const healthReportModalOpen = ref(false);
+const healthReports = ref<ClinicHealthReport[]>([]);
+const healthReportsTotal = ref(0);
+const healthReportsLoading = ref(false);
+const healthReportSearch = ref('');
+const healthReportPage = ref(1);
 
 let lastRequestId = 0;
 
@@ -141,8 +151,46 @@ async function sendToPmed(): Promise<void> {
   }
 }
 
+async function loadHealthReports(options: { silent?: boolean } = {}): Promise<void> {
+  if (!options.silent) healthReportsLoading.value = true;
+  try {
+    const result = await fetchHealthReports({
+      search: healthReportSearch.value || undefined,
+      page: healthReportPage.value,
+      perPage: 10,
+      forceRefresh: true
+    });
+    healthReports.value = result?.items ?? [];
+    healthReportsTotal.value = result?.meta?.total ?? 0;
+  } catch {
+    // Silently fail — table may not exist on older deployments
+    healthReports.value = [];
+  } finally {
+    if (!options.silent) healthReportsLoading.value = false;
+  }
+}
+
+function onHealthReportSubmitted(code: string): void {
+  showToast(`Health report ${code} sent to PMED successfully.`, 'success');
+  void loadHealthReports();
+}
+
+function severityColor(value: string): string {
+  if (value === 'emergency' || value === 'high') return 'error';
+  if (value === 'moderate') return 'warning';
+  return 'success';
+}
+
+function severityIcon(value: string): string {
+  if (value === 'emergency') return 'mdi-ambulance';
+  if (value === 'high') return 'mdi-alert-outline';
+  if (value === 'moderate') return 'mdi-alert-circle-outline';
+  return 'mdi-check-circle-outline';
+}
+
 onMounted(async () => {
   await load({ forceRefresh: true });
+  void loadHealthReports();
   realtime.startPolling(() => {
     void load({ silent: true, forceRefresh: true });
   }, REALTIME_POLICY.polling.reportsMs);
@@ -369,6 +417,151 @@ onUnmounted(() => {
         </v-card-text>
       </v-card>
 
+      <!-- ── Clinic Health Reports Section ─────────────────────────────────── -->
+      <v-card class="surface-card health-reports-card" variant="outlined">
+        <v-card-item>
+          <div class="d-flex flex-wrap justify-space-between align-center ga-2">
+            <div>
+              <div class="text-overline font-weight-bold" style="color:#c62828;">Health Reports → PMED</div>
+              <v-card-title class="px-0 pt-1">Student / Patient Health Issue Reports</v-card-title>
+              <div class="text-medium-emphasis text-body-2">
+                Document a student's health issue, medicines and first aid used, then send the report directly to PMED for monitoring.
+              </div>
+            </div>
+            <div class="d-flex ga-2 align-center flex-wrap">
+              <v-chip v-if="healthReportsTotal > 0" color="error" variant="tonal" size="small">
+                {{ healthReportsTotal }} report{{ healthReportsTotal !== 1 ? 's' : '' }}
+              </v-chip>
+              <v-btn
+                color="error"
+                variant="flat"
+                rounded="lg"
+                prepend-icon="mdi-medical-bag"
+                class="saas-btn"
+                @click="healthReportModalOpen = true"
+              >
+                New Health Report
+              </v-btn>
+            </div>
+          </div>
+        </v-card-item>
+        <v-divider />
+        <v-card-text class="pt-3">
+          <!-- Search bar -->
+          <div class="d-flex ga-2 align-center mb-4 flex-wrap">
+            <v-text-field
+              v-model="healthReportSearch"
+              placeholder="Search by student name, ID or health issue…"
+              variant="outlined"
+              density="compact"
+              prepend-inner-icon="mdi-magnify"
+              hide-details
+              clearable
+              style="max-width: 420px;"
+              @update:model-value="healthReportPage = 1; loadHealthReports()"
+            />
+            <v-btn
+              icon
+              size="small"
+              variant="text"
+              :loading="healthReportsLoading"
+              @click="loadHealthReports()"
+            >
+              <v-icon>mdi-refresh</v-icon>
+            </v-btn>
+          </div>
+
+          <v-progress-linear v-if="healthReportsLoading" color="error" indeterminate class="mb-3" rounded />
+
+          <!-- Reports table -->
+          <v-table v-if="healthReports.length" density="comfortable" hover>
+            <thead>
+              <tr>
+                <th style="width:130px;">CODE</th>
+                <th>PATIENT</th>
+                <th>HEALTH ISSUE</th>
+                <th style="width:110px;">SEVERITY</th>
+                <th>MEDICINE / FIRST AID</th>
+                <th style="width:80px;">PMED</th>
+                <th style="width:140px;">DATE</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in healthReports" :key="r.reportCode">
+                <td>
+                  <code class="text-caption">{{ r.reportCode }}</code>
+                </td>
+                <td>
+                  <div class="font-weight-bold">{{ r.studentName }}</div>
+                  <div class="text-caption text-medium-emphasis">
+                    {{ [r.studentId, r.gradeSection].filter(Boolean).join(' · ') || r.studentType }}
+                  </div>
+                </td>
+                <td>
+                  <div class="text-body-2" style="max-width:260px; white-space:pre-wrap;">{{ r.healthIssue }}</div>
+                  <div v-if="r.symptoms" class="text-caption text-medium-emphasis" style="max-width:260px;">{{ r.symptoms }}</div>
+                </td>
+                <td>
+                  <v-chip
+                    :color="severityColor(r.severity)"
+                    :prepend-icon="severityIcon(r.severity)"
+                    size="small"
+                    variant="flat"
+                    class="text-capitalize"
+                  >{{ r.severity }}</v-chip>
+                </td>
+                <td>
+                  <div v-if="r.medicinesUsed?.length" class="text-body-2">
+                    <span v-for="(m, idx) in r.medicinesUsed.slice(0,3)" :key="idx">
+                      <v-chip size="x-small" color="indigo" variant="tonal" class="mr-1 mb-1">{{ m.name }}</v-chip>
+                    </span>
+                    <span v-if="r.medicinesUsed.length > 3" class="text-caption text-medium-emphasis">+{{ r.medicinesUsed.length - 3 }} more</span>
+                  </div>
+                  <div v-if="r.firstAidGiven" class="text-caption text-medium-emphasis mt-1">
+                    <v-icon size="12" class="mr-1">mdi-bandage</v-icon>{{ r.firstAidGiven.slice(0, 60) }}{{ r.firstAidGiven.length > 60 ? '…' : '' }}
+                  </div>
+                  <div v-if="!r.medicinesUsed?.length && !r.firstAidGiven" class="text-caption text-medium-emphasis">—</div>
+                </td>
+                <td>
+                  <v-chip
+                    :color="r.sentToPmed ? 'success' : 'warning'"
+                    :prepend-icon="r.sentToPmed ? 'mdi-check-circle' : 'mdi-clock-outline'"
+                    size="small"
+                    variant="tonal"
+                  >{{ r.sentToPmed ? 'Sent' : 'Pending' }}</v-chip>
+                </td>
+                <td>
+                  <div class="text-caption">{{ r.createdAt }}</div>
+                  <div v-if="r.attendingStaff" class="text-caption text-medium-emphasis">{{ r.attendingStaff }}</div>
+                </td>
+              </tr>
+            </tbody>
+          </v-table>
+
+          <div v-else-if="!healthReportsLoading" class="health-empty-state">
+            <v-icon size="48" color="error" opacity="0.4">mdi-medical-bag</v-icon>
+            <div class="text-h6 mt-2">No health reports yet</div>
+            <div class="text-body-2 text-medium-emphasis mb-4">
+              When a student visits the clinic, create a health report to document the issue and send it to PMED.
+            </div>
+            <v-btn color="error" variant="flat" rounded="lg" prepend-icon="mdi-plus" @click="healthReportModalOpen = true">
+              Create First Report
+            </v-btn>
+          </div>
+
+          <!-- Pagination -->
+          <div v-if="healthReportsTotal > 10" class="d-flex justify-center mt-4">
+            <v-pagination
+              v-model="healthReportPage"
+              :length="Math.ceil(healthReportsTotal / 10)"
+              density="compact"
+              @update:model-value="loadHealthReports()"
+            />
+          </div>
+        </v-card-text>
+      </v-card>
+      <!-- ── End Health Reports Section ──────────────────────────────────── -->
+
       <v-row>
         <v-col cols="12" md="4">
           <v-card class="surface-card" variant="outlined">
@@ -453,6 +646,11 @@ onUnmounted(() => {
     <ModuleActivityLogs module="all" title="All Module Activity Logs" :per-page="12" />
 
     <v-snackbar v-model="toast.open" :color="toast.color" timeout="2800">{{ toast.text }}</v-snackbar>
+
+    <ClinicHealthReportModal
+      v-model="healthReportModalOpen"
+      @submitted="onHealthReportSubmitted"
+    />
   </div>
 </template>
 
@@ -504,4 +702,6 @@ onUnmounted(() => {
 .metric-cyan { background: linear-gradient(135deg, #06b6d4 0%, #0e7490 100%); }
 .saas-btn { border-radius: 10px !important; text-transform: none !important; font-weight: 700 !important; min-height: 36px !important; }
 .saas-btn-primary { background: linear-gradient(135deg, #2f80ed 0%, #225ac8 100%) !important; color: #fff !important; }
+.health-reports-card { border-color: #ffcdd2 !important; background: linear-gradient(135deg, #fff5f5 0%, #fff8f8 100%); }
+.health-empty-state { text-align: center; padding: 40px 20px; }
 </style>

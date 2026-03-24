@@ -375,6 +375,34 @@ async function ensureModuleActivityLogsTable(_pool: DbPool): Promise<void> {
   return;
 }
 
+async function ensureHealthReportsTable(pool: Pool): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS clinic_health_reports (
+      id                  BIGSERIAL PRIMARY KEY,
+      report_code         VARCHAR(60)  NOT NULL UNIQUE,
+      student_id          VARCHAR(80)  NULL,
+      student_name        VARCHAR(150) NOT NULL,
+      student_type        VARCHAR(20)  NOT NULL DEFAULT 'student',
+      grade_section       VARCHAR(120) NULL,
+      age                 SMALLINT     NULL,
+      sex                 VARCHAR(20)  NULL,
+      health_issue        TEXT         NOT NULL,
+      symptoms            TEXT         NULL,
+      severity            VARCHAR(20)  NOT NULL DEFAULT 'low',
+      treatment_given     TEXT         NULL,
+      medicines_used      JSONB        NOT NULL DEFAULT '[]'::jsonb,
+      first_aid_given     TEXT         NULL,
+      attending_staff     VARCHAR(150) NOT NULL DEFAULT '',
+      remarks             TEXT         NULL,
+      sent_to_pmed        SMALLINT     NOT NULL DEFAULT 0,
+      pmed_sent_at        TIMESTAMP    NULL,
+      pmed_entity_key     VARCHAR(120) NULL,
+      created_at          TIMESTAMP    NOT NULL DEFAULT NOW(),
+      updated_at          TIMESTAMP    NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
 async function insertModuleActivity(
   pool: Pool,
   moduleName: string,
@@ -2531,7 +2559,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
         try {
           pool = await getPool(options);
         } catch (error) {
-          if (['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/hr-staff/status', '/api/integrations/hr-staff/directory', '/api/integrations/hr-staff/requests', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report', '/api/integrations/prefect/incident-reports', '/api/integrations/prefect/sync-from-registry'].includes(url.pathname)) {
+          if (['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/health-reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/hr-staff/status', '/api/integrations/hr-staff/directory', '/api/integrations/hr-staff/requests', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report', '/api/integrations/prefect/incident-reports', '/api/integrations/prefect/sync-from-registry'].includes(url.pathname)) {
             writeJson(res, 500, { ok: false, message: error instanceof Error ? error.message : 'Supabase connection failed.' });
             return;
           }
@@ -2539,7 +2567,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
           return;
         }
 
-        if (!pool || !['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/hr-staff/status', '/api/integrations/hr-staff/directory', '/api/integrations/hr-staff/requests', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report', '/api/integrations/prefect/incident-reports', '/api/integrations/prefect/sync-from-registry'].includes(url.pathname)) {
+        if (!pool || !['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/health-reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/hr-staff/status', '/api/integrations/hr-staff/directory', '/api/integrations/hr-staff/requests', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report', '/api/integrations/prefect/incident-reports', '/api/integrations/prefect/sync-from-registry'].includes(url.pathname)) {
           next();
           return;
         }
@@ -6250,6 +6278,226 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               return;
             }
           }
+
+          // ── Clinic Health Reports ──────────────────────────────────────────────────
+          if (url.pathname === '/api/health-reports') {
+            await ensureHealthReportsTable(pool);
+            await ensureModuleActivityLogsTable(pool);
+            const method = (req.method || 'GET').toUpperCase();
+
+            if (method === 'GET') {
+              const search = toSafeText(url.searchParams.get('search'));
+              const sentToPmed = toSafeText(url.searchParams.get('sent_to_pmed'));
+              const severity = toSafeText(url.searchParams.get('severity'));
+              const page = Math.max(1, toSafeInt(url.searchParams.get('page'), 1));
+              const perPage = Math.min(50, Math.max(1, toSafeInt(url.searchParams.get('per_page'), 20)));
+              const offset = (page - 1) * perPage;
+              const where: string[] = [];
+              const params: unknown[] = [];
+
+              if (search) {
+                where.push(`(LOWER(student_name) LIKE ? OR LOWER(COALESCE(student_id,'')) LIKE ? OR LOWER(health_issue) LIKE ?)`);
+                const q = `%${search.toLowerCase()}%`;
+                params.push(q, q, q);
+              }
+              if (sentToPmed === '1' || sentToPmed === 'true') {
+                where.push(`sent_to_pmed = 1`);
+              } else if (sentToPmed === '0' || sentToPmed === 'false') {
+                where.push(`sent_to_pmed = 0`);
+              }
+              if (severity) {
+                where.push(`severity = ?`);
+                params.push(severity.toLowerCase());
+              }
+
+              const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+              const [countRows] = await pool.query<RowDataPacket[]>(
+                `SELECT COUNT(*) AS total FROM clinic_health_reports ${whereClause}`,
+                params
+              );
+              const total = Number(countRows[0]?.total ?? 0);
+              const totalPages = Math.max(1, Math.ceil(total / perPage));
+
+              const [rows] = await pool.query<RowDataPacket[]>(
+                `SELECT id, report_code, student_id, student_name, student_type, grade_section, age, sex,
+                        health_issue, symptoms, severity, treatment_given, medicines_used, first_aid_given,
+                        attending_staff, remarks, sent_to_pmed, pmed_sent_at, pmed_entity_key, created_at, updated_at
+                 FROM clinic_health_reports
+                 ${whereClause}
+                 ORDER BY created_at DESC
+                 LIMIT ? OFFSET ?`,
+                [...params, perPage, offset]
+              );
+
+              writeJson(res, 200, {
+                ok: true,
+                data: {
+                  items: rows.map((r) => ({
+                    id: Number(r.id),
+                    reportCode: String(r.report_code || ''),
+                    studentId: String(r.student_id || ''),
+                    studentName: String(r.student_name || ''),
+                    studentType: String(r.student_type || 'student'),
+                    gradeSection: String(r.grade_section || ''),
+                    age: r.age !== null ? Number(r.age) : null,
+                    sex: String(r.sex || ''),
+                    healthIssue: String(r.health_issue || ''),
+                    symptoms: String(r.symptoms || ''),
+                    severity: String(r.severity || 'low'),
+                    treatmentGiven: String(r.treatment_given || ''),
+                    medicinesUsed: Array.isArray(r.medicines_used) ? r.medicines_used : [],
+                    firstAidGiven: String(r.first_aid_given || ''),
+                    attendingStaff: String(r.attending_staff || ''),
+                    remarks: String(r.remarks || ''),
+                    sentToPmed: Number(r.sent_to_pmed) === 1,
+                    pmedSentAt: r.pmed_sent_at ? formatDateTimeCell(r.pmed_sent_at) : null,
+                    pmedEntityKey: String(r.pmed_entity_key || ''),
+                    createdAt: formatDateTimeCell(r.created_at),
+                    updatedAt: formatDateTimeCell(r.updated_at)
+                  })),
+                  meta: { page, perPage, total, totalPages }
+                }
+              });
+              return;
+            }
+
+            if (method === 'POST') {
+              const body = await readJsonBody(req);
+              const action = toSafeText(body.action).toLowerCase() || 'create';
+
+              if (action === 'create' || action === 'send_to_pmed') {
+                const studentName = toSafeText(body.student_name);
+                if (!studentName) {
+                  writeJson(res, 422, { ok: false, message: 'student_name is required.' });
+                  return;
+                }
+                const healthIssue = toSafeText(body.health_issue);
+                if (!healthIssue) {
+                  writeJson(res, 422, { ok: false, message: 'health_issue is required.' });
+                  return;
+                }
+
+                const ts = Date.now();
+                const reportCode = `HR-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${String(ts).slice(-6)}`;
+                const medicinesUsed = Array.isArray(body.medicines_used) ? body.medicines_used : [];
+                const severity = ['low', 'moderate', 'high', 'emergency'].includes(toSafeText(body.severity).toLowerCase())
+                  ? toSafeText(body.severity).toLowerCase()
+                  : 'low';
+                const studentType = ['student', 'teacher'].includes(toSafeText(body.student_type).toLowerCase())
+                  ? toSafeText(body.student_type).toLowerCase()
+                  : 'student';
+
+                await pool.query(
+                  `INSERT INTO clinic_health_reports
+                     (report_code, student_id, student_name, student_type, grade_section, age, sex,
+                      health_issue, symptoms, severity, treatment_given, medicines_used, first_aid_given,
+                      attending_staff, remarks)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?)`,
+                  [
+                    reportCode,
+                    toSafeText(body.student_id) || null,
+                    studentName,
+                    studentType,
+                    toSafeText(body.grade_section) || null,
+                    body.age !== undefined && body.age !== null && body.age !== '' ? toSafeInt(body.age, 0) : null,
+                    toSafeText(body.sex) || null,
+                    healthIssue,
+                    toSafeText(body.symptoms) || null,
+                    severity,
+                    toSafeText(body.treatment_given) || null,
+                    JSON.stringify(medicinesUsed),
+                    toSafeText(body.first_aid_given) || null,
+                    toSafeText(body.attending_staff) || '',
+                    toSafeText(body.remarks) || null
+                  ]
+                );
+
+                const [newRows] = await pool.query<RowDataPacket[]>(
+                  `SELECT * FROM clinic_health_reports WHERE report_code = ? LIMIT 1`,
+                  [reportCode]
+                );
+                const newReport = newRows[0];
+
+                // Always push to PMED activity log so PMED can see it
+                const entityKey = `health-report:${reportCode}`;
+                const actor = toSafeText(body.actor) || toSafeText(body.attending_staff) || 'Clinic Staff';
+                const medicineList = medicinesUsed.map((m: unknown) => {
+                  if (typeof m === 'string') return m;
+                  const rec = m as Record<string, unknown>;
+                  return [rec.name, rec.dose, rec.quantity].filter(Boolean).join(' ');
+                }).filter(Boolean).join(', ') || 'None';
+
+                const detail = `[${severity.toUpperCase()}] ${studentName}${toSafeText(body.student_id) ? ` (${toSafeText(body.student_id)})` : ''}: ${healthIssue}`;
+
+                await insertModuleActivity(pool, 'pmed', 'CLINIC_HEALTH_REPORT_RECEIVED',
+                  `Clinic health report received from ${actor}. ${detail}`,
+                  actor, 'health_report', entityKey, {
+                    source_department: 'clinic',
+                    source_department_name: 'Clinic',
+                    target_department: 'pmed',
+                    report_type: 'clinic_health_report',
+                    report_code: reportCode,
+                    student_id: toSafeText(body.student_id) || null,
+                    student_name: studentName,
+                    student_type: studentType,
+                    grade_section: toSafeText(body.grade_section) || null,
+                    age: body.age !== undefined ? body.age : null,
+                    sex: toSafeText(body.sex) || null,
+                    health_issue: healthIssue,
+                    symptoms: toSafeText(body.symptoms) || null,
+                    severity,
+                    treatment_given: toSafeText(body.treatment_given) || null,
+                    medicines_used: medicinesUsed,
+                    medicine_list_summary: medicineList,
+                    first_aid_given: toSafeText(body.first_aid_given) || null,
+                    attending_staff: actor,
+                    delivery_status: 'Received',
+                    dispatched_at: new Date().toISOString()
+                  }
+                );
+
+                await insertModuleActivity(pool, 'department_reports', 'Health Report Sent to PMED',
+                  detail, actor, 'health_report', entityKey, {
+                    source_department: 'clinic',
+                    target_key: 'pmed',
+                    report_type: 'clinic_health_report',
+                    report_code: reportCode,
+                    severity,
+                    medicine_list_summary: medicineList,
+                    delivery_status: 'Received',
+                    dispatched_at: new Date().toISOString()
+                  }
+                );
+
+                // Mark as sent to PMED
+                await pool.query(
+                  `UPDATE clinic_health_reports SET sent_to_pmed = 1, pmed_sent_at = NOW(), pmed_entity_key = ?, updated_at = NOW() WHERE report_code = ?`,
+                  [entityKey, reportCode]
+                );
+
+                writeJson(res, 200, {
+                  ok: true,
+                  message: 'Health report created and sent to PMED.',
+                  data: {
+                    reportCode,
+                    entityKey,
+                    studentName,
+                    severity,
+                    sentToPmed: true,
+                    createdAt: newReport ? formatDateTimeCell(newReport.created_at) : new Date().toISOString()
+                  }
+                });
+                return;
+              }
+
+              writeJson(res, 422, { ok: false, message: 'Unsupported action for health-reports.' });
+              return;
+            }
+
+            writeJson(res, 405, { ok: false, message: 'Method not allowed.' });
+            return;
+          }
+          // ── End Clinic Health Reports ──────────────────────────────────────────────
 
           next();
         } catch (error) {
