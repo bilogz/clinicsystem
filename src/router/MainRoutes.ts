@@ -57,6 +57,11 @@ const MainRoutes = {
       component: () => import('@/views/admin/modules/HrStaffRequestPage.vue')
     },
     {
+      name: 'Prefect incident reports',
+      path: '/modules/prefect-incidents',
+      component: () => import('@/views/admin/modules/PrefectIncidentReportsPage.vue')
+    },
+    {
       name: 'Doctors/Nurse',
       path: '/modules/doctors-nurse',
       component: () => import('@/views/admin/modules/DoctorsNursePage.vue')

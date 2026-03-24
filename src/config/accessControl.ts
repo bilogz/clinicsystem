@@ -10,7 +10,8 @@ type ModuleKey =
   | 'laboratory'
   | 'pharmacy'
   | 'mental_health'
-  | 'reports';
+  | 'reports'
+  | 'prefect_incidents';
 
 const MODULE_ROUTE_MAP: Record<ModuleKey, string> = {
   appointments: '/appointments',
@@ -21,7 +22,8 @@ const MODULE_ROUTE_MAP: Record<ModuleKey, string> = {
   laboratory: '/modules/laboratory',
   pharmacy: '/modules/pharmacy',
   mental_health: '/modules/mental-health',
-  reports: '/modules/reports'
+  reports: '/modules/reports',
+  prefect_incidents: '/modules/prefect-incidents'
 };
 
 const DEPARTMENT_MODULE_MAP: Array<{ matcher: RegExp; module: ModuleKey }> = [
@@ -66,6 +68,7 @@ function normalizeModuleName(value: string): ModuleKey | null {
   if (raw === 'pharmacy' || raw === 'pharmacy_inventory' || raw === 'pharmacy-inventory') return 'pharmacy';
   if (raw === 'mental_health' || raw === 'mental-health' || raw === 'mentalhealth') return 'mental_health';
   if (raw === 'reports' || raw === 'report') return 'reports';
+  if (raw === 'prefect_incidents' || raw === 'prefect-incidents' || raw === 'prefectincidents') return 'prefect_incidents';
   return null;
 }
 
@@ -105,7 +108,11 @@ export function resolveAllowedModulesForUser(user: AdminUser | null): ModuleKey[
   });
 
   if (!allowed.size) return ['appointments'];
-  return Array.from(allowed);
+  const list = Array.from(allowed);
+  if (list.some((m) => m === 'checkup' || m === 'mental_health' || m === 'reports')) {
+    if (!list.includes('prefect_incidents')) list.push('prefect_incidents');
+  }
+  return list;
 }
 
 export function defaultRouteForUser(user: AdminUser | null): string {

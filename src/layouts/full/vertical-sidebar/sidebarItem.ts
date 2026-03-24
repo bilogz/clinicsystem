@@ -11,6 +11,7 @@ import {
   mdiFlaskOutline,
   mdiLogout,
   mdiPill,
+  mdiShieldAccountOutline,
   mdiStethoscope,
   mdiViewDashboardOutline,
   mdiWalk
@@ -93,6 +94,11 @@ const sidebarItem: menu[] = [
     title: 'Request Doctor/Nurse',
     icon: mdiAccountSwitchOutline,
     to: '/modules/hr-staff-request'
+  },
+  {
+    title: 'Prefect incident reports',
+    icon: mdiShieldAccountOutline,
+    to: '/modules/prefect-incidents'
   },
   {
     title: 'Doctors/Nurse',

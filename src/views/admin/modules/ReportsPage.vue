@@ -18,6 +18,8 @@ import {
 } from '@/services/reports';
 import { REALTIME_POLICY } from '@/config/realtimePolicy';
 import { emitSuccessModal } from '@/composables/useSuccessModal';
+import { fetchModuleActivity } from '@/services/moduleActivity';
+import { rowToPrefectIncidentView, type PrefectIncidentView } from '@/utils/prefectIncidentDisplay';
 
 const loading = ref(true);
 const sendingToPmed = ref(false);
@@ -28,6 +30,8 @@ const moduleTotals = ref<ReportsModuleTotal[]>([]);
 const trend = ref<ReportsTrendRow[]>([]);
 const activity = ref<ReportsActivityRow[]>([]);
 const pmedRequestNotifications = ref<ReportsPmedRequestNotification[]>([]);
+const prefectPreview = ref<PrefectIncidentView[]>([]);
+const prefectTotal = ref(0);
 const toast = reactive({ open: false, text: '', color: 'info' as 'success' | 'info' | 'warning' | 'error' });
 const realtime = useRealtimeListSync();
 const { compactDateTimeText, dateText, timeText } = useRealtimeClock(1000);
@@ -89,11 +93,22 @@ async function load(options: { silent?: boolean; forceRefresh?: boolean } = {}):
   const requestId = ++lastRequestId;
   if (!options.silent) loading.value = true;
   try {
-    const data = await fetchReportsSnapshot({
-      from: fromDate.value || undefined,
-      to: toDate.value || undefined,
-      forceRefresh: options.forceRefresh ?? options.silent ?? false
-    });
+    const [data, prefectPayload] = await Promise.all([
+      fetchReportsSnapshot({
+        from: fromDate.value || undefined,
+        to: toDate.value || undefined,
+        forceRefresh: options.forceRefresh ?? options.silent ?? false
+      }),
+      fetchModuleActivity({
+        module: 'prefect_incident',
+        page: 1,
+        perPage: 5,
+        forceRefresh: Boolean(options.forceRefresh) || !options.silent
+      }).catch(() => ({
+        items: [],
+        meta: { page: 1, perPage: 5, total: 0, totalPages: 1 }
+      }))
+    ]);
     if (requestId !== lastRequestId) return;
     snapshot.value = data;
     moduleTotals.value = data.moduleTotals;
@@ -102,6 +117,8 @@ async function load(options: { silent?: boolean; forceRefresh?: boolean } = {}):
     pmedRequestNotifications.value = data.pmedRequestNotifications || [];
     if (!fromDate.value) fromDate.value = data.window.from;
     if (!toDate.value) toDate.value = data.window.to;
+    prefectPreview.value = (prefectPayload.items || []).map((row) => rowToPrefectIncidentView(row));
+    prefectTotal.value = Number(prefectPayload.meta?.total ?? prefectPreview.value.length);
   } catch (error) {
     if (!options.silent) {
       showToast(error instanceof Error ? error.message : String(error), 'error');
@@ -225,6 +242,49 @@ onUnmounted(() => {
           </v-list-item>
         </v-list>
       </v-alert>
+
+      <v-card class="surface-card prefect-preview-card" variant="outlined">
+        <v-card-item>
+          <div class="d-flex flex-wrap justify-space-between align-center ga-2">
+            <div>
+              <div class="text-overline font-weight-bold text-primary">Prefect integration</div>
+              <v-card-title class="px-0 pt-1">Prefect incidents (from database)</v-card-title>
+              <div class="text-medium-emphasis text-body-2">
+                Preview rows read only from <code>module_activity_logs</code> (same source as Integration → Prefect incident reports). Nothing is
+                loaded from Prefect servers in the browser.
+              </div>
+            </div>
+            <div class="d-flex ga-2 align-center flex-wrap">
+              <v-chip v-if="prefectTotal" color="warning" variant="tonal" size="small">
+                {{ prefectTotal }} total
+              </v-chip>
+              <router-link class="text-primary font-weight-bold text-decoration-none" to="/modules/prefect-incidents">
+                Open inbox →
+              </router-link>
+            </div>
+          </div>
+        </v-card-item>
+        <v-divider />
+        <v-card-text class="pt-4">
+          <v-list v-if="prefectPreview.length" class="transparent pa-0" density="compact">
+            <v-list-item v-for="row in prefectPreview" :key="row.id" class="px-0">
+              <template #title>{{ row.title }}</template>
+              <template #subtitle>
+                <span v-if="row.studentName || row.studentNo">{{ [row.studentName, row.studentNo].filter(Boolean).join(' · ') }}</span>
+                <span v-else class="text-medium-emphasis">No student ID on record</span>
+                <span v-if="row.severity" class="ml-2">· {{ row.severity }}</span>
+              </template>
+              <template #append>
+                <div class="text-right text-caption text-medium-emphasis">{{ formatDate(row.created_at) }}</div>
+              </template>
+            </v-list-item>
+          </v-list>
+          <div v-else class="text-body-2 text-medium-emphasis">
+            No matching rows in the database yet. When incidents are written to <code>module_activity_logs</code> (via Prefect POST or admin
+            test), they appear here and in the full inbox.
+          </div>
+        </v-card-text>
+      </v-card>
 
       <v-card class="surface-card pmed-flow-card" variant="outlined">
         <v-card-item>
@@ -428,6 +488,7 @@ onUnmounted(() => {
   backdrop-filter: blur(8px);
 }
 .surface-card { border-radius: 16px; border-color: #dbe4f2 !important; background: #fbfdff; }
+.prefect-preview-card { border-color: #ffe0b2 !important; background: linear-gradient(135deg, #fffaf3 0%, #fff7ed 100%); }
 .pmed-flow-card { border-color: #cfe0ff !important; background: linear-gradient(135deg, #f7fbff 0%, #f2f7ff 100%); }
 .pmed-section-card { padding: 14px 16px; background: rgba(255, 255, 255, 0.82); border-color: #d7e4ff !important; }
 .metric-card { border-radius: 12px; color: #fff; min-height: 122px; box-shadow: 0 10px 18px rgba(16, 24, 40, 0.18); }

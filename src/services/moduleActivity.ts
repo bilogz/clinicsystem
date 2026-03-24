@@ -38,6 +38,8 @@ export async function fetchModuleActivity(query: {
   search?: string;
   page?: number;
   perPage?: number;
+  /** Bypass short-lived GET cache (use for polling / after writes). */
+  forceRefresh?: boolean;
 }): Promise<ModuleActivityPayload> {
   const params = new URLSearchParams();
   if (query.module?.trim()) params.set('module', query.module.trim());
@@ -47,5 +49,9 @@ export async function fetchModuleActivity(query: {
   if (query.perPage && query.perPage > 0) params.set('per_page', String(query.perPage));
 
   const url = `${resolveApiUrl()}${params.toString() ? `?${params.toString()}` : ''}`;
-  return await fetchApiData<ModuleActivityPayload>(url, { ttlMs: 8_000 });
+  const forceRefresh = Boolean(query.forceRefresh);
+  return await fetchApiData<ModuleActivityPayload>(url, {
+    ttlMs: forceRefresh ? 0 : 8_000,
+    forceRefresh
+  });
 }

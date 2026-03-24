@@ -12,6 +12,8 @@ function normalizePathPrefix(value: string): string {
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
+  const departmentSharedToken =
+    env.DEPARTMENT_INTEGRATION_SHARED_TOKEN || process.env.DEPARTMENT_INTEGRATION_SHARED_TOKEN || '';
   const devProxyTarget = env.VITE_DEV_PROXY_TARGET || 'http://localhost';
   const devBackendRoot = normalizePathPrefix(env.VITE_DEV_BACKEND_ROOT || '/Clinic%20System');
 
@@ -24,7 +26,7 @@ export default defineConfig(({ mode }) => {
         cashierSharedToken: env.CASHIER_SHARED_TOKEN,
         cashierSyncMode: env.CASHIER_SYNC_MODE,
         cashierInboundPath: env.CASHIER_SYSTEM_INBOUND_PATH,
-        departmentSharedToken: env.DEPARTMENT_INTEGRATION_SHARED_TOKEN
+        departmentSharedToken
       }),
       vue({
         template: {

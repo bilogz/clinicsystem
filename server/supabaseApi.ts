@@ -2531,7 +2531,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
         try {
           pool = await getPool(options);
         } catch (error) {
-          if (['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/hr-staff/status', '/api/integrations/hr-staff/directory', '/api/integrations/hr-staff/requests', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report'].includes(url.pathname)) {
+          if (['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/hr-staff/status', '/api/integrations/hr-staff/directory', '/api/integrations/hr-staff/requests', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report', '/api/integrations/prefect/incident-reports', '/api/integrations/prefect/sync-from-registry'].includes(url.pathname)) {
             writeJson(res, 500, { ok: false, message: error instanceof Error ? error.message : 'Supabase connection failed.' });
             return;
           }
@@ -2539,7 +2539,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
           return;
         }
 
-        if (!pool || !['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/hr-staff/status', '/api/integrations/hr-staff/directory', '/api/integrations/hr-staff/requests', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report'].includes(url.pathname)) {
+        if (!pool || !['/api/appointments', '/api/doctors', '/api/doctor-availability', '/api/registrations', '/api/walk-ins', '/api/checkups', '/api/laboratory', '/api/pharmacy', '/api/mental-health', '/api/patients', '/api/admin-auth', '/api/admin-profile', '/api/module-activity', '/api/reports', '/api/dashboard', '/api/integrations/cashier/status', '/api/integrations/cashier/queue', '/api/integrations/cashier/sync', '/api/integrations/cashier/payment-status', '/api/integrations/hr-staff/status', '/api/integrations/hr-staff/directory', '/api/integrations/hr-staff/requests', '/api/integrations/departments/map', '/api/integrations/departments/records', '/api/integrations/departments/report', '/api/integrations/prefect/incident-reports', '/api/integrations/prefect/sync-from-registry'].includes(url.pathname)) {
           next();
           return;
         }
@@ -3513,6 +3513,271 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               writeJson(res, 200, { ok: true, message: 'Request status updated.' });
               return;
             }
+          }
+
+          if (url.pathname === '/api/integrations/prefect/incident-reports' && (req.method || 'GET').toUpperCase() === 'GET') {
+            await ensureModuleActivityLogsTable(pool);
+            const tokenConfigured = Boolean(toSafeText(options.departmentSharedToken));
+            let storedPrefectIncidentCount = 0;
+            try {
+              const [countRows] = await pool.query<RowDataPacket[]>(
+                `SELECT COUNT(*)::bigint AS total FROM module_activity_logs WHERE LOWER(module) = LOWER(?)`,
+                ['prefect_incident']
+              );
+              storedPrefectIncidentCount = Number(countRows[0]?.total ?? 0);
+            } catch {
+              storedPrefectIncidentCount = 0;
+            }
+            writeJson(res, 200, {
+              ok: true,
+              data: {
+                integrationModel: 'push',
+                dataSource:
+                  'This app never reads Prefect over HTTP. The inbox list is loaded only from the clinic database table module_activity_logs (module = prefect_incident).',
+                explanation:
+                  'The clinic UI does not call Prefect. Rows are stored in the database when the Prefect hub POSTs to this path (X-Integration-Token) or when a signed-in admin uses simulate_from_clinic_admin.',
+                ingestUrl: '/api/integrations/prefect/incident-reports',
+                httpMethod: 'POST',
+                tokenConfigured,
+                tokenMissingOnClinic: !tokenConfigured,
+                storedPrefectIncidentCount,
+                remotePrefectNote:
+                  'If Prefect runs on Netlify or another remote host, CLINIC_PREFECT_BRIDGE_URL must be a public HTTPS URL to your clinic backend (not http://localhost:5173 unless Prefect runs on the same machine).',
+                sharedEnvKey: 'DEPARTMENT_INTEGRATION_SHARED_TOKEN',
+                clinicUiTestHint:
+                  'Signed-in clinic admins can POST the same URL with JSON { simulate_from_clinic_admin: true, payload: { title, student_no, ... } } (no X-Integration-Token) to insert one test row, or use the "Record test row" button on the Prefect incident page.',
+                registrySyncPath: '/api/integrations/prefect/sync-from-registry',
+                registrySyncHint:
+                  'When Prefect and Clinic share the same Supabase, department flows still write clinic.department_clearance_records even if the HTTP bridge to this dev server fails. POST sync-from-registry (admin cookie or X-Integration-Token) copies missing Prefect-sourced rows into module_activity_logs.'
+              }
+            });
+            return;
+          }
+
+          if (url.pathname === '/api/integrations/prefect/sync-from-registry' && (req.method || '').toUpperCase() === 'POST') {
+            await ensureModuleActivityLogsTable(pool);
+            await ensureDepartmentClearanceTables(pool);
+            const syncBody = (await readJsonBody(req)) as Record<string, unknown>;
+            const tokenOkSync = hasValidDepartmentIntegrationToken(req, options);
+            const adminSessionSync = await resolveAdminSession(pool, req);
+            if (!tokenOkSync && !adminSessionSync) {
+              writeJson(res, 401, {
+                ok: false,
+                message: 'Sign in to the clinic or send X-Integration-Token to sync from the shared registry.'
+              });
+              return;
+            }
+            const syncLimit = Math.min(100, Math.max(1, toSafeInt(syncBody.limit, 40)));
+            const [clearanceRows] = await pool.query<RowDataPacket[]>(
+              `SELECT id, clearance_reference, patient_name, patient_code, patient_type, remarks, metadata, created_at
+               FROM clinic.department_clearance_records
+               WHERE LOWER(department_key) = LOWER(?)
+                 AND COALESCE(metadata->>'source_department', '') = ?
+                 AND clearance_reference IS NOT NULL
+                 AND TRIM(clearance_reference) <> ''
+               ORDER BY created_at DESC
+               LIMIT ?`,
+              ['clinic', 'prefect', syncLimit]
+            );
+            let insertedSync = 0;
+            let skippedSync = 0;
+            for (const row of clearanceRows || []) {
+              const ref = toSafeText(row.clearance_reference);
+              if (!ref) {
+                skippedSync += 1;
+                continue;
+              }
+              const [existingLog] = await pool.query<RowDataPacket[]>(
+                `SELECT id FROM public.module_activity_logs
+                 WHERE LOWER(module) = LOWER(?) AND entity_key = ?
+                 LIMIT 1`,
+                ['prefect_incident', ref]
+              );
+              if (existingLog?.length) {
+                skippedSync += 1;
+                continue;
+              }
+              const meta = parseJsonRecord(row.metadata);
+              const payload = meta.payload && typeof meta.payload === 'object' && !Array.isArray(meta.payload) ? meta.payload : {};
+              const detailParts: string[] = [];
+              const remarks = toSafeText(row.remarks);
+              if (remarks) detailParts.push(remarks);
+              const pname = toSafeText(row.patient_name);
+              const pcode = toSafeText(row.patient_code);
+              if (pname || pcode) {
+                detailParts.push(`— ${[pname, pcode].filter(Boolean).join(' · ')}`);
+              }
+              detailParts.push(`Ref: ${ref}`);
+              const detailSync = detailParts.filter(Boolean).join(' ') || `Prefect incident synced from registry (${ref}).`;
+              await insertModuleActivity(
+                pool,
+                'prefect_incident',
+                'Prefect incident (synced from shared registry)',
+                detailSync,
+                'Prefect Management',
+                'prefect_incident',
+                ref,
+                {
+                  source: 'prefect_registry_sync',
+                  clearance_record_id: row.id,
+                  registry_synced_at: new Date().toISOString(),
+                  payload,
+                  registry_metadata: meta
+                }
+              );
+              insertedSync += 1;
+            }
+            writeJson(res, 200, {
+              ok: true,
+              message: `Registry sync: ${insertedSync} new activity row(s), ${skippedSync} skipped (duplicate or empty ref).`,
+              data: {
+                inserted: insertedSync,
+                skipped: skippedSync,
+                scanned: (clearanceRows || []).length
+              }
+            });
+            return;
+          }
+
+          if (url.pathname === '/api/integrations/prefect/incident-reports' && (req.method || '').toUpperCase() === 'POST') {
+            await ensureModuleActivityLogsTable(pool);
+            const body = (await readJsonBody(req)) as Record<string, unknown>;
+            const tokenOk = hasValidDepartmentIntegrationToken(req, options);
+            const adminSession = await resolveAdminSession(pool, req);
+            const adminSimulate = toBooleanFlag(body.simulate_from_clinic_admin) && Boolean(adminSession);
+            if (!tokenOk && !adminSimulate) {
+              writeJson(res, 401, {
+                ok: false,
+                message:
+                  'Send header X-Integration-Token (same value as DEPARTMENT_INTEGRATION_SHARED_TOKEN), or sign in to the clinic and POST JSON with simulate_from_clinic_admin: true plus a payload object to record a test row.'
+              });
+              return;
+            }
+            const payloadRaw = body.payload;
+            const payload =
+              payloadRaw && typeof payloadRaw === 'object' && !Array.isArray(payloadRaw)
+                ? (payloadRaw as Record<string, unknown>)
+                : {};
+            const correlationId = toSafeText(body.correlation_id);
+            const firstText = (...vals: unknown[]) => {
+              for (const v of vals) {
+                const t = toSafeText(v);
+                if (t) return t;
+              }
+              return '';
+            };
+            const studentNo = firstText(
+              payload.student_no,
+              payload.studentNo,
+              payload.patient_code,
+              body.patient_code,
+              payload.student_id
+            );
+            const studentName = firstText(
+              payload.student_name,
+              payload.studentName,
+              payload.patient_name,
+              payload.name,
+              body.patient_name
+            );
+            const referenceNo = firstText(
+              payload.reference_no,
+              payload.referenceNo,
+              payload.case_reference,
+              body.clearance_reference,
+              payload.clearance_reference
+            );
+            const title = firstText(
+              payload.title,
+              payload.incident_type,
+              payload.type,
+              payload.subject,
+              'Prefect health-related incident'
+            );
+            const notes = firstText(
+              payload.notes,
+              payload.remarks,
+              payload.incident_summary,
+              payload.description,
+              payload.concern,
+              payload.action_taken,
+              payload.record_remarks
+            );
+            const statusText = firstText(payload.status, payload.state);
+            const severityText = firstText(payload.severity, payload.priority, payload.risk_level);
+            const locationText = firstText(payload.location, payload.campus_location, payload.venue);
+            const incidentDateText = firstText(payload.incident_date, payload.date_occurred, payload.occurred_at);
+            const reportedByText = firstText(
+              payload.reported_by,
+              payload.requested_by,
+              payload.requestedBy,
+              payload.reportedBy
+            );
+            const incidentTypeText = firstText(payload.incident_type, payload.type, payload.category);
+            const detailParts: string[] = [title];
+            if (studentName || studentNo) {
+              detailParts.push(`— ${[studentName, studentNo].filter(Boolean).join(' · ')}`);
+            }
+            if (referenceNo) detailParts.push(`Ref: ${referenceNo}`);
+            if (severityText) detailParts.push(`Severity: ${severityText}`);
+            if (locationText) detailParts.push(`Location: ${locationText}`);
+            if (notes) detailParts.push(notes);
+            if (statusText) detailParts.push(`Status: ${statusText}`);
+            const detail = detailParts.filter(Boolean).join(' ') || 'Prefect forwarded an incident to Clinic.';
+            const entityKey =
+              correlationId ||
+              referenceNo ||
+              toSafeText(body.event_id) ||
+              `prefect-${Date.now()}`;
+            const actionLabel = adminSimulate ? 'Prefect incident (clinic admin test)' : 'Prefect incident report received';
+            const actorLabel = adminSimulate
+              ? toSafeText(adminSession?.full_name) || toSafeText(adminSession?.username) || 'Clinic Admin'
+              : 'Prefect Management';
+            const incident = {
+              title,
+              student_no: studentNo,
+              student_name: studentName,
+              reference_no: referenceNo,
+              incident_type: incidentTypeText,
+              severity: severityText,
+              location: locationText,
+              incident_date: incidentDateText,
+              status: statusText,
+              notes,
+              description: firstText(payload.description, payload.incident_summary),
+              remarks: firstText(payload.remarks),
+              action_taken: firstText(payload.action_taken),
+              reported_by: reportedByText,
+              patient_code: firstText(body.patient_code, payload.patient_code),
+              patient_name: firstText(body.patient_name, payload.patient_name),
+              clearance_reference: firstText(body.clearance_reference, payload.clearance_reference)
+            };
+            await insertModuleActivity(
+              pool,
+              'prefect_incident',
+              actionLabel,
+              detail,
+              actorLabel,
+              'prefect_incident',
+              entityKey,
+              {
+                source: adminSimulate ? 'clinic_admin_simulate' : 'prefect',
+                admin_simulated: adminSimulate,
+                correlation_id: correlationId,
+                event_id: body.event_id,
+                event_code: body.event_code,
+                clearance_reference: body.clearance_reference,
+                patient_name: body.patient_name,
+                patient_code: body.patient_code,
+                patient_type: body.patient_type,
+                incident,
+                payload,
+                record_metadata: body.record_metadata,
+                bridge_received_at: new Date().toISOString()
+              }
+            );
+            writeJson(res, 200, { ok: true, message: 'Incident recorded in Clinic.', entity_key: entityKey });
+            return;
           }
 
           if (url.pathname === '/api/integrations/departments/map' && (req.method || 'GET').toUpperCase() === 'GET') {
