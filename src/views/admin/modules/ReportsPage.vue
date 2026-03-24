@@ -92,13 +92,13 @@ async function load(options: { silent?: boolean; forceRefresh?: boolean } = {}):
       fetchReportsSnapshot({
         from: fromDate.value || undefined,
         to: toDate.value || undefined,
-        forceRefresh: options.forceRefresh ?? options.silent ?? false
+        forceRefresh: options.forceRefresh ?? false
       }),
       fetchModuleActivity({
         module: 'prefect_incident',
         page: 1,
         perPage: 5,
-        forceRefresh: Boolean(options.forceRefresh) || !options.silent
+        forceRefresh: options.forceRefresh ?? false
       }).catch(() => ({
         items: [],
         meta: { page: 1, perPage: 5, total: 0, totalPages: 1 }
@@ -165,7 +165,7 @@ onMounted(async () => {
   await load({ forceRefresh: true });
   void loadHealthReports();
   realtime.startPolling(() => {
-    void load({ silent: true, forceRefresh: true });
+    void load({ silent: true });
   }, REALTIME_POLICY.polling.reportsMs);
 });
 

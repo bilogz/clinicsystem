@@ -17,7 +17,9 @@ const notificationCount = computed(() => notifications.value.length);
 
 const knownRequestIds = new Set<string>();
 let hasBootstrapped = false;
-let pollingTimer: ReturnType<typeof setInterval> | null = null;
+// Timeout-chain state (replaces raw setInterval to avoid overlap / pileup)
+let pollingTimer: ReturnType<typeof setTimeout> | null = null;
+let pollInFlight = false;
 let activeConsumers = 0;
 
 function requestKey(row: ReportsPmedRequestNotification): string {
@@ -82,20 +84,56 @@ async function refresh(forceRefresh = false): Promise<void> {
   }
 }
 
+function scheduleNextPoll(): void {
+  if (pollingTimer) clearTimeout(pollingTimer);
+  pollingTimer = setTimeout(() => {
+    void runPollTick();
+  }, REALTIME_POLICY.polling.pmedNotificationsMs);
+}
+
+async function runPollTick(): Promise<void> {
+  // Skip when the tab is hidden — reschedule for when the user returns
+  if (typeof document !== 'undefined' && document.hidden) {
+    scheduleNextPoll();
+    return;
+  }
+  if (pollInFlight) {
+    scheduleNextPoll();
+    return;
+  }
+  pollInFlight = true;
+  try {
+    await refresh(true);
+  } finally {
+    pollInFlight = false;
+    // Only reschedule if consumers are still registered
+    if (activeConsumers > 0) scheduleNextPoll();
+  }
+}
+
+function onVisibilityChange(): void {
+  if (typeof document === 'undefined' || document.hidden) return;
+  if (activeConsumers > 0) void runPollTick();
+}
+
 function startPolling(): void {
   activeConsumers += 1;
   if (activeConsumers > 1) return;
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onVisibilityChange);
+  }
   void refresh(true);
-  pollingTimer = setInterval(() => {
-    void refresh(true);
-  }, REALTIME_POLICY.polling.reportsMs);
+  scheduleNextPoll();
 }
 
 function stopPolling(): void {
   activeConsumers = Math.max(0, activeConsumers - 1);
   if (activeConsumers > 0) return;
-  if (pollingTimer) clearInterval(pollingTimer);
+  if (pollingTimer) clearTimeout(pollingTimer);
   pollingTimer = null;
+  if (typeof document !== 'undefined') {
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+  }
 }
 
 function dismissPopup(): void {

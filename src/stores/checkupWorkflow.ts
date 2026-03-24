@@ -7,8 +7,6 @@ import {
   type CheckupState,
   type CheckupVisit
 } from '@/services/checkupWorkflow';
-import { REALTIME_POLICY } from '@/config/realtimePolicy';
-
 type QueueFilters = {
   search: string;
   status: 'All' | CheckupState;
@@ -125,7 +123,6 @@ export const useCheckupWorkflowStore = defineStore('checkupWorkflow', {
       total: 0,
       totalPages: 1
     },
-    _refreshTimer: 0 as unknown as ReturnType<typeof setInterval> | 0,
     _fetchToken: 0
   }),
   getters: {
@@ -188,17 +185,5 @@ export const useCheckupWorkflowStore = defineStore('checkupWorkflow', {
       await this.syncQueue({ silent: false });
       return updated;
     },
-    startRealtimePolling(intervalMs = REALTIME_POLICY.polling.checkupMs) {
-      this.stopRealtimePolling();
-      this._refreshTimer = setInterval(() => {
-        void this.syncQueue({ silent: true });
-      }, intervalMs);
-    },
-    stopRealtimePolling() {
-      if (this._refreshTimer) {
-        clearInterval(this._refreshTimer);
-        this._refreshTimer = 0;
-      }
-    }
   }
 });
