@@ -7,6 +7,7 @@ import PatientAuthModal from '@/views/patient/components/PatientAuthModal.vue';
 import PatientProfileModal from '@/views/patient/components/PatientProfileModal.vue';
 import { fetchPatientSession, logoutPatientAccount, type PatientAccount, type PatientSessionResponse } from '@/services/patientAuth';
 import { fetchPatientPortal, type PatientPortalData } from '@/services/patientPortal';
+import { listDoctors } from '@/services/doctors';
 
 type NavLink = {
   id: string;
@@ -22,7 +23,7 @@ const navLinks: NavLink[] = [
   { id: 'portal', label: 'Clinic Portal' }
 ];
 
-const doctorDirectory = ref(['Dr. Humour', 'Dr. Jenni', 'Dr. Rivera', 'Dr. Morco', 'Dr. Molina', 'Dr. B. Martinez']);
+const doctorDirectory = ref<string[]>([]);
 const bookingDialog = ref(false);
 const authDialog = ref(false);
 const profileDialog = ref(false);
@@ -110,6 +111,15 @@ async function loadPatientPortal(): Promise<void> {
   }
 }
 
+async function loadProviderDirectory(): Promise<void> {
+  try {
+    const rows = await listDoctors();
+    doctorDirectory.value = rows.filter((item) => item.isActive).map((item) => item.doctorName);
+  } catch {
+    doctorDirectory.value = [];
+  }
+}
+
 async function handleAuthSuccess(session: PatientSessionResponse): Promise<void> {
   patientAccount.value = session.authenticated ? session.account : null;
   if (patientAccount.value) {
@@ -152,6 +162,7 @@ onMounted(async () => {
   bindSectionObserver();
   const section = route.hash.replace('#', '') || 'home';
   scrollToSection(section, false);
+  await loadProviderDirectory();
   await loadPatientSession();
 });
 

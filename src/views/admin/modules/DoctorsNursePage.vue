@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { fetchHrStaffDirectory, type HrStaffDirectoryRow } from '@/services/hrStaffRequests';
+import { upsertDoctor } from '@/services/doctors';
+import {
+  listDoctorAvailability,
+  upsertDoctorAvailability,
+  type DoctorAvailabilityScheduleRow
+} from '@/services/doctorAvailability';
 
 const loading = ref(false);
 const rows = ref<HrStaffDirectoryRow[]>([]);
@@ -11,6 +17,38 @@ const statusFilter = ref<'all' | 'active' | 'working' | 'inactive'>('all');
 const attendanceFilter = ref<'all' | 'present' | 'not_logged'>('all');
 const search = ref('');
 const page = ref(1);
+const bookingBusy = ref<Record<number, boolean>>({});
+const bookingStatus = ref<Record<number, boolean>>({});
+const scheduleDialog = ref(false);
+const scheduleDialogLoading = ref(false);
+const scheduleSaving = ref(false);
+const scheduleRows = ref<DoctorAvailabilityScheduleRow[]>([]);
+const selectedStaff = ref<HrStaffDirectoryRow | null>(null);
+const dayOptions = [
+  { title: 'Sunday', value: 0 },
+  { title: 'Monday', value: 1 },
+  { title: 'Tuesday', value: 2 },
+  { title: 'Wednesday', value: 3 },
+  { title: 'Thursday', value: 4 },
+  { title: 'Friday', value: 5 },
+  { title: 'Saturday', value: 6 }
+];
+const scheduleForm = reactive({
+  dayOfWeek: 1,
+  startTime: '08:00',
+  endTime: '17:00',
+  maxAppointments: 12,
+  isActive: true
+});
+const scheduleFormError = ref('');
+
+const DEFAULT_BOOKING_WINDOWS = [
+  { dayOfWeek: 1, startTime: '08:00', endTime: '17:00', maxAppointments: 12 },
+  { dayOfWeek: 2, startTime: '08:00', endTime: '17:00', maxAppointments: 12 },
+  { dayOfWeek: 3, startTime: '08:00', endTime: '17:00', maxAppointments: 12 },
+  { dayOfWeek: 4, startTime: '08:00', endTime: '17:00', maxAppointments: 12 },
+  { dayOfWeek: 5, startTime: '08:00', endTime: '17:00', maxAppointments: 12 }
+];
 
 const filteredRows = computed(() => {
   if (attendanceFilter.value === 'all') return rows.value;
@@ -64,12 +102,221 @@ async function loadDirectory(): Promise<void> {
   }
 }
 
+function providerKey(name: string, department: string): string {
+  const normalizedName = String(name || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  const normalizedDepartment = String(department || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  return `${normalizedName}::${normalizedDepartment}`;
+}
+
+async function refreshBookingStatuses(): Promise<void> {
+  try {
+    const schedules = await listDoctorAvailability();
+    const activeSchedules = new Set(
+      schedules.filter((item) => item.isActive).map((item) => providerKey(item.doctorName, item.departmentName))
+    );
+    const nextState: Record<number, boolean> = {};
+    rows.value.forEach((row) => {
+      const key = providerKey(row.full_name, row.department_name);
+      nextState[row.id] = activeSchedules.has(key);
+    });
+    bookingStatus.value = nextState;
+  } catch {
+    bookingStatus.value = {};
+  }
+}
+
+function isBookable(row: HrStaffDirectoryRow): boolean {
+  return Boolean(bookingStatus.value[row.id]);
+}
+
+function dayLabel(dayOfWeek: number): string {
+  return dayOptions.find((item) => item.value === Number(dayOfWeek))?.title || `Day ${dayOfWeek}`;
+}
+
+async function ensureProviderRegistered(name: string, department: string, roleType = 'doctor'): Promise<void> {
+  await upsertDoctor({
+    doctorName: String(name || '').trim(),
+    departmentName: String(department || '').trim(),
+    specialization: String(roleType || 'doctor').trim(),
+    isActive: true,
+    actor: 'Clinic Admin'
+  });
+}
+
+function resetScheduleForm(): void {
+  scheduleForm.dayOfWeek = 1;
+  scheduleForm.startTime = '08:00';
+  scheduleForm.endTime = '17:00';
+  scheduleForm.maxAppointments = 12;
+  scheduleForm.isActive = true;
+  scheduleFormError.value = '';
+}
+
+async function loadSelectedStaffSchedules(): Promise<void> {
+  if (!selectedStaff.value) {
+    scheduleRows.value = [];
+    return;
+  }
+  scheduleDialogLoading.value = true;
+  try {
+    scheduleRows.value = await listDoctorAvailability({
+      doctorName: selectedStaff.value.full_name,
+      departmentName: selectedStaff.value.department_name
+    });
+  } catch {
+    scheduleRows.value = [];
+  } finally {
+    scheduleDialogLoading.value = false;
+  }
+}
+
+async function openScheduleDialog(row: HrStaffDirectoryRow): Promise<void> {
+  selectedStaff.value = row;
+  resetScheduleForm();
+  scheduleDialog.value = true;
+  await loadSelectedStaffSchedules();
+}
+
+async function saveScheduleSlot(): Promise<void> {
+  if (!selectedStaff.value) return;
+  scheduleFormError.value = '';
+  if (String(scheduleForm.startTime || '').slice(0, 5) >= String(scheduleForm.endTime || '').slice(0, 5)) {
+    scheduleFormError.value = 'End time must be later than start time.';
+    return;
+  }
+  if (Number(scheduleForm.maxAppointments || 0) <= 0) {
+    scheduleFormError.value = 'Max appointments must be at least 1.';
+    return;
+  }
+  scheduleSaving.value = true;
+  try {
+    await ensureProviderRegistered(
+      selectedStaff.value.full_name,
+      selectedStaff.value.department_name,
+      selectedStaff.value.role_type
+    );
+    await upsertDoctorAvailability({
+      doctorName: selectedStaff.value.full_name,
+      departmentName: selectedStaff.value.department_name,
+      dayOfWeek: Number(scheduleForm.dayOfWeek),
+      startTime: String(scheduleForm.startTime || '').slice(0, 5),
+      endTime: String(scheduleForm.endTime || '').slice(0, 5),
+      maxAppointments: Number(scheduleForm.maxAppointments || 12),
+      isActive: Boolean(scheduleForm.isActive),
+      actor: 'Clinic Admin'
+    });
+    await loadSelectedStaffSchedules();
+    await refreshBookingStatuses();
+    resetScheduleForm();
+  } catch (error) {
+    scheduleFormError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    scheduleSaving.value = false;
+  }
+}
+
+async function toggleScheduleRow(row: DoctorAvailabilityScheduleRow, target: boolean): Promise<void> {
+  if (!selectedStaff.value) return;
+  scheduleFormError.value = '';
+  scheduleSaving.value = true;
+  try {
+    await ensureProviderRegistered(row.doctorName, row.departmentName);
+    await upsertDoctorAvailability({
+      doctorName: row.doctorName,
+      departmentName: row.departmentName,
+      dayOfWeek: row.dayOfWeek,
+      startTime: row.startTime,
+      endTime: row.endTime,
+      maxAppointments: row.maxAppointments || 12,
+      isActive: target,
+      actor: 'Clinic Admin'
+    });
+    await loadSelectedStaffSchedules();
+    await refreshBookingStatuses();
+  } catch (error) {
+    scheduleFormError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    scheduleSaving.value = false;
+  }
+}
+
+async function toggleBookable(row: HrStaffDirectoryRow, target: boolean): Promise<void> {
+  if (bookingBusy.value[row.id]) return;
+  bookingBusy.value = { ...bookingBusy.value, [row.id]: true };
+  try {
+    await ensureProviderRegistered(row.full_name, row.department_name, row.role_type);
+    const schedules = await listDoctorAvailability({
+      doctorName: row.full_name,
+      departmentName: row.department_name
+    });
+
+    if (target) {
+      if (!schedules.length) {
+        for (const window of DEFAULT_BOOKING_WINDOWS) {
+          await upsertDoctorAvailability({
+            doctorName: row.full_name,
+            departmentName: row.department_name,
+            dayOfWeek: window.dayOfWeek,
+            startTime: window.startTime,
+            endTime: window.endTime,
+            maxAppointments: window.maxAppointments,
+            isActive: true,
+            actor: 'Clinic Admin'
+          });
+        }
+      } else {
+        for (const schedule of schedules) {
+          if (schedule.isActive) continue;
+          await upsertDoctorAvailability({
+            doctorName: row.full_name,
+            departmentName: row.department_name,
+            dayOfWeek: schedule.dayOfWeek,
+            startTime: schedule.startTime,
+            endTime: schedule.endTime,
+            maxAppointments: schedule.maxAppointments || 12,
+            isActive: true,
+            actor: 'Clinic Admin'
+          });
+        }
+      }
+    } else {
+      for (const schedule of schedules) {
+        if (!schedule.isActive) continue;
+        await upsertDoctorAvailability({
+          doctorName: row.full_name,
+          departmentName: row.department_name,
+          dayOfWeek: schedule.dayOfWeek,
+          startTime: schedule.startTime,
+          endTime: schedule.endTime,
+          maxAppointments: schedule.maxAppointments || 12,
+          isActive: false,
+          actor: 'Clinic Admin'
+        });
+      }
+    }
+
+    await refreshBookingStatuses();
+  } finally {
+    bookingBusy.value = { ...bookingBusy.value, [row.id]: false };
+  }
+}
+
 watch([roleFilter, statusFilter], () => {
   page.value = 1;
   void loadDirectory();
 });
 watch(page, () => {
   void loadDirectory();
+});
+
+watch(rows, () => {
+  void refreshBookingStatuses();
 });
 
 let searchDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -199,6 +446,8 @@ onMounted(() => {
               <th>DEPARTMENT</th>
               <th>STATUS</th>
               <th>ATTENDANCE TODAY</th>
+              <th>BOOKABLE FOR PATIENT</th>
+              <th>AVAILABILITY</th>
             </tr>
           </thead>
           <tbody>
@@ -221,9 +470,37 @@ onMounted(() => {
                   {{ attendanceToday(row) }}
                 </v-chip>
               </td>
+              <td>
+                <div class="d-flex align-center ga-2">
+                  <v-switch
+                    :model-value="isBookable(row)"
+                    color="success"
+                    inset
+                    hide-details
+                    density="compact"
+                    :loading="bookingBusy[row.id]"
+                    :disabled="bookingBusy[row.id] || row.employment_status === 'inactive'"
+                    @update:model-value="(value) => toggleBookable(row, Boolean(value))"
+                  />
+                  <v-chip size="x-small" variant="tonal" :color="isBookable(row) ? 'success' : 'warning'">
+                    {{ isBookable(row) ? 'Open' : 'Closed' }}
+                  </v-chip>
+                </div>
+              </td>
+              <td>
+                <v-btn
+                  size="small"
+                  variant="outlined"
+                  color="primary"
+                  :disabled="row.employment_status === 'inactive'"
+                  @click="openScheduleDialog(row)"
+                >
+                  Edit Schedule
+                </v-btn>
+              </td>
             </tr>
             <tr v-if="!loading && filteredRows.length === 0">
-              <td colspan="6" class="text-center text-medium-emphasis py-6">No doctor/nurse records found.</td>
+              <td colspan="8" class="text-center text-medium-emphasis py-6">No doctor/nurse records found.</td>
             </tr>
           </tbody>
         </v-table>
@@ -235,6 +512,78 @@ onMounted(() => {
         </div>
       </v-card-text>
     </v-card>
+
+    <v-dialog v-model="scheduleDialog" max-width="980">
+      <v-card>
+        <v-card-title class="d-flex align-center justify-space-between">
+          <span>Availability Schedule - {{ selectedStaff?.full_name || '--' }}</span>
+          <v-chip size="small" variant="tonal">{{ selectedStaff?.department_name || '--' }}</v-chip>
+        </v-card-title>
+        <v-card-text>
+          <v-row class="mb-2" dense>
+            <v-col cols="12" md="3">
+              <v-select v-model="scheduleForm.dayOfWeek" :items="dayOptions" item-title="title" item-value="value" label="Day" density="comfortable" variant="outlined" />
+            </v-col>
+            <v-col cols="12" md="3">
+              <v-text-field v-model="scheduleForm.startTime" label="Start Time" type="time" density="comfortable" variant="outlined" />
+            </v-col>
+            <v-col cols="12" md="3">
+              <v-text-field v-model="scheduleForm.endTime" label="End Time" type="time" density="comfortable" variant="outlined" />
+            </v-col>
+            <v-col cols="12" md="2">
+              <v-text-field v-model.number="scheduleForm.maxAppointments" label="Max Slots" type="number" min="1" density="comfortable" variant="outlined" />
+            </v-col>
+            <v-col cols="12" md="1" class="d-flex align-center justify-center">
+              <v-switch v-model="scheduleForm.isActive" color="success" hide-details density="compact" />
+            </v-col>
+          </v-row>
+          <div v-if="scheduleFormError" class="text-error text-caption mb-2">{{ scheduleFormError }}</div>
+          <div class="d-flex justify-end mb-3">
+            <v-btn color="primary" :loading="scheduleSaving" @click="saveScheduleSlot">Save Slot</v-btn>
+          </div>
+
+          <v-progress-linear v-if="scheduleDialogLoading" indeterminate color="primary" class="mb-2" />
+
+          <v-table density="comfortable">
+            <thead>
+              <tr>
+                <th>DAY</th>
+                <th>START</th>
+                <th>END</th>
+                <th>MAX</th>
+                <th>ACTIVE</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in scheduleRows" :key="`${item.dayOfWeek}-${item.startTime}-${item.endTime}`">
+                <td>{{ dayLabel(item.dayOfWeek) }}</td>
+                <td>{{ item.startTime }}</td>
+                <td>{{ item.endTime }}</td>
+                <td>{{ item.maxAppointments }}</td>
+                <td>
+                  <v-switch
+                    :model-value="item.isActive"
+                    color="success"
+                    hide-details
+                    density="compact"
+                    :loading="scheduleSaving"
+                    :disabled="scheduleSaving"
+                    @update:model-value="(value) => toggleScheduleRow(item, Boolean(value))"
+                  />
+                </td>
+              </tr>
+              <tr v-if="!scheduleDialogLoading && scheduleRows.length === 0">
+                <td colspan="5" class="text-center text-medium-emphasis py-6">No schedule slots yet. Add your first slot above.</td>
+              </tr>
+            </tbody>
+          </v-table>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="scheduleDialog = false">Close</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </div>
 </template>
 

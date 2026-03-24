@@ -1806,8 +1806,15 @@ async function getDoctorAvailabilitySnapshot(
          WHERE doctor_name = ?
            AND department_name = ?
            AND appointment_date = ?
-           AND (? IS NULL OR booking_id <> ?)
-           AND (preferred_time IS NULL OR (TIME(preferred_time) >= ? AND TIME(preferred_time) < ?))
+           AND (COALESCE(?, '') = '' OR booking_id <> ?)
+           AND (
+             preferred_time IS NULL
+             OR preferred_time = ''
+             OR (
+               CAST(NULLIF(preferred_time, '') AS TIME) >= CAST(? AS TIME)
+               AND CAST(NULLIF(preferred_time, '') AS TIME) < CAST(? AS TIME)
+             )
+           )
            AND LOWER(COALESCE(status, '')) <> 'canceled'`,
         [doctorName, departmentName, requestedDate, excludeBookingId || null, excludeBookingId || null, slot.start_time, slot.end_time]
       );
@@ -2656,12 +2663,18 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   writeJson(res, 422, { ok: false, message: 'department and date are required for times mode.' });
                   return;
                 }
+                const requestedDate = toSqlDate(appointmentDate);
+                if (!requestedDate) {
+                  writeJson(res, 422, { ok: false, message: 'date must be a valid ISO date.' });
+                  return;
+                }
+                const dayOfWeek = new Date(`${requestedDate}T00:00:00`).getDay();
                 const [doctorRows] = await pool.query<RowDataPacket[]>(
-                  `SELECT doctor_name, department_name
-                   FROM doctors
-                   WHERE department_name = ? AND is_active = 1${doctor ? ' AND doctor_name = ?' : ''}
+                  `SELECT DISTINCT doctor_name, department_name
+                   FROM doctor_availability
+                   WHERE department_name = ? AND is_active = 1 AND day_of_week = ?${doctor ? ' AND doctor_name = ?' : ''}
                    ORDER BY doctor_name ASC`,
-                  doctor ? [department, doctor] : [department]
+                  doctor ? [department, dayOfWeek, doctor] : [department, dayOfWeek]
                 );
                 const snapshots = await Promise.all(doctorRows.map((row) => getDoctorAvailabilitySnapshot(pool, String(row.doctor_name), String(row.department_name), appointmentDate)));
                 const allowedTimes = Array.from(new Set(snapshots.flatMap((item) => (item.recommendedTimes as string[]) || []))).sort();

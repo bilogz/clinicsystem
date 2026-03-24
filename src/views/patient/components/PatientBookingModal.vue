@@ -37,16 +37,6 @@ const serviceByDepartment: Record<string, string[]> = {
   'Check-Up': ['Annual Physical Exam', 'Routine Check-Up']
 };
 
-const fallbackDoctorsByDepartment: Record<string, string[]> = {
-  'General Medicine': ['Dr. Humour', 'Dr. Jenni'],
-  Pediatrics: ['Dr. Rivera'],
-  Orthopedic: ['Dr. Morco', 'Dr. Martinez'],
-  Dental: ['Dr. Santos', 'Dr. Lim'],
-  Laboratory: ['Dr. A. Rivera'],
-  'Mental Health': ['Dr. S. Villaraza'],
-  'Check-Up': ['Dr. B. Martinez']
-};
-
 const staticDepartmentOptions = Object.keys(serviceByDepartment);
 const priorityOptions: Array<'Routine' | 'Urgent'> = ['Routine', 'Urgent'];
 const paymentOptions = ['Cash', 'Card', 'HMO', 'Online'];
@@ -68,6 +58,8 @@ const doctorListRequestId = ref(0);
 const scheduleRefreshTimer = ref<number | null>(null);
 const listRefreshTimer = ref<number | null>(null);
 const availabilityRefreshTimer = ref<number | null>(null);
+const patientIdLookupTimer = ref<number | null>(null);
+const patientIdLookupRequestId = ref(0);
 const isInitializing = ref(false);
 const submitting = ref(false);
 const step = ref<CreateStep>(1);
@@ -113,7 +105,7 @@ const form = reactive<
   insurance_provider: '',
   payment_method: 'Cash',
   appointment_priority: 'Routine',
-  doctor_name: 'Dr. Humour',
+  doctor_name: '',
   department_name: 'General Medicine',
   visit_type: 'General Check-Up',
   appointment_date: toInputDate(new Date()),
@@ -141,16 +133,18 @@ function normalizeCatalogValue(value: unknown): string {
     .toLowerCase();
 }
 
+function normalizeProviderIdentity(value: unknown): string {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
 const doctorOptionsForDepartment = computed(() => {
   const departmentKey = normalizeCatalogValue(form.department_name || 'General Medicine');
-  const selectedDepartment = String(form.department_name || 'General Medicine').trim();
   const activeDoctors = doctorsCatalog.value.filter((item) => item.isActive);
   const departmentDoctors = activeDoctors.filter((item) => normalizeCatalogValue(item.departmentName) === departmentKey);
-  const fallbackDepartmentDoctors = fallbackDoctorsByDepartment[selectedDepartment] || [];
-  const candidates = [
-    ...departmentDoctors.map((item) => item.doctorName),
-    ...fallbackDepartmentDoctors
-  ].filter(Boolean);
+  const candidates = departmentDoctors.map((item) => item.doctorName).filter(Boolean);
 
   return Array.from(new Set(candidates));
 });
@@ -182,8 +176,7 @@ function summarizeDoctorAvailability(snapshot: DoctorAvailabilitySnapshot | null
 function resolveDoctorDepartment(doctorName: string): string {
   const fromCatalog = doctorsCatalog.value.find((item) => item.doctorName === doctorName);
   if (fromCatalog?.departmentName) return fromCatalog.departmentName;
-  const fromFallback = Object.entries(fallbackDoctorsByDepartment).find(([, doctors]) => doctors.includes(doctorName));
-  return fromFallback?.[0] || '';
+  return '';
 }
 
 const doctorDropdownItems = computed(() =>
@@ -334,6 +327,12 @@ function dayLabelFromIso(isoDate: string): string {
   return date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: '2-digit' });
 }
 
+function dayOfWeekFromIso(isoDate: string): number {
+  const date = new Date(`${isoDate}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return -1;
+  return date.getDay();
+}
+
 function clearErrors(): void {
   stepError.value = '';
   Object.keys(errors).forEach((key) => {
@@ -450,6 +449,37 @@ function applyRegistrarLookup(value: string | null): void {
   form.patient_name = selected.fullName;
 }
 
+function normalizePersonCode(value: unknown): string {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, '')
+    .toUpperCase();
+}
+
+async function autoFillFromPatientId(): Promise<void> {
+  const requestId = patientIdLookupRequestId.value + 1;
+  patientIdLookupRequestId.value = requestId;
+  const patientId = normalizePersonCode(form.patient_id);
+  if (!patientId) {
+    registrarLookupKey.value = '';
+    return;
+  }
+
+  let source = registrarDirectory.value;
+  if (!source.length) {
+    await loadRegistrarDirectory();
+    if (requestId !== patientIdLookupRequestId.value) return;
+    source = registrarDirectory.value;
+  }
+
+  const matched = source.find((item) => normalizePersonCode(item.code) === patientId);
+  if (!matched) return;
+
+  registrarLookupKey.value = matched.code;
+  form.patient_id = matched.code;
+  form.patient_name = matched.fullName;
+}
+
 function closeModal(): void {
   if (submitting.value) return;
   model.value = false;
@@ -459,9 +489,11 @@ function clearQueuedLoads(): void {
   if (scheduleRefreshTimer.value != null) window.clearTimeout(scheduleRefreshTimer.value);
   if (listRefreshTimer.value != null) window.clearTimeout(listRefreshTimer.value);
   if (availabilityRefreshTimer.value != null) window.clearTimeout(availabilityRefreshTimer.value);
+  if (patientIdLookupTimer.value != null) window.clearTimeout(patientIdLookupTimer.value);
   scheduleRefreshTimer.value = null;
   listRefreshTimer.value = null;
   availabilityRefreshTimer.value = null;
+  patientIdLookupTimer.value = null;
 }
 
 function queueLoadDoctorSchedules(delayMs = 80): void {
@@ -533,12 +565,16 @@ async function loadDoctorsCatalog(): Promise<void> {
   try {
     doctorsCatalog.value = await listDoctors();
     const doctors = doctorOptionsForDepartment.value;
-    if (!selectedDoctorName.value && doctors.length) {
+    const selected = selectedDoctorName.value;
+    if (!doctors.length) {
+      form.doctor_name = '';
+    } else if (!selected || !doctors.includes(selected)) {
       form.doctor_name = doctors[0];
     }
     queueRefreshScheduleSection(true);
   } catch {
     doctorsCatalog.value = [];
+    form.doctor_name = '';
   }
 }
 
@@ -556,7 +592,10 @@ async function loadDoctorListAvailability(): Promise<void> {
   try {
     const catalog = await fetchDoctorTimeCatalog({ departmentName, appointmentDate });
     const entries = doctors.map((name) => {
-      const matched = (catalog.doctors || []).find((item) => item.doctorName === name);
+      const doctorNeedle = normalizeProviderIdentity(name);
+      const matched = (catalog.doctors || []).find(
+        (item) => normalizeProviderIdentity(item.doctorName) === doctorNeedle
+      );
       return [
         name,
         matched
@@ -605,7 +644,13 @@ async function loadDoctorAvailability(): Promise<void> {
   const preferredTime = String(form.preferred_time || '').trim();
   if (!preferredTime) {
     const cachedSnapshot = doctorAvailabilityByDoctor.value[doctorName] || null;
-    if (cachedSnapshot) {
+    const hasPositiveSignals = Boolean(
+      cachedSnapshot &&
+        (cachedSnapshot.isDoctorAvailable ||
+          (cachedSnapshot.slots || []).some((slot) => slot.isOpen) ||
+          (cachedSnapshot.recommendedTimes || []).length)
+    );
+    if (cachedSnapshot && hasPositiveSignals) {
       doctorAvailability.value = cachedSnapshot;
       return;
     }
@@ -619,9 +664,37 @@ async function loadDoctorAvailability(): Promise<void> {
       preferredTime: preferredTime || undefined
     });
     if (requestId !== availabilityRequestId.value) return;
-    doctorAvailability.value = snapshot;
-    if (!preferredTime && snapshot.isDoctorAvailable && (snapshot.recommendedTimes || []).length) {
-      form.preferred_time = snapshot.recommendedTimes[0] || '';
+    let resolvedSnapshot = snapshot;
+    if (!snapshot.isDoctorAvailable) {
+      const reasonNeedle = String(snapshot.reason || '').trim().toLowerCase();
+      const dayOfWeek = dayOfWeekFromIso(appointmentDate);
+      const rawDayRows = doctorScheduleRows.value.filter(
+        (row) => row.isActive && Number(row.dayOfWeek) === dayOfWeek
+      );
+      if (rawDayRows.length && (reasonNeedle.includes('no active schedule') || reasonNeedle.includes('unavailable'))) {
+        const suggested = rawDayRows
+          .map((row) => String(row.startTime || '').slice(0, 5))
+          .filter(Boolean);
+        resolvedSnapshot = {
+          ...snapshot,
+          isDoctorAvailable: true,
+          reason: 'Available based on synced schedule.',
+          recommendedTimes: suggested,
+          slots: rawDayRows.map((row, idx) => ({
+            id: row.id || idx + 1,
+            startTime: String(row.startTime || '').slice(0, 5),
+            endTime: String(row.endTime || '').slice(0, 5),
+            maxAppointments: Number(row.maxAppointments || 0),
+            bookedAppointments: 0,
+            remainingAppointments: Number(row.maxAppointments || 0),
+            isOpen: true
+          }))
+        };
+      }
+    }
+    doctorAvailability.value = resolvedSnapshot;
+    if (!preferredTime && resolvedSnapshot.isDoctorAvailable && (resolvedSnapshot.recommendedTimes || []).length) {
+      form.preferred_time = resolvedSnapshot.recommendedTimes[0] || '';
     }
   } catch (error) {
     if (requestId !== availabilityRequestId.value) return;
@@ -784,6 +857,25 @@ watch(
     registrarLookupKey.value = '';
     if (!model.value || isInitializing.value) return;
     void loadRegistrarDirectory();
+    if (String(form.patient_id || '').trim()) {
+      if (patientIdLookupTimer.value != null) window.clearTimeout(patientIdLookupTimer.value);
+      patientIdLookupTimer.value = window.setTimeout(() => {
+        patientIdLookupTimer.value = null;
+        void autoFillFromPatientId();
+      }, 200);
+    }
+  }
+);
+
+watch(
+  () => form.patient_id,
+  () => {
+    if (!model.value || isInitializing.value) return;
+    if (patientIdLookupTimer.value != null) window.clearTimeout(patientIdLookupTimer.value);
+    patientIdLookupTimer.value = window.setTimeout(() => {
+      patientIdLookupTimer.value = null;
+      void autoFillFromPatientId();
+    }, 250);
   }
 );
 
