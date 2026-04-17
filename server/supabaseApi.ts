@@ -969,7 +969,7 @@ async function queueCashierIntegrationEvent(
 
 async function backfillAppointmentCashierEvents(pool: Pool, options: SupabaseApiOptions, limit = 50): Promise<void> {
   await ensureCashierIntegrationTables(pool);
-  const [missingRows] = await pool.query<RowDataPacket[]>(
+  const [missingRows] = await pool.query<RowDataPacket>(
     `SELECT a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.doctor_name,
             a.department_name, a.visit_type, a.appointment_date, a.preferred_time, a.payment_method, a.status
      FROM patient_appointments a
@@ -1019,7 +1019,7 @@ async function backfillAppointmentCashierEvents(pool: Pool, options: SupabaseApi
     });
 
     if (cashierIntegrationEnabled(options) && cashierSyncMode(options) === 'auto') {
-      const [eventRows] = await pool.query<RowDataPacket[]>(
+      const [eventRows] = await pool.query<RowDataPacket>(
         `SELECT *
          FROM cashier_integration_events
          WHERE source_module = 'appointments' AND source_key = ?
@@ -1066,7 +1066,7 @@ async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise
     throw new Error('Valid department is required for report generation.');
   }
 
-  const [profileRows] = await pool.query<RowDataPacket[]>(
+  const [profileRows] = await pool.query<RowDataPacket>(
     `SELECT department_key, department_name, flow_order, clearance_stage_order, receives, sends, notes, updated_at
      FROM department_flow_profiles
      WHERE department_key = ?
@@ -1097,7 +1097,7 @@ async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise
         updated_at: null
       };
 
-  const [dispatchRows] = await pool.query<RowDataPacket[]>(
+  const [dispatchRows] = await pool.query<RowDataPacket>(
     `SELECT action, detail, actor, entity_key, metadata, created_at
      FROM module_activity_logs
      WHERE module = 'department_reports'
@@ -1108,7 +1108,7 @@ async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise
   );
 
   if (normalizedKey !== 'pmed') {
-    const [clearanceRows] = await pool.query<RowDataPacket[]>(
+    const [clearanceRows] = await pool.query<RowDataPacket>(
       `SELECT status, COUNT(*) AS total
        FROM department_clearance_records
        WHERE department_key = ?
@@ -1153,7 +1153,7 @@ async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise
     cradSummaryRows,
     hrSummaryRows
   ] = await Promise.all([
-    pool.query<RowDataPacket[]>(
+    pool.query<RowDataPacket>(
       `SELECT
          COUNT(*) AS total_registrations,
          SUM(CASE WHEN patient_type = 'student' THEN 1 ELSE 0 END) AS student_total,
@@ -1161,7 +1161,7 @@ async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise
          SUM(CASE WHEN LOWER(status) = 'pending' THEN 1 ELSE 0 END) AS pending_total
        FROM patient_registrations`
     ).then(([rows]) => rows),
-    pool.query<RowDataPacket[]>(
+    pool.query<RowDataPacket>(
       `SELECT
          COUNT(*) AS total_links,
          COALESCE(SUM(amount_due), 0) AS total_due,
@@ -1172,7 +1172,7 @@ async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise
          SUM(CASE WHEN payment_status = 'unpaid' THEN 1 ELSE 0 END) AS unpaid_total
        FROM cashier_payment_links`
     ).then(([rows]) => rows),
-    pool.query<RowDataPacket[]>(
+    pool.query<RowDataPacket>(
       `SELECT
          (SELECT COUNT(*) FROM patient_appointments) AS appointment_total,
          (SELECT COUNT(*) FROM checkup_visits) AS checkup_total,
@@ -1180,7 +1180,7 @@ async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise
          (SELECT COUNT(*) FROM checkup_visits WHERE status = 'in_consultation') AS active_consultations,
          (SELECT COUNT(*) FROM checkup_visits WHERE is_emergency = 1) AS emergency_cases`
     ).then(([rows]) => rows),
-    pool.query<RowDataPacket[]>(
+    pool.query<RowDataPacket>(
       `SELECT
          COUNT(*) AS total_sessions,
          SUM(CASE WHEN status IN ('active', 'follow_up', 'at_risk') THEN 1 ELSE 0 END) AS open_sessions,
@@ -1188,7 +1188,7 @@ async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise
          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_sessions
        FROM mental_health_sessions`
     ).then(([rows]) => rows),
-    pool.query<RowDataPacket[]>(
+    pool.query<RowDataPacket>(
       `SELECT
          COUNT(*) AS total_requests,
          SUM(CASE WHEN status = 'Pending' THEN 1 ELSE 0 END) AS pending_requests,
@@ -1196,28 +1196,28 @@ async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise
          SUM(CASE WHEN status IN ('Result Ready', 'Completed') THEN 1 ELSE 0 END) AS finished_requests
        FROM laboratory_requests`
     ).then(([rows]) => rows),
-    pool.query<RowDataPacket[]>(
+    pool.query<RowDataPacket>(
       `SELECT status, COUNT(*) AS total
        FROM department_clearance_records
        WHERE department_key = 'prefect'
        GROUP BY status
        ORDER BY status`
     ).then(([rows]) => rows),
-    pool.query<RowDataPacket[]>(
+    pool.query<RowDataPacket>(
       `SELECT status, COUNT(*) AS total
        FROM department_clearance_records
        WHERE department_key = 'comlab'
        GROUP BY status
        ORDER BY status`
     ).then(([rows]) => rows),
-    pool.query<RowDataPacket[]>(
+    pool.query<RowDataPacket>(
       `SELECT status, COUNT(*) AS total
        FROM department_clearance_records
        WHERE department_key = 'crad'
        GROUP BY status
        ORDER BY status`
     ).then(([rows]) => rows),
-    pool.query<RowDataPacket[]>(
+    pool.query<RowDataPacket>(
       `SELECT status, COUNT(*) AS total
        FROM department_clearance_records
        WHERE department_key = 'hr'
@@ -1345,7 +1345,7 @@ async function buildDepartmentReport(pool: Pool, departmentKey: string): Promise
 async function buildPmedRequiredReportsPackage(pool: Pool): Promise<Record<string, unknown>> {
   const report = await buildDepartmentReport(pool, 'pmed');
   const sections = Array.isArray(report.sections) ? report.sections : [];
-  const [deliveryRows] = await pool.query<RowDataPacket[]>(
+  const [deliveryRows] = await pool.query<RowDataPacket>(
     `SELECT action, detail, actor, entity_key, metadata, created_at
      FROM module_activity_logs
      WHERE module = 'department_reports'
@@ -1392,7 +1392,7 @@ async function buildPmedRequiredReportsPackage(pool: Pool): Promise<Record<strin
 }
 
 async function buildClinicPmedRequestNotifications(pool: Pool): Promise<Record<string, unknown>[]> {
-  const [requestRows] = await pool.query<RowDataPacket[]>(
+  const [requestRows] = await pool.query<RowDataPacket>(
     `SELECT action, detail, actor, entity_key, metadata, created_at
      FROM module_activity_logs
      WHERE module = 'department_reports'
@@ -1421,7 +1421,7 @@ async function buildClinicPmedRequestNotifications(pool: Pool): Promise<Record<s
   }
 
   try {
-    const [fallbackRows] = await pool.query<RowDataPacket[]>(
+    const [fallbackRows] = await pool.query<RowDataPacket>(
       `SELECT report_reference, report_name, report_type, owner_name, delivery_status, generated_at, updated_at, created_at
        FROM public.pmed_reports
        WHERE LOWER(COALESCE(delivery_status, '')) = 'awaiting department'
@@ -1536,7 +1536,7 @@ async function dispatchCashierEvent(
   const studentName = toSafeText(eventPayload.student_name || eventRow.patient_name);
   await ensureCashierIntegrationTables(pool);
   try {
-    const [existingLinkRows] = await pool.query<RowDataPacket[]>(
+    const [existingLinkRows] = await pool.query<RowDataPacket>(
       `SELECT cashier_billing_id, cashier_reference, invoice_number, official_receipt, amount_due, amount_paid, balance_due, payment_status, latest_payment_method, paid_at
        FROM cashier_payment_links
        WHERE source_module = ? AND source_key = ?
@@ -1803,7 +1803,7 @@ async function getDoctorAvailabilitySnapshot(
   }
 
   const dayOfWeek = new Date(`${requestedDate}T00:00:00`).getDay();
-  const [slotsRaw] = await pool.query<RowDataPacket[]>(
+  const [slotsRaw] = await pool.query<RowDataPacket>(
     `SELECT id, start_time, end_time, max_appointments
      FROM doctor_availability
      WHERE doctor_name = ? AND department_name = ? AND day_of_week = ? AND is_active = 1
@@ -1813,7 +1813,7 @@ async function getDoctorAvailabilitySnapshot(
 
   const slots = await Promise.all(
     slotsRaw.map(async (slot) => {
-      const [countRows] = await pool.query<RowDataPacket[]>(
+      const [countRows] = await pool.query<RowDataPacket>(
         `SELECT COUNT(*) AS total
          FROM patient_appointments
          WHERE doctor_name = ?
@@ -2077,7 +2077,7 @@ function mapPatientRow(row: RowDataPacket): Record<string, unknown> {
 }
 
 async function selectRegistrationById(pool: Pool, id: number): Promise<RowDataPacket | null> {
-  const [rows] = await pool.query<RowDataPacket[]>(
+  const [rows] = await pool.query<RowDataPacket>(
     `SELECT id, case_id, patient_name, patient_type, patient_email, age, concern, intake_time, booked_time, status, assigned_to
      FROM patient_registrations WHERE id = ? LIMIT 1`,
     [id]
@@ -2086,7 +2086,7 @@ async function selectRegistrationById(pool: Pool, id: number): Promise<RowDataPa
 }
 
 async function selectWalkinById(pool: Pool, id: number): Promise<RowDataPacket | null> {
-  const [rows] = await pool.query<RowDataPacket[]>(
+  const [rows] = await pool.query<RowDataPacket>(
     `SELECT id, case_id, patient_name, patient_type, age, sex, date_of_birth, contact, address, emergency_contact, patient_ref, visit_department, checkin_time,
             pain_scale, temperature_c, blood_pressure, pulse_bpm, weight_kg, chief_complaint, severity, intake_time, assigned_doctor, status
      FROM patient_walkins WHERE id = ? LIMIT 1`,
@@ -2096,7 +2096,7 @@ async function selectWalkinById(pool: Pool, id: number): Promise<RowDataPacket |
 }
 
 async function selectCheckupById(pool: Pool, id: number): Promise<RowDataPacket | null> {
-  const [rows] = await pool.query<RowDataPacket[]>(
+  const [rows] = await pool.query<RowDataPacket>(
     `SELECT id, visit_id, patient_name, patient_type, assigned_doctor, source, status, chief_complaint, diagnosis, clinical_notes, consultation_started_at,
             lab_requested, lab_result_ready, prescription_created, prescription_dispensed, follow_up_date, is_emergency, version, created_at, updated_at
      FROM checkup_visits WHERE id = ? LIMIT 1`,
@@ -2431,7 +2431,7 @@ async function rebuildPatientMaster(pool: Pool): Promise<void> {
       updated_at = CURRENT_TIMESTAMP
   `);
 
-  const [appointmentCounts] = await pool.query<RowDataPacket[]>(`
+  const [appointmentCounts] = await pool.query<RowDataPacket>(`
     SELECT
       CASE
         WHEN NULLIF(TRIM(COALESCE(patient_id, '')), '') IS NOT NULL THEN LOWER(CONCAT('id:', TRIM(patient_id)))
@@ -2446,7 +2446,7 @@ async function rebuildPatientMaster(pool: Pool): Promise<void> {
   for (const row of appointmentCounts) {
     await pool.query(`UPDATE patient_master SET appointment_count = ? WHERE identity_key = ?`, [Number(row.total || 0), String(row.identity_key || '')]);
   }
-  const [walkinCounts] = await pool.query<RowDataPacket[]>(`
+  const [walkinCounts] = await pool.query<RowDataPacket>(`
     SELECT
       CASE
         WHEN NULLIF(TRIM(COALESCE(patient_ref, '')), '') IS NOT NULL THEN LOWER(CONCAT('id:', TRIM(patient_ref)))
@@ -2460,7 +2460,7 @@ async function rebuildPatientMaster(pool: Pool): Promise<void> {
   for (const row of walkinCounts) {
     await pool.query(`UPDATE patient_master SET walkin_count = ? WHERE identity_key = ?`, [Number(row.total || 0), String(row.identity_key || '')]);
   }
-  const [checkupCounts] = await pool.query<RowDataPacket[]>(`
+  const [checkupCounts] = await pool.query<RowDataPacket>(`
     SELECT LOWER(TRIM(patient_name)) AS patient_name_key, COUNT(*) AS total, MAX(CASE WHEN is_emergency = 1 THEN 1 ELSE 0 END) AS high_risk
     FROM checkup_visits
     GROUP BY 1
@@ -2473,7 +2473,7 @@ async function rebuildPatientMaster(pool: Pool): Promise<void> {
       [Number(row.total || 0), Number(row.high_risk || 0), String(row.patient_name_key || '')]
     );
   }
-  const [mentalCounts] = await pool.query<RowDataPacket[]>(
+  const [mentalCounts] = await pool.query<RowDataPacket>(
     `SELECT
        CASE
          WHEN NULLIF(TRIM(COALESCE(patient_id, '')), '') IS NOT NULL THEN LOWER(CONCAT('id:', TRIM(patient_id)))
@@ -2489,7 +2489,7 @@ async function rebuildPatientMaster(pool: Pool): Promise<void> {
     const riskLevel = Number(row.risk_rank || 1) >= 3 ? 'high' : Number(row.risk_rank || 1) === 2 ? 'medium' : 'low';
     await pool.query(`UPDATE patient_master SET mental_count = ?, risk_level = CASE WHEN ? = 'high' OR risk_level <> 'high' THEN ? ELSE risk_level END, latest_status = COALESCE(?, latest_status) WHERE identity_key = ?`, [Number(row.total || 0), riskLevel, riskLevel, toSafeText(row.latest_status) || null, String(row.identity_key || '')]);
   }
-  const [pharmacyCounts] = await pool.query<RowDataPacket[]>(`
+  const [pharmacyCounts] = await pool.query<RowDataPacket>(`
     SELECT LOWER(TRIM(patient_name)) AS patient_name_key, COUNT(*) AS total
     FROM pharmacy_dispense_requests
     GROUP BY 1
@@ -2513,7 +2513,7 @@ async function resolveAdminSession(pool: Pool, req: any): Promise<RowDataPacket 
   const sessionToken = toSafeText(cookies.admin_session);
   if (!sessionToken) return null;
   const sessionHash = createHash('sha256').update(sessionToken).digest('hex');
-  const [rows] = await pool.query<RowDataPacket[]>(
+  const [rows] = await pool.query<RowDataPacket>(
     `SELECT p.id AS admin_profile_id, p.username, p.full_name, p.email, p.role, p.department, p.access_exemptions, p.is_super_admin
      FROM public.admin_sessions s
      JOIN public.admin_profiles p ON p.id = s.admin_profile_id
@@ -2605,7 +2605,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 params.push(department);
               }
               if (!includeInactive) where.push('is_active = 1');
-              const [rows] = await pool.query<RowDataPacket[]>(
+              const [rows] = await pool.query<RowDataPacket>(
                 `SELECT id, doctor_name, department_name, specialization, is_active, created_at, updated_at
                  FROM doctors${where.length ? ` WHERE ${where.join(' AND ')}` : ''}
                  ORDER BY doctor_name ASC`,
@@ -2631,7 +2631,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                    is_active = EXCLUDED.is_active`,
                 [doctorName, departmentName, toSafeText(body.specialization) || null, body.is_active === false ? 0 : 1]
               );
-              const [rows] = await pool.query<RowDataPacket[]>(
+              const [rows] = await pool.query<RowDataPacket>(
                 `SELECT id, doctor_name, department_name, specialization, is_active, created_at, updated_at
                  FROM doctors WHERE doctor_name = ? LIMIT 1`,
                 [doctorName]
@@ -2661,7 +2661,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   where.push('department_name = ?');
                   params.push(department);
                 }
-                const [rows] = await pool.query<RowDataPacket[]>(
+                const [rows] = await pool.query<RowDataPacket>(
                   `SELECT id, doctor_name, department_name, day_of_week, start_time, end_time, max_appointments, is_active, created_at, updated_at
                    FROM doctor_availability${where.length ? ` WHERE ${where.join(' AND ')}` : ''}
                    ORDER BY doctor_name ASC, day_of_week ASC, start_time ASC`,
@@ -2682,7 +2682,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   return;
                 }
                 const dayOfWeek = new Date(`${requestedDate}T00:00:00`).getDay();
-                const [doctorRows] = await pool.query<RowDataPacket[]>(
+                const [doctorRows] = await pool.query<RowDataPacket>(
                   `SELECT DISTINCT doctor_name, department_name
                    FROM doctor_availability
                    WHERE department_name = ? AND is_active = 1 AND day_of_week = ?${doctor ? ' AND doctor_name = ?' : ''}
@@ -2724,7 +2724,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                     body.is_active === false ? 0 : 1
                   ]
                 );
-                const [rows] = await pool.query<RowDataPacket[]>(
+                const [rows] = await pool.query<RowDataPacket>(
                   `SELECT id, doctor_name, department_name, day_of_week, start_time, end_time, max_appointments, is_active, created_at, updated_at
                    FROM doctor_availability
                    WHERE doctor_name = ? AND department_name = ? AND day_of_week = ? AND start_time = ? AND end_time = ?
@@ -2808,7 +2808,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 const bypass =
                   username === CLINIC_DEV_BYPASS_EMAIL.toLowerCase() && password === CLINIC_DEV_BYPASS_PASSWORD;
 
-                let [rows] = await pool.query<RowDataPacket[]>(
+                let [rows] = await pool.query<RowDataPacket>(
                   `SELECT id, username, full_name, email, role, department, access_exemptions, is_super_admin, status, password_hash
                    FROM public.admin_profiles
                    WHERE LOWER(username) = ? OR LOWER(email) = ?
@@ -2846,7 +2846,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                       '',
                     ]
                   );
-                  const [again] = await pool.query<RowDataPacket[]>(
+                  const [again] = await pool.query<RowDataPacket>(
                     `SELECT id, username, full_name, email, role, department, access_exemptions, is_super_admin, status, password_hash
                      FROM public.admin_profiles
                      WHERE LOWER(username) = ? OR LOWER(email) = ?
@@ -2912,7 +2912,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   writeJson(res, 422, { ok: false, message: 'Full name, username, email, and password (min 8 chars) are required.' });
                   return;
                 }
-                const [existingRows] = await pool.query<RowDataPacket[]>(
+                const [existingRows] = await pool.query<RowDataPacket>(
                   `SELECT id FROM public.admin_profiles WHERE LOWER(username) = ? OR LOWER(email) = ? LIMIT 1`,
                   [username, email]
                 );
@@ -2956,7 +2956,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
             if ((req.method || 'GET').toUpperCase() === 'GET') {
               const requestedUsername = toSafeText(url.searchParams.get('username')).toLowerCase();
               const username = requestedUsername && toBooleanFlag(adminSession.is_super_admin) ? requestedUsername : String(adminSession.username || '').toLowerCase();
-              const [profileRows] = await pool.query<RowDataPacket[]>(
+              const [profileRows] = await pool.query<RowDataPacket>(
                 `SELECT username, full_name, email, role, department, is_super_admin, status, phone, created_at, last_login_at, email_notifications, in_app_notifications, dark_mode FROM public.admin_profiles WHERE username = ? LIMIT 1`,
                 [username]
               );
@@ -2965,7 +2965,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 writeJson(res, 404, { ok: false, message: 'Admin profile not found.' });
                 return;
               }
-              const [logs] = await pool.query<RowDataPacket[]>(`SELECT action, raw_action, description, ip_address, created_at FROM admin_activity_logs WHERE username = ? ORDER BY created_at DESC LIMIT 50`, [username]);
+              const [logs] = await pool.query<RowDataPacket>(`SELECT action, raw_action, description, ip_address, created_at FROM admin_activity_logs WHERE username = ? ORDER BY created_at DESC LIMIT 50`, [username]);
               writeJson(res, 200, {
                 ok: true,
                 data: {
@@ -3021,7 +3021,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
 
           if (url.pathname === '/api/integrations/cashier/status' && (req.method || 'GET').toUpperCase() === 'GET') {
             await ensureCashierIntegrationTables(pool);
-            const [queueRows] = await pool.query<RowDataPacket[]>(
+            const [queueRows] = await pool.query<RowDataPacket>(
               `SELECT
                  SUM(CASE WHEN sync_status = 'pending' THEN 1 ELSE 0 END) AS pending_total,
                  SUM(CASE WHEN sync_status = 'sent' THEN 1 ELSE 0 END) AS sent_total,
@@ -3029,13 +3029,13 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                  SUM(CASE WHEN sync_status = 'failed' THEN 1 ELSE 0 END) AS failed_total
                FROM cashier_integration_events`
             );
-            const [recentEvents] = await pool.query<RowDataPacket[]>(
+            const [recentEvents] = await pool.query<RowDataPacket>(
               `SELECT id, source_module, source_entity, source_key, patient_name, patient_type, reference_no, amount_due, currency_code, payment_status, sync_status, last_error, synced_at, created_at
                FROM cashier_integration_events
                ORDER BY created_at DESC
                LIMIT 12`
             );
-            const [recentPayments] = await pool.query<RowDataPacket[]>(
+            const [recentPayments] = await pool.query<RowDataPacket>(
               `SELECT id, source_module, source_key, cashier_reference, cashier_billing_id, invoice_number, official_receipt, amount_due, amount_paid, balance_due, payment_status, latest_payment_method, paid_at, updated_at
                FROM cashier_payment_links
                ORDER BY updated_at DESC
@@ -3097,9 +3097,9 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               params.push(sourceModule);
             }
             const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-            const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM cashier_integration_events${whereSql}`, params);
+            const [countRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM cashier_integration_events${whereSql}`, params);
             const total = Number(countRows[0]?.total || 0);
-            const [rows] = await pool.query<RowDataPacket[]>(
+            const [rows] = await pool.query<RowDataPacket>(
               `SELECT id, source_module, source_entity, source_key, patient_name, patient_type, reference_no, amount_due, currency_code, payment_status, sync_status, last_error, synced_at, created_at, updated_at
                FROM cashier_integration_events${whereSql}
                ORDER BY created_at DESC
@@ -3172,7 +3172,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
             if (action === 'dispatch_pending') {
               const limit = Math.min(25, Math.max(1, toSafeInt(body.limit, 10)));
               const eventId = toSafeInt(body.event_id, 0);
-              const [rows] = await pool.query<RowDataPacket[]>(
+              const [rows] = await pool.query<RowDataPacket>(
                 `SELECT * FROM cashier_integration_events
                  WHERE ${eventId > 0 ? 'id = ?' : `sync_status = 'pending'`}
                  ORDER BY created_at ASC
@@ -3306,20 +3306,20 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
 
           if (url.pathname === '/api/integrations/hr-staff/status' && (req.method || 'GET').toUpperCase() === 'GET') {
             await ensureHrStaffRequestTables(pool);
-            const [totalsRows] = await pool.query<RowDataPacket[]>(
+            const [totalsRows] = await pool.query<RowDataPacket>(
               `SELECT
                  SUM(CASE WHEN LOWER(employment_status) = 'active' THEN 1 ELSE 0 END) AS active_roster,
                  SUM(CASE WHEN LOWER(employment_status) = 'working' THEN 1 ELSE 0 END) AS working_roster
                FROM public.hr_staff_directory
                WHERE LOWER(role_type) IN ('doctor', 'nurse')`
             );
-            const [requestRows] = await pool.query<RowDataPacket[]>(
+            const [requestRows] = await pool.query<RowDataPacket>(
               `SELECT
                  SUM(CASE WHEN LOWER(request_status) = 'pending' THEN 1 ELSE 0 END) AS pending_requests,
                  SUM(CASE WHEN LOWER(request_status) = 'approved' THEN 1 ELSE 0 END) AS approved_requests
                FROM public.hr_staff_requests`
             );
-            const [recentRows] = await pool.query<RowDataPacket[]>(
+            const [recentRows] = await pool.query<RowDataPacket>(
               `SELECT
                  r.id, r.request_reference, r.staff_id, s.employee_no,
                  s.full_name AS staff_name, s.role_type, s.department_name,
@@ -3374,9 +3374,9 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               params.push(employmentStatus);
             }
             const whereSql = ` WHERE ${where.join(' AND ')}`;
-            const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM public.hr_staff_directory${whereSql}`, params);
+            const [countRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM public.hr_staff_directory${whereSql}`, params);
             const total = Number(countRows[0]?.total || 0);
-            const [rows] = await pool.query<RowDataPacket[]>(
+            const [rows] = await pool.query<RowDataPacket>(
               `SELECT id, employee_no, full_name, role_type, department_name, employment_status, contact_email, contact_phone, hired_at, updated_at
                FROM public.hr_staff_directory${whereSql}
                ORDER BY full_name ASC
@@ -3428,14 +3428,14 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 params.push(like, like, like);
               }
               const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-              const [countRows] = await pool.query<RowDataPacket[]>(
+              const [countRows] = await pool.query<RowDataPacket>(
                 `SELECT COUNT(*) AS total
                  FROM public.hr_staff_requests r
                  INNER JOIN public.hr_staff_directory s ON s.id = r.staff_id${whereSql}`,
                 params
               );
               const total = Number(countRows[0]?.total || 0);
-              const [rows] = await pool.query<RowDataPacket[]>(
+              const [rows] = await pool.query<RowDataPacket>(
                 `SELECT
                    r.id, r.request_reference, r.staff_id, s.employee_no,
                    s.full_name AS staff_name, s.role_type, s.department_name,
@@ -3470,7 +3470,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               let staff: RowDataPacket | undefined;
 
               if (staffId) {
-                const [staffRows] = await pool.query<RowDataPacket[]>(
+                const [staffRows] = await pool.query<RowDataPacket>(
                   `SELECT id, employee_no, full_name, role_type, department_name
                    FROM public.hr_staff_directory
                    WHERE id = ? AND LOWER(role_type) IN ('doctor', 'nurse')
@@ -3487,7 +3487,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                    ON CONFLICT (employee_no) DO NOTHING`,
                   [placeholderNo, placeholderName, roleType]
                 );
-                const [staffRows] = await pool.query<RowDataPacket[]>(
+                const [staffRows] = await pool.query<RowDataPacket>(
                   `SELECT id, employee_no, full_name, role_type, department_name
                    FROM public.hr_staff_directory
                    WHERE employee_no = ?
@@ -3534,7 +3534,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 return;
               }
 
-              const [existingRows] = await pool.query<RowDataPacket[]>(
+              const [existingRows] = await pool.query<RowDataPacket>(
                 `SELECT id, request_reference, request_status
                  FROM public.hr_staff_requests
                  WHERE id = ?
@@ -3574,7 +3574,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
             const tokenConfigured = Boolean(toSafeText(options.departmentSharedToken));
             let storedPrefectIncidentCount = 0;
             try {
-              const [countRows] = await pool.query<RowDataPacket[]>(
+              const [countRows] = await pool.query<RowDataPacket>(
                 `SELECT COUNT(*)::bigint AS total FROM module_activity_logs WHERE LOWER(module) = LOWER(?)`,
                 ['prefect_incident']
               );
@@ -3622,7 +3622,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               return;
             }
             const syncLimit = Math.min(100, Math.max(1, toSafeInt(syncBody.limit, 40)));
-            const [clearanceRows] = await pool.query<RowDataPacket[]>(
+            const [clearanceRows] = await pool.query<RowDataPacket>(
               `SELECT id, clearance_reference, patient_name, patient_code, patient_type, remarks, metadata, created_at
                FROM clinic.department_clearance_records
                WHERE LOWER(department_key) = LOWER(?)
@@ -3641,7 +3641,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 skippedSync += 1;
                 continue;
               }
-              const [existingLog] = await pool.query<RowDataPacket[]>(
+              const [existingLog] = await pool.query<RowDataPacket>(
                 `SELECT id FROM public.module_activity_logs
                  WHERE LOWER(module) = LOWER(?) AND entity_key = ?
                  LIMIT 1`,
@@ -3935,9 +3935,9 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 params.push(like, like, like, like);
               }
               const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM department_clearance_records${whereSql}`, params);
+              const [countRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM department_clearance_records${whereSql}`, params);
               const total = Number(countRows[0]?.total || 0);
-              const [rows] = await pool.query<RowDataPacket[]>(
+              const [rows] = await pool.query<RowDataPacket>(
                 `SELECT *
                  FROM department_clearance_records${whereSql}
                  ORDER BY stage_order ASC, created_at DESC
@@ -4153,9 +4153,9 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
             }
 
             const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-            const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM module_activity_logs${whereSql}`, params);
+            const [countRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM module_activity_logs${whereSql}`, params);
             let total = Number(countRows[0]?.total || 0);
-            let [rows] = await pool.query<RowDataPacket[]>(
+            let [rows] = await pool.query<RowDataPacket>(
               `SELECT id, module, action, detail, actor, entity_type, entity_key, metadata, created_at
                FROM module_activity_logs${whereSql}
                ORDER BY created_at DESC
@@ -4175,9 +4175,9 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 labParams.push(`%${search}%`, `%${search}%`, `%${search}%`);
               }
               const labWhereSql = labWhere.length ? ` WHERE ${labWhere.join(' AND ')}` : '';
-              const [labCountRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM laboratory_activity_logs${labWhereSql}`, labParams);
+              const [labCountRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM laboratory_activity_logs${labWhereSql}`, labParams);
               total = Number(labCountRows[0]?.total || 0);
-              const [labRows] = await pool.query<RowDataPacket[]>(
+              const [labRows] = await pool.query<RowDataPacket>(
                 `SELECT
                    id,
                    'laboratory' AS module,
@@ -4237,38 +4237,38 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
             const trendDays = buildDateSeries(fromDate, toDate);
             const trendMap = new Map(trendDays.map((day) => [day, { day, appointments: 0, walkin: 0, checkup: 0, mental: 0, pharmacy: 0 }]));
 
-            const [patientTotalsRows] = await pool.query<RowDataPacket[]>(
+            const [patientTotalsRows] = await pool.query<RowDataPacket>(
               `SELECT COUNT(*) AS total_patients, SUM(CASE WHEN LOWER(COALESCE(risk_level, '')) = 'high' THEN 1 ELSE 0 END) AS high_risk, SUM(CASE WHEN appointment_count > 0 OR walkin_count > 0 OR checkup_count > 0 OR mental_count > 0 OR pharmacy_count > 0 THEN 1 ELSE 0 END) AS active_profiles FROM patient_master`
             );
 
-            const [appointmentsRows] = await pool.query<RowDataPacket[]>(
+            const [appointmentsRows] = await pool.query<RowDataPacket>(
               `SELECT COUNT(*) AS total, SUM(CASE WHEN LOWER(COALESCE(status, '')) IN ('pending', 'new') THEN 1 ELSE 0 END) AS pending
                FROM patient_appointments
                WHERE appointment_date BETWEEN ? AND ?`,
               [fromDate, toDate]
             );
-            const [walkinRows] = await pool.query<RowDataPacket[]>(
+            const [walkinRows] = await pool.query<RowDataPacket>(
               `SELECT COUNT(*) AS total,
                       SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'emergency' OR LOWER(COALESCE(severity, '')) = 'emergency' THEN 1 ELSE 0 END) AS emergency
                FROM patient_walkins
                WHERE COALESCE(checkin_time, intake_time, created_at)::date BETWEEN ? AND ?`,
               [fromDate, toDate]
             );
-            const [checkupRows] = await pool.query<RowDataPacket[]>(
+            const [checkupRows] = await pool.query<RowDataPacket>(
               `SELECT COUNT(*) AS total,
                       SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'in_consultation' THEN 1 ELSE 0 END) AS in_consultation
                FROM checkup_visits
                WHERE created_at::date BETWEEN ? AND ?`,
               [fromDate, toDate]
             );
-            const [mentalRows] = await pool.query<RowDataPacket[]>(
+            const [mentalRows] = await pool.query<RowDataPacket>(
               `SELECT COUNT(*) AS total,
                       SUM(CASE WHEN LOWER(COALESCE(risk_level, '')) = 'high' OR LOWER(COALESCE(status, '')) IN ('at_risk', 'escalated') THEN 1 ELSE 0 END) AS at_risk
                FROM mental_health_sessions
                WHERE created_at::date BETWEEN ? AND ?`,
               [fromDate, toDate]
             );
-            const [pharmacyRows] = await pool.query<RowDataPacket[]>(
+            const [pharmacyRows] = await pool.query<RowDataPacket>(
               `SELECT COUNT(*) AS total
                FROM pharmacy_dispense_requests
                WHERE requested_at::date BETWEEN ? AND ?`,
@@ -4284,14 +4284,14 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
             ];
 
             for (const [query, , metricKey] of trendQueries) {
-              const [trendRows] = await pool.query<RowDataPacket[]>(query, [fromDate, toDate]);
+              const [trendRows] = await pool.query<RowDataPacket>(query, [fromDate, toDate]);
               for (const row of trendRows) {
                 const bucket = trendMap.get(String(row.day || ''));
                 if (bucket) bucket[metricKey] = Number(row.total || 0);
               }
             }
 
-            const [activityRows] = await pool.query<RowDataPacket[]>(
+            const [activityRows] = await pool.query<RowDataPacket>(
               `SELECT module, action, detail, actor, created_at
                FROM module_activity_logs
                ORDER BY created_at DESC
@@ -4428,7 +4428,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
             await ensurePatientAppointmentsTable(pool);
             await ensurePatientMasterTables(pool);
 
-            const [summaryRows] = await pool.query<RowDataPacket[]>(
+            const [summaryRows] = await pool.query<RowDataPacket>(
               `SELECT
                  (SELECT COUNT(*) FROM patient_master) AS total_patients,
                  (SELECT COUNT(*) FROM patient_appointments) AS total_appointments,
@@ -4441,7 +4441,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
 
             const monthSeries = buildRecentMonthSeries(6);
             const monthCounts = new Map(monthSeries.map((item) => [item.key, 0]));
-            const [trendRows] = await pool.query<RowDataPacket[]>(
+            const [trendRows] = await pool.query<RowDataPacket>(
               `SELECT TRIM(to_char(appointment_date, 'Mon')) AS label, LOWER(TRIM(to_char(appointment_date, 'Mon'))) AS month_key, COUNT(*) AS total
                FROM patient_appointments
                WHERE appointment_date >= ? AND appointment_date < ?
@@ -4453,27 +4453,27 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               monthCounts.set(String(row.month_key || ''), Number(row.total || 0));
             });
 
-            const [statusRows] = await pool.query<RowDataPacket[]>(
+            const [statusRows] = await pool.query<RowDataPacket>(
               `SELECT COALESCE(NULLIF(TRIM(status), ''), 'Pending') AS label, COUNT(*) AS total
                FROM patient_appointments
                GROUP BY COALESCE(NULLIF(TRIM(status), ''), 'Pending')
                ORDER BY total DESC`
             );
-            const [deptRows] = await pool.query<RowDataPacket[]>(
+            const [deptRows] = await pool.query<RowDataPacket>(
               `SELECT COALESCE(NULLIF(TRIM(department_name), ''), 'General') AS label, COUNT(*) AS total
                FROM patient_appointments
                GROUP BY COALESCE(NULLIF(TRIM(department_name), ''), 'General')
                ORDER BY total DESC
                LIMIT 6`
             );
-            const [upcomingRows] = await pool.query<RowDataPacket[]>(
+            const [upcomingRows] = await pool.query<RowDataPacket>(
               `SELECT booking_id, patient_name, doctor_name, department_name, appointment_date, preferred_time, status
                FROM patient_appointments
                WHERE appointment_date >= CURRENT_DATE
                ORDER BY appointment_date ASC, COALESCE(preferred_time, '99:99') ASC
                LIMIT 8`
             );
-            const [recentRows] = await pool.query<RowDataPacket[]>(
+            const [recentRows] = await pool.query<RowDataPacket>(
               `SELECT patient_code, patient_name, COALESCE(sex, '') AS sex, created_at
                FROM patient_master
                ORDER BY created_at DESC
@@ -4547,18 +4547,18 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               if (sort === 'Sort Name Z-A') orderBy = ' ORDER BY patient_name DESC';
               const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
 
-              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM patient_registrations${whereSql}`, params);
+              const [countRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM patient_registrations${whereSql}`, params);
               const total = Number(countRows[0]?.total || 0);
-              const [rows] = await pool.query<RowDataPacket[]>(
+              const [rows] = await pool.query<RowDataPacket>(
                 `SELECT id, case_id, patient_name, patient_type, patient_email, age, concern, intake_time, booked_time, status, assigned_to
                  FROM patient_registrations${whereSql}${orderBy}
                  LIMIT ? OFFSET ?`,
                 [...params, perPage, offset]
               );
-              const [pendingRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM patient_registrations WHERE LOWER(status) = 'pending'`);
-              const [activeRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM patient_registrations WHERE LOWER(status) = 'active'`);
-              const [concernRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM patient_registrations WHERE COALESCE(TRIM(concern), '') <> ''`);
-              const [totalRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM patient_registrations`);
+              const [pendingRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM patient_registrations WHERE LOWER(status) = 'pending'`);
+              const [activeRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM patient_registrations WHERE LOWER(status) = 'active'`);
+              const [concernRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM patient_registrations WHERE COALESCE(TRIM(concern), '') <> ''`);
+              const [totalRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM patient_registrations`);
               const active = Number(activeRows[0]?.total || 0);
               const totalAll = Number(totalRows[0]?.total || 0);
 
@@ -4608,7 +4608,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                     toSafeText(body.assigned_to || 'Unassigned') || 'Unassigned'
                   ]
                 );
-                const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM patient_registrations WHERE case_id = ? LIMIT 1`, [caseId]);
+                const [rows] = await pool.query<RowDataPacket>(`SELECT * FROM patient_registrations WHERE case_id = ? LIMIT 1`, [caseId]);
                 await insertModuleActivity(pool, 'registration', 'Registration Created', `Registration ${caseId} created for ${patientName}.`, actor, 'registration', caseId);
                 writeJson(res, 200, { ok: true, message: 'Registration created.', data: rows[0] ? mapRegistrationRow(rows[0]) : null });
                 return;
@@ -4743,9 +4743,9 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               }
 
               const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM patient_walkins${whereSql}`, params);
+              const [countRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM patient_walkins${whereSql}`, params);
               const total = Number(countRows[0]?.total || 0);
-              const [rows] = await pool.query<RowDataPacket[]>(
+              const [rows] = await pool.query<RowDataPacket>(
                 `SELECT id, case_id, patient_name, patient_type, age, sex, date_of_birth, contact, address, emergency_contact, patient_ref, visit_department, checkin_time,
                         pain_scale, temperature_c, blood_pressure, pulse_bpm, weight_kg, chief_complaint, severity, intake_time, assigned_doctor, status
                  FROM patient_walkins${whereSql}
@@ -4756,7 +4756,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                  LIMIT ? OFFSET ?`,
                 [...params, perPage, offset]
               );
-              const [analyticsRows] = await pool.query<RowDataPacket[]>(
+              const [analyticsRows] = await pool.query<RowDataPacket>(
                 `SELECT COUNT(*) AS all_count,
                         SUM(CASE WHEN status = 'triage_pending' THEN 1 ELSE 0 END) AS triage_count,
                         SUM(CASE WHEN status = 'waiting_for_doctor' THEN 1 ELSE 0 END) AS doctor_count,
@@ -4828,7 +4828,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                     toSafeText(body.assigned_doctor || 'Nurse Triage') || 'Nurse Triage'
                   ]
                 );
-                const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM patient_walkins WHERE case_id = ? LIMIT 1`, [caseId]);
+                const [rows] = await pool.query<RowDataPacket>(`SELECT * FROM patient_walkins WHERE case_id = ? LIMIT 1`, [caseId]);
                 await logWalkin('Walk-In Created', `Walk-in case ${caseId} created for ${patientName}.`, caseId);
                 writeJson(res, 200, { ok: true, message: 'Walk-in created.', data: rows[0] ? mapWalkinRow(rows[0]) : null });
                 return;
@@ -4937,9 +4937,9 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               }
 
               const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM checkup_visits${whereSql}`, params);
+              const [countRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM checkup_visits${whereSql}`, params);
               const total = Number(countRows[0]?.total || 0);
-              const [rows] = await pool.query<RowDataPacket[]>(
+              const [rows] = await pool.query<RowDataPacket>(
                 `SELECT id, visit_id, patient_name, patient_type, assigned_doctor, source, status, chief_complaint, diagnosis, clinical_notes, consultation_started_at,
                         lab_requested, lab_result_ready, prescription_created, prescription_dispensed, follow_up_date, is_emergency, version, created_at, updated_at
                  FROM checkup_visits${whereSql}
@@ -4947,14 +4947,14 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                  LIMIT ? OFFSET ?`,
                 [...params, perPage, offset]
               );
-              const [intakeRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'intake' AND is_emergency = 0`);
-              const [queueRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'queue' AND is_emergency = 0`);
-              const [assignedRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'doctor_assigned' AND is_emergency = 0`);
-              const [consultRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'in_consultation' AND is_emergency = 0`);
-              const [labRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'lab_requested' AND is_emergency = 0`);
-              const [pharmacyRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'pharmacy' AND is_emergency = 0`);
-              const [completedRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'completed'`);
-              const [emergencyRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE is_emergency = 1 AND status <> 'archived'`);
+              const [intakeRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'intake' AND is_emergency = 0`);
+              const [queueRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'queue' AND is_emergency = 0`);
+              const [assignedRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'doctor_assigned' AND is_emergency = 0`);
+              const [consultRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'in_consultation' AND is_emergency = 0`);
+              const [labRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'lab_requested' AND is_emergency = 0`);
+              const [pharmacyRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'pharmacy' AND is_emergency = 0`);
+              const [completedRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE status = 'completed'`);
+              const [emergencyRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM checkup_visits WHERE is_emergency = 1 AND status <> 'archived'`);
 
               writeJson(res, 200, {
                 ok: true,
@@ -5060,7 +5060,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               const requestId = toSafeInt(url.searchParams.get('request_id'), 0);
               const mode = toSafeText(url.searchParams.get('mode')).toLowerCase();
               if (requestId > 0 && mode === 'detail') {
-                const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
+                const [rows] = await pool.query<RowDataPacket>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
                 if (!rows[0]) {
                   writeJson(res, 404, { ok: false, message: 'Laboratory request not found.' });
                   return;
@@ -5069,7 +5069,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 return;
               }
               if (requestId > 0 && mode === 'activity') {
-                const [logs] = await pool.query<RowDataPacket[]>(`SELECT id, request_id, action, details, actor, created_at FROM laboratory_activity_logs WHERE request_id = ? ORDER BY created_at DESC`, [requestId]);
+                const [logs] = await pool.query<RowDataPacket>(`SELECT id, request_id, action, details, actor, created_at FROM laboratory_activity_logs WHERE request_id = ? ORDER BY created_at DESC`, [requestId]);
                 writeJson(res, 200, { ok: true, data: logs.map((row) => ({ ...row, created_at: formatDateTimeCell(row.created_at) })) });
                 return;
               }
@@ -5117,16 +5117,16 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 params.push(toDate);
               }
               const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM laboratory_requests${whereSql}`, params);
+              const [countRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM laboratory_requests${whereSql}`, params);
               const total = Number(countRows[0]?.total || 0);
-              const [rows] = await pool.query<RowDataPacket[]>(
+              const [rows] = await pool.query<RowDataPacket>(
                 `SELECT request_id, visit_id, patient_id, patient_name, patient_type, category, priority, status, requested_at, requested_by_doctor
                  FROM laboratory_requests${whereSql}
                  ORDER BY requested_at DESC
                  LIMIT ? OFFSET ?`,
                 [...params, perPage, offset]
               );
-              const [analyticsRows] = await pool.query<RowDataPacket[]>(
+              const [analyticsRows] = await pool.query<RowDataPacket>(
                 `SELECT COUNT(*) AS totalRequests,
                         SUM(CASE WHEN status = 'Pending' THEN 1 ELSE 0 END) AS pending,
                         SUM(CASE WHEN status IN ('In Progress', 'Result Ready') THEN 1 ELSE 0 END) AS inProgress,
@@ -5169,7 +5169,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   writeJson(res, 422, { ok: false, message: 'patient_name, category, requested_by_doctor are required.' });
                   return;
                 }
-                const [nextRows] = await pool.query<RowDataPacket[]>(`SELECT COALESCE(MAX(request_id), 1200) + 1 AS next_id FROM laboratory_requests`);
+                const [nextRows] = await pool.query<RowDataPacket>(`SELECT COALESCE(MAX(request_id), 1200) + 1 AS next_id FROM laboratory_requests`);
                 const nextId = Number(nextRows[0]?.next_id || 1201);
                 const tests = Array.isArray(body.tests) ? body.tests.map((item) => toSafeText(item)).filter(Boolean) : [`${categoryText} request`];
                 await pool.query(
@@ -5204,7 +5204,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                     JSON.stringify({})
                   ]
                 );
-                const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [nextId]);
+                const [rows] = await pool.query<RowDataPacket>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [nextId]);
                 await saveActivity(nextId, 'Request Created', 'New lab request created from laboratory queue dashboard.', 'Lab Staff');
                 await queueCashierIntegrationEvent(pool, {
                   sourceModule: 'laboratory',
@@ -5231,7 +5231,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 writeJson(res, 422, { ok: false, message: 'request_id is required.' });
                 return;
               }
-              const [existingRows] = await pool.query<RowDataPacket[]>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
+              const [existingRows] = await pool.query<RowDataPacket>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
               const existing = existingRows[0];
               if (!existing) {
                 writeJson(res, 404, { ok: false, message: 'Laboratory request not found.' });
@@ -5248,7 +5248,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                    WHERE request_id = ?`,
                   [staff, toBooleanFlag(body.sample_collected) ? 1 : 0, toBooleanFlag(body.sample_collected) ? 1 : 0, toSqlDateTime(body.sample_collected_at), toSqlDateTime(body.processing_started_at), toSafeText(body.specimen_type), toSafeText(body.sample_source), toSqlDateTime(body.collection_date_time), requestId]
                 );
-                const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
+                const [rows] = await pool.query<RowDataPacket>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
                 await saveActivity(requestId, 'Processing Started', 'Sample collected and processing started.', staff);
                 writeJson(res, 200, { ok: true, data: rows[0] ? mapLabDetailRow(rows[0]) : null });
                 return;
@@ -5265,7 +5265,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                    WHERE request_id = ?`,
                   [finalize ? 'Result Ready' : 'In Progress', toSafeText(body.attachment_name), JSON.stringify(parseJsonRecord(body.encoded_values)), finalize ? 'Result Ready' : 'In Progress', toSqlDateTime(body.result_encoded_at), toSafeText(body.result_reference_range), finalize ? 'Result Ready' : 'In Progress', toSafeText(body.verified_by), finalize ? 'Result Ready' : 'In Progress', toSqlDateTime(body.verified_at), requestId]
                 );
-                const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
+                const [rows] = await pool.query<RowDataPacket>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
                 await saveActivity(requestId, finalize ? 'Result Finalized' : 'Draft Saved', summary, toSafeText(existing.assigned_lab_staff) || 'Lab Staff');
                 writeJson(res, 200, { ok: true, data: rows[0] ? mapLabDetailRow(rows[0]) : null });
                 return;
@@ -5277,7 +5277,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   return;
                 }
                 await pool.query(`UPDATE laboratory_requests SET status = 'Completed', released_at = COALESCE(?, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE request_id = ?`, [toSqlDateTime(body.released_at), requestId]);
-                const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
+                const [rows] = await pool.query<RowDataPacket>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
                 await saveActivity(requestId, 'Report Released', 'Lab report released to doctor/check-up.', toSafeText(body.released_by) || 'Lab Staff');
                 await queueCashierIntegrationEvent(pool, {
                   sourceModule: 'laboratory',
@@ -5306,7 +5306,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   return;
                 }
                 await pool.query(`UPDATE laboratory_requests SET status = 'Cancelled', rejection_reason = ?, resample_flag = ?, updated_at = CURRENT_TIMESTAMP WHERE request_id = ?`, [reason, toBooleanFlag(body.resample_flag) ? 1 : 0, requestId]);
-                const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
+                const [rows] = await pool.query<RowDataPacket>(`SELECT * FROM laboratory_requests WHERE request_id = ? LIMIT 1`, [requestId]);
                 await saveActivity(requestId, toBooleanFlag(body.resample_flag) ? 'Resample Requested' : 'Request Rejected', reason, toSafeText(body.actor) || 'Lab Staff');
                 writeJson(res, 200, { ok: true, data: rows[0] ? mapLabDetailRow(rows[0]) : null });
                 return;
@@ -5359,15 +5359,15 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               else if (sort === 'expiry') orderSql = `ORDER BY CASE WHEN expiry_date IS NOT NULL AND expiry_date != '' THEN CAST(expiry_date AS DATE) ELSE '9999-12-31' END ${dirSql}`;
 
               const whereSql = `WHERE ${where.join(' AND ')}`;
-              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM pharmacy_medicines ${whereSql}`, params);
+              const [countRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM pharmacy_medicines ${whereSql}`, params);
               const total = Number(countRows[0]?.total || 0);
 
-              const [medicines] = await pool.query<RowDataPacket[]>(
+              const [medicines] = await pool.query<RowDataPacket>(
                 `SELECT * FROM pharmacy_medicines ${whereSql} ${orderSql} LIMIT ? OFFSET ?`,
                 [...params, perPage, offset]
               );
               
-              const [analyticsRows] = await pool.query<RowDataPacket[]>(
+              const [analyticsRows] = await pool.query<RowDataPacket>(
                 `SELECT 
                    COUNT(*) AS total_medicines,
                    SUM(CASE WHEN stock_on_hand <= 0 THEN 1 ELSE 0 END) AS out_of_stock,
@@ -5376,10 +5376,10 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                    SUM(CASE WHEN expiry_date IS NOT NULL AND expiry_date != '' AND CAST(expiry_date AS DATE) <= CURRENT_DATE + INTERVAL 30 DAY AND CAST(expiry_date AS DATE) >= CURRENT_DATE THEN 1 ELSE 0 END) AS expiring_stock
                  FROM pharmacy_medicines WHERE is_archived = 0`
               );
-              const [catsRows] = await pool.query<RowDataPacket[]>(`SELECT DISTINCT category FROM pharmacy_medicines WHERE is_archived = 0 AND category IS NOT NULL AND category != ''`);
+              const [catsRows] = await pool.query<RowDataPacket>(`SELECT DISTINCT category FROM pharmacy_medicines WHERE is_archived = 0 AND category IS NOT NULL AND category != ''`);
               const catNames = catsRows.map((r) => r.category);
 
-              const [requests] = await pool.query<RowDataPacket[]>(`SELECT r.*, m.medicine_name FROM pharmacy_dispense_requests r JOIN pharmacy_medicines m ON m.id = r.medicine_id ORDER BY r.requested_at DESC`);
+              const [requests] = await pool.query<RowDataPacket>(`SELECT r.*, m.medicine_name FROM pharmacy_dispense_requests r JOIN pharmacy_medicines m ON m.id = r.medicine_id ORDER BY r.requested_at DESC`);
               const pendingRequestsCount = requests.filter(r => r.status === 'Pending').length;
 
               const analytics = {
@@ -5392,8 +5392,8 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 categories: catNames
               };
 
-              const [logs] = await pool.query<RowDataPacket[]>(`SELECT id, detail, actor, tone, created_at FROM pharmacy_activity_logs ORDER BY created_at DESC LIMIT 200`);
-              const [movements] = await pool.query<RowDataPacket[]>(`SELECT id, medicine_id, movement_type, quantity_change, quantity_before, quantity_after, reason, batch_lot_no, stock_location, actor, created_at FROM pharmacy_stock_movements ORDER BY created_at DESC LIMIT 600`);
+              const [logs] = await pool.query<RowDataPacket>(`SELECT id, detail, actor, tone, created_at FROM pharmacy_activity_logs ORDER BY created_at DESC LIMIT 200`);
+              const [movements] = await pool.query<RowDataPacket>(`SELECT id, medicine_id, movement_type, quantity_change, quantity_before, quantity_after, reason, batch_lot_no, stock_location, actor, created_at FROM pharmacy_stock_movements ORDER BY created_at DESC LIMIT 600`);
               writeJson(res, 200, { ok: true, data: { medicines, requests, logs, movements, analytics, meta: { total, page, perPage, totalPages: Math.max(1, Math.ceil(total / perPage)) } } });
               return;
             }
@@ -5426,7 +5426,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   writeJson(res, 422, { ok: false, message: 'sku, medicine_name, batch_lot_no, and expiry_date are required.' });
                   return;
                 }
-                const [dupes] = await pool.query<RowDataPacket[]>(`SELECT id FROM pharmacy_medicines WHERE sku = ? LIMIT 1`, [sku]);
+                const [dupes] = await pool.query<RowDataPacket>(`SELECT id FROM pharmacy_medicines WHERE sku = ? LIMIT 1`, [sku]);
                 if (dupes[0]) {
                   writeJson(res, 409, { ok: false, message: 'SKU already exists.' });
                   return;
@@ -5437,7 +5437,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                   [`MED-${Math.floor(10000 + Math.random() * 89999)}`, sku, medicineName, toSafeText(body.brand_name) || null, toSafeText(body.generic_name) || null, toSafeText(body.category) || 'Tablet', toSafeText(body.medicine_type) || 'General', toSafeText(body.dosage_strength) || null, toSafeText(body.unit_of_measure) || 'unit', toSafeText(body.supplier_name) || null, toSafeMoney(body.purchase_cost, 0), toSafeMoney(body.selling_price, 0), batchLotNo, toSqlDate(body.manufacturing_date), expiryDate, toSafeText(body.storage_requirements) || null, Math.max(0, toSafeInt(body.reorder_level, 20)), Math.max(0, toSafeInt(body.low_stock_threshold, 20)), Math.max(0, toSafeInt(body.stock_capacity, 100)), initialStock, toSafeText(body.stock_location) || null, toSafeText(body.barcode) || null]
                 );
-                const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM pharmacy_medicines WHERE sku = ? LIMIT 1`, [sku]);
+                const [rows] = await pool.query<RowDataPacket>(`SELECT * FROM pharmacy_medicines WHERE sku = ? LIMIT 1`, [sku]);
                 const created = rows[0];
                 await movement(Number(created.id || 0), 'add', initialStock, 0, initialStock, 'Initial stock added', toSafeText(created.batch_lot_no) || null, toSafeText(created.stock_location) || null);
                 await log('ADD_MEDICINE', `${medicineName} created with stock ${initialStock}`, 'success');
@@ -5457,7 +5457,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 return;
               }
 
-              const [medicineRows] = await pool.query<RowDataPacket[]>(`SELECT * FROM pharmacy_medicines WHERE id = ? AND is_archived = 0 LIMIT 1`, [medicineId]);
+              const [medicineRows] = await pool.query<RowDataPacket>(`SELECT * FROM pharmacy_medicines WHERE id = ? AND is_archived = 0 LIMIT 1`, [medicineId]);
               const medicine = medicineRows[0];
               if (!medicine && action !== 'fulfill_request') {
                 writeJson(res, 404, { ok: false, message: 'Medicine not found.' });
@@ -5551,7 +5551,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   writeJson(res, 422, { ok: false, message: 'request_id is required.' });
                   return;
                 }
-                const [requestRows] = await pool.query<RowDataPacket[]>(`SELECT r.*, m.medicine_name, m.stock_on_hand, m.batch_lot_no, m.stock_location, m.selling_price FROM pharmacy_dispense_requests r JOIN pharmacy_medicines m ON m.id = r.medicine_id WHERE r.id = ? LIMIT 1`, [requestId]);
+                const [requestRows] = await pool.query<RowDataPacket>(`SELECT r.*, m.medicine_name, m.stock_on_hand, m.batch_lot_no, m.stock_location, m.selling_price FROM pharmacy_dispense_requests r JOIN pharmacy_medicines m ON m.id = r.medicine_id WHERE r.id = ? LIMIT 1`, [requestId]);
                 const request = requestRows[0];
                 if (!request) {
                   writeJson(res, 404, { ok: false, message: 'Request not found.' });
@@ -5626,16 +5626,16 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               }
               const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM mental_health_sessions ${whereSql}`, params);
+              const [countRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM mental_health_sessions ${whereSql}`, params);
               const total = Number(countRows[0]?.total || 0);
-              const [sessions] = await pool.query<RowDataPacket[]>(
+              const [sessions] = await pool.query<RowDataPacket>(
                 `SELECT * FROM mental_health_sessions ${whereSql} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
                 [...params, perPage, offset]
               );
-              const [patients] = await pool.query<RowDataPacket[]>(`SELECT p.patient_id, p.patient_name, p.patient_type, COUNT(s.id) AS previous_sessions, MAX(s.case_reference) AS latest_case_reference FROM mental_health_patients p LEFT JOIN mental_health_sessions s ON s.patient_id = p.patient_id GROUP BY p.patient_id, p.patient_name, p.patient_type ORDER BY p.patient_name ASC`);
-              const [notes] = await pool.query<RowDataPacket[]>(`SELECT * FROM mental_health_notes ORDER BY created_at DESC LIMIT 250`);
-              const [activities] = await pool.query<RowDataPacket[]>(`SELECT * FROM mental_health_activity_logs ORDER BY created_at DESC LIMIT 250`);
-              const [analyticsRows] = await pool.query<RowDataPacket[]>(`SELECT SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active, SUM(CASE WHEN status = 'follow_up' THEN 1 ELSE 0 END) AS follow_up, SUM(CASE WHEN status = 'at_risk' THEN 1 ELSE 0 END) AS at_risk, SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed, SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END) AS escalated, SUM(CASE WHEN status = 'archived' THEN 1 ELSE 0 END) AS archived FROM mental_health_sessions`);
+              const [patients] = await pool.query<RowDataPacket>(`SELECT p.patient_id, p.patient_name, p.patient_type, COUNT(s.id) AS previous_sessions, MAX(s.case_reference) AS latest_case_reference FROM mental_health_patients p LEFT JOIN mental_health_sessions s ON s.patient_id = p.patient_id GROUP BY p.patient_id, p.patient_name, p.patient_type ORDER BY p.patient_name ASC`);
+              const [notes] = await pool.query<RowDataPacket>(`SELECT * FROM mental_health_notes ORDER BY created_at DESC LIMIT 250`);
+              const [activities] = await pool.query<RowDataPacket>(`SELECT * FROM mental_health_activity_logs ORDER BY created_at DESC LIMIT 250`);
+              const [analyticsRows] = await pool.query<RowDataPacket>(`SELECT SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active, SUM(CASE WHEN status = 'follow_up' THEN 1 ELSE 0 END) AS follow_up, SUM(CASE WHEN status = 'at_risk' THEN 1 ELSE 0 END) AS at_risk, SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed, SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END) AS escalated, SUM(CASE WHEN status = 'archived' THEN 1 ELSE 0 END) AS archived FROM mental_health_sessions`);
               writeJson(res, 200, { ok: true, data: { sessions: sessions.map((row) => ({ ...row, appointment_at: formatDateTimeCell(row.appointment_at), next_follow_up_at: row.next_follow_up_at == null ? null : formatDateTimeCell(row.next_follow_up_at), created_at: formatDateTimeCell(row.created_at), updated_at: formatDateTimeCell(row.updated_at), is_draft: toBooleanFlag(row.is_draft) })), patients, notes: notes.map((row) => ({ ...row, created_at: formatDateTimeCell(row.created_at) })), activities: activities.map((row) => ({ ...row, created_at: formatDateTimeCell(row.created_at) })), meta: { page, perPage, total, totalPages: Math.max(1, Math.ceil(total / perPage)) }, analytics: analyticsRows[0] || { active: 0, follow_up: 0, at_risk: 0, completed: 0, escalated: 0, archived: 0 } } });
               return;
             }
@@ -5680,13 +5680,13 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 const riskLevel = (toSafeText(body.risk_level) || 'low').toLowerCase();
                 const status = toBooleanFlag(body.is_draft) ? 'create' : riskLevel === 'high' ? 'at_risk' : 'active';
                 await pool.query(`INSERT INTO mental_health_sessions (case_reference, patient_id, patient_name, patient_type, counselor, session_type, status, risk_level, diagnosis_condition, treatment_plan, session_goals, session_duration_minutes, session_mode, location_room, guardian_contact, emergency_contact, medication_reference, follow_up_frequency, escalation_reason, outcome_result, assessment_score, assessment_tool, appointment_at, next_follow_up_at, created_by_role, is_draft) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [caseReference, patientId, patientName, inferPatientType({ patientType: body.patient_type, patientName, patientId }), counselor, sessionType, status, riskLevel, toSafeText(body.diagnosis_condition) || null, toSafeText(body.treatment_plan) || null, toSafeText(body.session_goals) || null, Math.max(15, toSafeInt(body.session_duration_minutes, 45)), toSafeText(body.session_mode) || 'in_person', toSafeText(body.location_room) || null, toSafeText(body.guardian_contact) || null, toSafeText(body.emergency_contact) || null, toSafeText(body.medication_reference) || null, toSafeText(body.follow_up_frequency) || null, toSafeText(body.escalation_reason) || null, toSafeText(body.outcome_result) || null, body.assessment_score == null ? null : toSafeInt(body.assessment_score, 0), toSafeText(body.assessment_tool) || null, appointmentAt, toSqlDateTime(body.next_follow_up_at), role, toBooleanFlag(body.is_draft) ? 1 : 0]);
-                const [rows] = await pool.query<RowDataPacket[]>(`SELECT id FROM mental_health_sessions WHERE case_reference = ? LIMIT 1`, [caseReference]);
+                const [rows] = await pool.query<RowDataPacket>(`SELECT id FROM mental_health_sessions WHERE case_reference = ? LIMIT 1`, [caseReference]);
                 await saveActivity(Number(rows[0]?.id || 0), 'SESSION_CREATED', `Session ${caseReference} created with status ${status}.`);
                 writeJson(res, 200, { ok: true, message: 'Session created.' });
                 return;
               }
 
-              const [existingRows] = await pool.query<RowDataPacket[]>(`SELECT * FROM mental_health_sessions WHERE id = ? LIMIT 1`, [sessionId]);
+              const [existingRows] = await pool.query<RowDataPacket>(`SELECT * FROM mental_health_sessions WHERE id = ? LIMIT 1`, [sessionId]);
               const existing = existingRows[0];
               if (!existing) {
                 writeJson(res, 404, { ok: false, message: 'Session not found.' });
@@ -5740,7 +5740,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
             await ensurePatientMasterTables(pool);
             if ((req.method || 'GET').toUpperCase() === 'GET') {
               const forceSync = toSafeText(url.searchParams.get('sync')) === '1';
-              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM patient_master`);
+              const [countRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM patient_master`);
               if (forceSync || Number(countRows[0]?.total || 0) === 0) {
                 await rebuildPatientMaster(pool);
               }
@@ -5762,10 +5762,10 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               if (moduleFilter === 'mental') where.push(`mental_count > 0`);
               if (moduleFilter === 'pharmacy') where.push(`pharmacy_count > 0`);
               const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-              const [totalRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM patient_master${whereSql}`, params);
+              const [totalRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM patient_master${whereSql}`, params);
               const total = Number(totalRows[0]?.total || 0);
-              const [rows] = await pool.query<RowDataPacket[]>(`SELECT * FROM patient_master${whereSql} ORDER BY COALESCE(last_seen_at, updated_at, created_at) DESC LIMIT ? OFFSET ?`, [...params, perPage, offset]);
-              const [analyticsRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total_patients, SUM(CASE WHEN risk_level = 'high' THEN 1 ELSE 0 END) AS high_risk, SUM(CASE WHEN appointment_count > 0 OR walkin_count > 0 OR checkup_count > 0 OR mental_count > 0 OR pharmacy_count > 0 THEN 1 ELSE 0 END) AS active_profiles, SUM(CASE WHEN COALESCE(last_seen_at, updated_at, created_at) >= CURRENT_TIMESTAMP - INTERVAL '30 days' THEN 1 ELSE 0 END) AS active_30_days FROM patient_master`);
+              const [rows] = await pool.query<RowDataPacket>(`SELECT * FROM patient_master${whereSql} ORDER BY COALESCE(last_seen_at, updated_at, created_at) DESC LIMIT ? OFFSET ?`, [...params, perPage, offset]);
+              const [analyticsRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total_patients, SUM(CASE WHEN risk_level = 'high' THEN 1 ELSE 0 END) AS high_risk, SUM(CASE WHEN appointment_count > 0 OR walkin_count > 0 OR checkup_count > 0 OR mental_count > 0 OR pharmacy_count > 0 THEN 1 ELSE 0 END) AS active_profiles, SUM(CASE WHEN COALESCE(last_seen_at, updated_at, created_at) >= CURRENT_TIMESTAMP - INTERVAL '30 days' THEN 1 ELSE 0 END) AS active_30_days FROM patient_master`);
               writeJson(res, 200, { ok: true, data: { analytics: analyticsRows[0] || { total_patients: 0, high_risk: 0, active_profiles: 0, active_30_days: 0 }, items: rows.map(mapPatientRow), meta: { page, perPage, total, totalPages: Math.max(1, Math.ceil(total / perPage)) } } });
               return;
             }
@@ -5818,16 +5818,18 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               }
               const periodRange = matchesDateRange(period);
               if (periodRange) {
-                where.push(periodRange.sql
-                  .replaceAll('appointment_date', 'a.appointment_date')
-                  .replaceAll('status', 'a.status'));
+                where.push(
+                  periodRange.sql
+                    .replace(/appointment_date/g, 'a.appointment_date')
+                    .replace(/\bstatus\b/g, 'a.status')
+                );
                 params.push(...periodRange.params);
               }
 
               const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
-              const [countRows] = await pool.query<RowDataPacket[]>(`SELECT COUNT(*) AS total FROM patient_appointments a${whereSql}`, params);
+              const [countRows] = await pool.query<RowDataPacket>(`SELECT COUNT(*) AS total FROM patient_appointments a${whereSql}`, params);
               const total = Number(countRows[0]?.total || 0);
-              const [rows] = await pool.query<RowDataPacket[]>(
+              const [rows] = await pool.query<RowDataPacket>(
                 `SELECT a.id, a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.emergency_contact, a.insurance_provider,
                         a.payment_method, a.actor_role, a.appointment_priority, a.doctor_name,
                         COALESCE(NULLIF(a.visit_type, ''), a.department_name, 'General Check-Up') AS service_name,
@@ -5857,7 +5859,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                  LIMIT ? OFFSET ?`,
                 [...params, perPage, offset]
               );
-              const [analyticsRows] = await pool.query<RowDataPacket[]>(
+              const [analyticsRows] = await pool.query<RowDataPacket>(
                 `SELECT COUNT(DISTINCT COALESCE(NULLIF(TRIM(patient_email), ''), NULLIF(TRIM(phone_number), ''), patient_name)) AS totalPatients,
                         COUNT(*) AS totalAppointments,
                         SUM(CASE WHEN appointment_date = ? THEN 1 ELSE 0 END) AS todayAppointments,
@@ -5963,7 +5965,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   ]
                 );
 
-                const [rows] = await pool.query<RowDataPacket[]>(
+                const [rows] = await pool.query<RowDataPacket>(
                   `SELECT a.id, a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.emergency_contact, a.insurance_provider,
                           a.payment_method, a.actor_role, a.appointment_priority, a.doctor_name,
                           COALESCE(NULLIF(a.visit_type, ''), a.department_name, 'General Check-Up') AS service_name,
@@ -6036,7 +6038,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 });
 
                 if (cashierIntegrationEnabled(options) && cashierSyncMode(options) === 'auto') {
-                  const [eventRows] = await pool.query<RowDataPacket[]>(
+                  const [eventRows] = await pool.query<RowDataPacket>(
                     `SELECT *
                      FROM cashier_integration_events
                      WHERE source_module = 'appointments' AND source_key = ?
@@ -6050,7 +6052,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   }
                 }
 
-                const [syncedRows] = await pool.query<RowDataPacket[]>(
+                const [syncedRows] = await pool.query<RowDataPacket>(
                   `SELECT a.id, a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.emergency_contact, a.insurance_provider,
                           a.payment_method, a.actor_role, a.appointment_priority, a.doctor_name,
                           COALESCE(NULLIF(a.visit_type, ''), a.department_name, 'General Check-Up') AS service_name,
@@ -6090,7 +6092,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 return;
               }
 
-              const [existingRows] = await pool.query<RowDataPacket[]>(
+              const [existingRows] = await pool.query<RowDataPacket>(
                 `SELECT a.booking_id, a.doctor_name, a.department_name, a.appointment_date, a.preferred_time, a.status,
                         p.cashier_billing_id, p.cashier_reference, p.amount_due,
                         COALESCE(NULLIF(p.payment_status, ''), 'unpaid') AS cashier_payment_status
@@ -6183,7 +6185,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               values.push(bookingId);
               await pool.query(`UPDATE patient_appointments SET ${setParts.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE booking_id = ?`, values);
 
-              const [rows] = await pool.query<RowDataPacket[]>(
+              const [rows] = await pool.query<RowDataPacket>(
                 `SELECT a.id, a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.emergency_contact, a.insurance_provider,
                         a.payment_method, a.actor_role, a.appointment_priority, a.doctor_name,
                         COALESCE(NULLIF(a.visit_type, ''), a.department_name, 'General Check-Up') AS service_name,
@@ -6256,7 +6258,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               });
 
               if (cashierIntegrationEnabled(options) && cashierSyncMode(options) === 'auto') {
-                const [eventRows] = await pool.query<RowDataPacket[]>(
+                const [eventRows] = await pool.query<RowDataPacket>(
                   `SELECT *
                    FROM cashier_integration_events
                    WHERE source_module = 'appointments' AND source_key = ?
@@ -6270,7 +6272,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 }
               }
 
-              const [syncedRows] = await pool.query<RowDataPacket[]>(
+              const [syncedRows] = await pool.query<RowDataPacket>(
                 `SELECT a.id, a.booking_id, a.patient_id, a.patient_name, a.patient_email, a.patient_type, a.phone_number, a.emergency_contact, a.insurance_provider,
                         a.payment_method, a.actor_role, a.appointment_priority, a.doctor_name,
                         COALESCE(NULLIF(a.visit_type, ''), a.department_name, 'General Check-Up') AS service_name,
@@ -6337,14 +6339,14 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               }
 
               const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-              const [countRows] = await pool.query<RowDataPacket[]>(
+              const [countRows] = await pool.query<RowDataPacket>(
                 `SELECT COUNT(*) AS total FROM clinic_health_reports ${whereClause}`,
                 params
               );
               const total = Number(countRows[0]?.total ?? 0);
               const totalPages = Math.max(1, Math.ceil(total / perPage));
 
-              const [rows] = await pool.query<RowDataPacket[]>(
+              const [rows] = await pool.query<RowDataPacket>(
                 `SELECT id, report_code, student_id, student_name, student_type, grade_section, age, sex,
                         health_issue, symptoms, severity, treatment_given, medicines_used, first_aid_given,
                         attending_staff, remarks, sent_to_pmed, pmed_sent_at, pmed_entity_key, created_at, updated_at
@@ -6438,7 +6440,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                   ]
                 );
 
-                const [newRows] = await pool.query<RowDataPacket[]>(
+                const [newRows] = await pool.query<RowDataPacket>(
                   `SELECT * FROM clinic_health_reports WHERE report_code = ? LIMIT 1`,
                   [reportCode]
                 );
@@ -6537,12 +6539,15 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
 export function createSupabaseApiMiddleware(options: SupabaseApiOptions): (req: any, res: any, next: () => void) => void {
   let handler: (req: any, res: any, next: () => void) => void = (_req, _res, next) => next();
   const plugin = supabaseApiPlugin(options);
-  plugin.configureServer?.({
+  const register = plugin.configureServer as
+    | ((server: { middlewares: { use: (fn: (req: any, res: any, next: () => void) => void) => void } }) => void)
+    | undefined;
+  register?.({
     middlewares: {
       use(fn: (req: any, res: any, next: () => void) => void) {
         handler = fn;
       }
     }
-  } as any);
+  });
   return handler;
 }
