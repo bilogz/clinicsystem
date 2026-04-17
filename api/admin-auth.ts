@@ -26,6 +26,31 @@ function toSafeText(value: unknown): string {
   return String(value).trim();
 }
 
+function validateDatabaseUrl(connectionString: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(connectionString);
+  } catch {
+    throw new Error('DATABASE_URL is not a valid URL. Use your real Supabase Postgres connection string.');
+  }
+
+  const host = toSafeText(parsed.hostname).toLowerCase();
+  if (!host) {
+    throw new Error('DATABASE_URL is missing a hostname.');
+  }
+
+  // Catch common placeholder examples copied from docs/env templates.
+  if (
+    host.includes('your-project-ref') ||
+    host.includes('your-ref') ||
+    host.includes('your-project') ||
+    host.includes('example') ||
+    host.includes('placeholder')
+  ) {
+    throw new Error('DATABASE_URL still uses placeholder host values. Replace it with your real Supabase host (db.<project-ref>.supabase.co).');
+  }
+}
+
 function toBooleanFlag(value: unknown): boolean {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') return value !== 0;
@@ -109,6 +134,7 @@ function getPool(): Pool {
   if (!connectionString) {
     throw new Error('Supabase is not configured. Set DATABASE_URL on Vercel project environment variables.');
   }
+  validateDatabaseUrl(connectionString);
   cachedPool = new Pool({
     connectionString,
     ssl: { rejectUnauthorized: false }
