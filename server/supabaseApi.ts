@@ -4146,7 +4146,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
               params.push(`%${actorFilter}%`);
             }
             if (search) {
-              where.push('(LOWER(action) LIKE ? OR LOWER(detail) LIKE ? OR LOWER(COALESCE(entity_key, "")) LIKE ?)');
+              where.push('(LOWER(action) LIKE ? OR LOWER(detail) LIKE ? OR LOWER(COALESCE(entity_key, \'\')) LIKE ?)');
               params.push(`%${search}%`, `%${search}%`, `%${search}%`);
             }
 
@@ -4532,7 +4532,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
 
               if (search) {
                 const searchLike = `%${search.toLowerCase()}%`;
-                where.push('(LOWER(patient_name) LIKE ? OR LOWER(COALESCE(patient_email, "")) LIKE ? OR LOWER(COALESCE(concern, "")) LIKE ? OR LOWER(COALESCE(assigned_to, "")) LIKE ? OR LOWER(case_id) LIKE ?)');
+                where.push('(LOWER(patient_name) LIKE ? OR LOWER(COALESCE(patient_email, \'\')) LIKE ? OR LOWER(COALESCE(concern, \'\')) LIKE ? OR LOWER(COALESCE(assigned_to, \'\')) LIKE ? OR LOWER(case_id) LIKE ?)');
                 params.push(searchLike, searchLike, searchLike, searchLike, searchLike);
               }
               if (status && status.toLowerCase() !== 'all statuses') {
@@ -4728,7 +4728,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
 
               if (search) {
                 const searchLike = `%${search.toLowerCase()}%`;
-                where.push('(LOWER(case_id) LIKE ? OR LOWER(patient_name) LIKE ? OR LOWER(COALESCE(contact, "")) LIKE ? OR LOWER(COALESCE(chief_complaint, "")) LIKE ? OR LOWER(COALESCE(assigned_doctor, "")) LIKE ?)');
+                where.push('(LOWER(case_id) LIKE ? OR LOWER(patient_name) LIKE ? OR LOWER(COALESCE(contact, \'\')) LIKE ? OR LOWER(COALESCE(chief_complaint, \'\')) LIKE ? OR LOWER(COALESCE(assigned_doctor, \'\')) LIKE ?)');
                 params.push(searchLike, searchLike, searchLike, searchLike, searchLike);
               }
               if (status && status.toLowerCase() !== 'all') {
@@ -4926,7 +4926,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
 
               if (search) {
                 const searchLike = `%${search.toLowerCase()}%`;
-                where.push('(LOWER(visit_id) LIKE ? OR LOWER(patient_name) LIKE ? OR LOWER(COALESCE(chief_complaint, "")) LIKE ? OR LOWER(COALESCE(assigned_doctor, "")) LIKE ?)');
+                where.push('(LOWER(visit_id) LIKE ? OR LOWER(patient_name) LIKE ? OR LOWER(COALESCE(chief_complaint, \'\')) LIKE ? OR LOWER(COALESCE(assigned_doctor, \'\')) LIKE ?)');
                 params.push(searchLike, searchLike, searchLike, searchLike);
               }
               if (status && status.toLowerCase() !== 'all') {
@@ -5807,7 +5807,7 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
                 params.push(status.toLowerCase());
               }
               if (service && service.toLowerCase() !== 'all services') {
-                where.push('(LOWER(COALESCE(a.visit_type, a.department_name, "")) = ? OR LOWER(a.department_name) = ?)');
+                where.push('(LOWER(COALESCE(a.visit_type, a.department_name, \'\')) = ? OR LOWER(a.department_name) = ?)');
                 params.push(service.toLowerCase(), service.toLowerCase());
               }
               if (doctor && doctor.toLowerCase() !== 'any') {
