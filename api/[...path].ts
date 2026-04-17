@@ -1,5 +1,4 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import { createSupabaseApiMiddleware } from '../server/supabaseApi';
 
 export const config = {
   runtime: 'nodejs'
@@ -9,6 +8,7 @@ type ApiMiddleware = (req: IncomingMessage, res: ServerResponse, next: () => voi
 
 let cachedMiddleware: ApiMiddleware | null = null;
 let cachedInitError: Error | null = null;
+let cachedInitPromise: Promise<ApiMiddleware> | null = null;
 
 function writeJson(res: ServerResponse, statusCode: number, payload: Record<string, unknown>): void {
   if (res.writableEnded) return;
@@ -21,29 +21,40 @@ function writeJson(res: ServerResponse, statusCode: number, payload: Record<stri
   }
 }
 
-function loadMiddleware(): ApiMiddleware {
+async function loadMiddleware(): Promise<ApiMiddleware> {
   if (cachedMiddleware) return cachedMiddleware;
   if (cachedInitError) throw cachedInitError;
+  if (cachedInitPromise) return cachedInitPromise;
 
-  try {
-    if (typeof createSupabaseApiMiddleware !== 'function') {
-      throw new Error('createSupabaseApiMiddleware is not exported from server/supabaseApi.');
+  cachedInitPromise = (async () => {
+    try {
+      const mod = (await import('./supabaseMiddlewareLoader')) as {
+        createMiddleware?: (options: Record<string, unknown>) => ApiMiddleware;
+      };
+      const createMiddleware = mod.createMiddleware;
+      if (typeof createMiddleware !== 'function') {
+        throw new Error('createMiddleware is not exported from api/supabaseMiddlewareLoader.');
+      }
+      const middleware = createMiddleware({
+        databaseUrl: process.env.DATABASE_URL,
+        cashierEnabled: process.env.CASHIER_INTEGRATION_ENABLED,
+        cashierBaseUrl: process.env.CASHIER_SYSTEM_BASE_URL,
+        cashierSharedToken: process.env.CASHIER_SHARED_TOKEN,
+        cashierSyncMode: process.env.CASHIER_SYNC_MODE,
+        cashierInboundPath: process.env.CASHIER_SYSTEM_INBOUND_PATH,
+        departmentSharedToken: process.env.DEPARTMENT_INTEGRATION_SHARED_TOKEN
+      });
+      cachedMiddleware = middleware;
+      return middleware;
+    } catch (error) {
+      cachedInitError = error instanceof Error ? error : new Error(String(error));
+      throw cachedInitError;
+    } finally {
+      cachedInitPromise = null;
     }
-    const middleware = createSupabaseApiMiddleware({
-      databaseUrl: process.env.DATABASE_URL,
-      cashierEnabled: process.env.CASHIER_INTEGRATION_ENABLED,
-      cashierBaseUrl: process.env.CASHIER_SYSTEM_BASE_URL,
-      cashierSharedToken: process.env.CASHIER_SHARED_TOKEN,
-      cashierSyncMode: process.env.CASHIER_SYNC_MODE,
-      cashierInboundPath: process.env.CASHIER_SYSTEM_INBOUND_PATH,
-      departmentSharedToken: process.env.DEPARTMENT_INTEGRATION_SHARED_TOKEN
-    }) as ApiMiddleware;
-    cachedMiddleware = middleware;
-    return middleware;
-  } catch (error) {
-    cachedInitError = error instanceof Error ? error : new Error(String(error));
-    throw cachedInitError;
-  }
+  })();
+
+  return cachedInitPromise;
 }
 
 function normalizeRequest(req: IncomingMessage): void {
@@ -97,7 +108,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     let middleware: ApiMiddleware;
     try {
-      middleware = loadMiddleware();
+      middleware = await loadMiddleware();
     } catch (initError) {
       try {
         // eslint-disable-next-line no-console
