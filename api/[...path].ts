@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import { createSupabaseApiMiddleware } from '../server/supabaseApi.ts';
+import { createSupabaseApiMiddleware } from '../server/supabaseApi';
 
 export const config = {
   runtime: 'nodejs'

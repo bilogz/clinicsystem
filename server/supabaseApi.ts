@@ -1,5 +1,5 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'crypto';
-import pg from 'pg';
+import { Pool as NodePgPool } from 'pg';
 import type { Plugin } from 'vite';
 
 export type SupabaseApiOptions = {
@@ -25,8 +25,6 @@ type DbPool = {
 type Pool = DbPool;
 
 let pgPool: DbPool | null = null;
-
-const { Pool: PgPool } = pg;
 
 function parseCookieHeader(rawCookie: string | undefined): Record<string, string> {
   if (!rawCookie) return {};
@@ -356,7 +354,7 @@ function createDbPool(options: SupabaseApiOptions): DbPool | null {
     );
   }
 
-  const innerPool = new PgPool({
+  const innerPool = new NodePgPool({
     connectionString: databaseUrl,
     ssl: { rejectUnauthorized: false },
     // Prefer shared integration tables in `clinic` schema (integration-merge baseline).
