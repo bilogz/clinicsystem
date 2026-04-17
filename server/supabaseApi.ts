@@ -6540,16 +6540,27 @@ export function createSupabaseApiMiddleware(options: SupabaseApiOptions): (req: 
   const configureServer = plugin.configureServer as unknown;
   const register =
     typeof configureServer === 'function'
-      ? configureServer
-      : configureServer && typeof configureServer === 'object' && 'handler' in configureServer && typeof (configureServer as any).handler === 'function'
-        ? (configureServer as any).handler
+      ? (configureServer as (server: unknown) => unknown)
+      : configureServer &&
+          typeof configureServer === 'object' &&
+          'handler' in (configureServer as Record<string, unknown>) &&
+          typeof (configureServer as { handler?: unknown }).handler === 'function'
+        ? ((configureServer as { handler: (server: unknown) => unknown }).handler)
         : undefined;
-  register?.({
-    middlewares: {
-      use(fn: (req: any, res: any, next: () => void) => void) {
-        handler = fn;
+  if (!register) {
+    throw new Error('supabaseApiPlugin.configureServer is not callable. Unexpected Vite plugin shape.');
+  }
+  try {
+    register({
+      middlewares: {
+        use(fn: (req: any, res: any, next: () => void) => void) {
+          handler = fn;
+        }
       }
-    }
-  });
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to initialise Supabase API middleware: ${message}`);
+  }
   return handler;
 }
