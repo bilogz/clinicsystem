@@ -32,6 +32,18 @@ type CreateAdminAccountPayload = {
   is_super_admin?: boolean;
 };
 
+function trimTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, '');
+}
+
+function resolveApiUrl(): string {
+  const directApi = import.meta.env.VITE_ADMIN_AUTH_API_URL?.trim();
+  if (directApi) return trimTrailingSlashes(directApi);
+  const configured = import.meta.env.VITE_BACKEND_API_BASE_URL?.trim();
+  if (configured) return `${trimTrailingSlashes(configured)}/admin-auth`;
+  return '/api/admin-auth';
+}
+
 function withClientFields(user: NonNullable<AdminSessionResponse['user']>): AdminUser {
   return {
     ...user,
@@ -41,13 +53,13 @@ function withClientFields(user: NonNullable<AdminSessionResponse['user']>): Admi
 }
 
 export async function fetchAdminSession(): Promise<AdminUser | null> {
-  const data = await fetchApiData<AdminSessionResponse>('/api/admin-auth', { ttlMs: 5_000 });
+  const data = await fetchApiData<AdminSessionResponse>(resolveApiUrl(), { ttlMs: 5_000 });
   if (!data?.authenticated || !data.user) return null;
   return withClientFields(data.user);
 }
 
 export async function loginAdmin(username: string, password: string): Promise<AdminUser> {
-  const data = await fetchApiData<{ user: NonNullable<AdminSessionResponse['user']> }>('/api/admin-auth', {
+  const data = await fetchApiData<{ user: NonNullable<AdminSessionResponse['user']> }>(resolveApiUrl(), {
     method: 'POST',
     body: { action: 'login', username, password }
   });
@@ -57,7 +69,7 @@ export async function loginAdmin(username: string, password: string): Promise<Ad
 }
 
 export async function logoutAdmin(): Promise<void> {
-  await fetchApiData<unknown>('/api/admin-auth', {
+  await fetchApiData<unknown>(resolveApiUrl(), {
     method: 'POST',
     body: { action: 'logout' }
   });
@@ -66,7 +78,7 @@ export async function logoutAdmin(): Promise<void> {
 }
 
 export async function createAdminAccount(payload: CreateAdminAccountPayload): Promise<void> {
-  await fetchApiData<unknown>('/api/admin-auth', {
+  await fetchApiData<unknown>(resolveApiUrl(), {
     method: 'POST',
     body: {
       action: 'create_account',
