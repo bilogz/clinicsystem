@@ -1,6 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { createSupabaseApiMiddleware } from '../server/supabaseApi.ts';
 
+export const config = {
+  runtime: 'nodejs'
+};
+
 const apiMiddleware = createSupabaseApiMiddleware({
   databaseUrl: process.env.DATABASE_URL,
   cashierEnabled: process.env.CASHIER_INTEGRATION_ENABLED,
@@ -18,6 +22,17 @@ function writeJson(res: ServerResponse, statusCode: number, payload: Record<stri
 }
 
 export default function handler(req: IncomingMessage, res: ServerResponse): void {
+  const normalizedMethod = String(req.method || '').toUpperCase();
+  if (!normalizedMethod && (req as any).body != null) {
+    req.method = 'POST';
+  } else if (normalizedMethod === 'HEAD') {
+    req.method = 'GET';
+  } else if (normalizedMethod === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+
   if ((req.url || '').startsWith('/api/health')) {
     writeJson(res, 200, { ok: true, data: { status: 'ok' } });
     return;

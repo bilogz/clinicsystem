@@ -60,6 +60,19 @@ function writeJson(res: any, statusCode: number, payload: JsonRecord): void {
 }
 
 async function readJsonBody(req: any): Promise<JsonRecord> {
+  if (req && typeof req.body === 'object' && req.body !== null && !Buffer.isBuffer(req.body)) {
+    return req.body as JsonRecord;
+  }
+
+  if (req && typeof req.body === 'string') {
+    try {
+      const parsed = JSON.parse(req.body);
+      return typeof parsed === 'object' && parsed !== null ? (parsed as JsonRecord) : {};
+    } catch {
+      return {};
+    }
+  }
+
   return await new Promise((resolve) => {
     let raw = '';
     req.on('data', (chunk: Buffer | string) => {
