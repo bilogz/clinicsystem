@@ -1,6 +1,6 @@
 {
   "extends": "@tsconfig/node22/tsconfig.json",
-  "include": ["vite.config.*", "server/**/*.ts"],
+  "include": ["vite.config.*", "server/**/*.ts", "api/**/*.ts"],
   "compilerOptions": {
     "composite": true,
     "allowJs": true,
