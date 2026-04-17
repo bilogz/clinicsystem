@@ -459,6 +459,11 @@ function readQueryString(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+function toSafeInt(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function normalizeStatusTab(value: string): StatusTab {
   if (value === 'pending' || value === 'in_progress' || value === 'completed') {
     return value;
