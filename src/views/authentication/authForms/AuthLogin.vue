@@ -35,7 +35,7 @@ async function validate(_values: any, { setErrors }: any) {
 </script>
 
 <template>
-  <Form @submit.prevent="validate" class="mt-7 loginForm" v-slot="{ errors, isSubmitting }">
+  <Form @submit="validate" class="mt-7 loginForm" v-slot="{ errors, isSubmitting }">
     <v-text-field
       v-model="username"
       :rules="emailRules"
