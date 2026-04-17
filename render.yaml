@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: clinicsystem-api
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm run server:start
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: DEPARTMENT_INTEGRATION_SHARED_TOKEN
+        sync: false
+      - key: CASHIER_INTEGRATION_ENABLED
+        value: "true"
+      - key: CASHIER_SYSTEM_BASE_URL
+        sync: false
+      - key: CASHIER_SYNC_MODE
+        value: auto
+      - key: CASHIER_SYSTEM_INBOUND_PATH
+        value: /api/integrations/cashier/payment-status
+      - key: CASHIER_SHARED_TOKEN
+        sync: false

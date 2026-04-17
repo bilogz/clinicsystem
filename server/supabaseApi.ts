@@ -2,7 +2,7 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'crypto';
 import pg from 'pg';
 import type { Plugin } from 'vite';
 
-type SupabaseApiOptions = {
+export type SupabaseApiOptions = {
   databaseUrl?: string;
   cashierEnabled?: string;
   cashierBaseUrl?: string;
@@ -6519,4 +6519,17 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
       });
     }
   };
+}
+
+export function createSupabaseApiMiddleware(options: SupabaseApiOptions): (req: any, res: any, next: () => void) => void {
+  let handler: (req: any, res: any, next: () => void) => void = (_req, _res, next) => next();
+  const plugin = supabaseApiPlugin(options);
+  plugin.configureServer?.({
+    middlewares: {
+      use(fn: (req: any, res: any, next: () => void) => void) {
+        handler = fn;
+      }
+    }
+  } as any);
+  return handler;
 }
