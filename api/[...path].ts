@@ -1,5 +1,4 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import { createSupabaseApiMiddleware } from '../server/supabaseApi';
 
 export const config = {
   runtime: 'nodejs'
@@ -9,6 +8,7 @@ type ApiMiddleware = (req: IncomingMessage, res: ServerResponse, next: () => voi
 
 let cachedMiddleware: ApiMiddleware | null = null;
 let cachedInitError: Error | null = null;
+let cachedInitPromise: Promise<ApiMiddleware> | null = null;
 
 function writeJson(res: ServerResponse, statusCode: number, payload: Record<string, unknown>): void {
   if (res.writableEnded) return;
@@ -21,24 +21,40 @@ function writeJson(res: ServerResponse, statusCode: number, payload: Record<stri
   }
 }
 
-function getMiddleware(): ApiMiddleware {
+async function loadMiddleware(): Promise<ApiMiddleware> {
   if (cachedMiddleware) return cachedMiddleware;
   if (cachedInitError) throw cachedInitError;
-  try {
-    cachedMiddleware = createSupabaseApiMiddleware({
-      databaseUrl: process.env.DATABASE_URL,
-      cashierEnabled: process.env.CASHIER_INTEGRATION_ENABLED,
-      cashierBaseUrl: process.env.CASHIER_SYSTEM_BASE_URL,
-      cashierSharedToken: process.env.CASHIER_SHARED_TOKEN,
-      cashierSyncMode: process.env.CASHIER_SYNC_MODE,
-      cashierInboundPath: process.env.CASHIER_SYSTEM_INBOUND_PATH,
-      departmentSharedToken: process.env.DEPARTMENT_INTEGRATION_SHARED_TOKEN
-    }) as unknown as ApiMiddleware;
-    return cachedMiddleware;
-  } catch (error) {
-    cachedInitError = error instanceof Error ? error : new Error(String(error));
-    throw cachedInitError;
-  }
+  if (cachedInitPromise) return cachedInitPromise;
+
+  cachedInitPromise = (async () => {
+    try {
+      const mod = (await import('../server/supabaseApi')) as {
+        createSupabaseApiMiddleware?: (opts: Record<string, unknown>) => ApiMiddleware;
+      };
+      const factory = mod.createSupabaseApiMiddleware;
+      if (typeof factory !== 'function') {
+        throw new Error('createSupabaseApiMiddleware is not exported from server/supabaseApi.');
+      }
+      const middleware = factory({
+        databaseUrl: process.env.DATABASE_URL,
+        cashierEnabled: process.env.CASHIER_INTEGRATION_ENABLED,
+        cashierBaseUrl: process.env.CASHIER_SYSTEM_BASE_URL,
+        cashierSharedToken: process.env.CASHIER_SHARED_TOKEN,
+        cashierSyncMode: process.env.CASHIER_SYNC_MODE,
+        cashierInboundPath: process.env.CASHIER_SYSTEM_INBOUND_PATH,
+        departmentSharedToken: process.env.DEPARTMENT_INTEGRATION_SHARED_TOKEN
+      });
+      cachedMiddleware = middleware;
+      return middleware;
+    } catch (error) {
+      cachedInitError = error instanceof Error ? error : new Error(String(error));
+      throw cachedInitError;
+    } finally {
+      cachedInitPromise = null;
+    }
+  })();
+
+  return cachedInitPromise;
 }
 
 function normalizeRequest(req: IncomingMessage): void {
@@ -50,15 +66,18 @@ function normalizeRequest(req: IncomingMessage): void {
   }
 }
 
-function errorPayload(error: unknown): Record<string, unknown> {
+function errorPayload(error: unknown, hint?: string): Record<string, unknown> {
   const diagnostics = process.env.API_DIAGNOSTICS === '1' || process.env.VERCEL_ENV !== 'production';
   const message = error instanceof Error ? error.message : String(error || 'Unknown server error.');
   const payload: Record<string, unknown> = { ok: false, message };
+  if (hint) payload.hint = hint;
   if (diagnostics && error instanceof Error && error.stack) {
-    payload.stack = error.stack.split('\n').slice(0, 8).join('\n');
+    payload.stack = error.stack.split('\n').slice(0, 10).join('\n');
   }
   if (diagnostics) {
     payload.hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
+    payload.nodeVersion = process.version;
+    payload.vercelEnv = process.env.VERCEL_ENV || null;
   }
   return payload;
 }
@@ -66,25 +85,40 @@ function errorPayload(error: unknown): Record<string, unknown> {
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
     normalizeRequest(req);
+
     if (String(req.method || '').toUpperCase() === 'OPTIONS') {
       res.statusCode = 204;
       res.end();
       return;
     }
 
-    if ((req.url || '').startsWith('/api/health')) {
+    const url = req.url || '';
+    if (url.startsWith('/api/health')) {
       writeJson(res, 200, {
         ok: true,
         data: {
           status: 'ok',
           hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
-          vercelEnv: process.env.VERCEL_ENV || null
+          vercelEnv: process.env.VERCEL_ENV || null,
+          nodeVersion: process.version
         }
       });
       return;
     }
 
-    const middleware = getMiddleware();
+    let middleware: ApiMiddleware;
+    try {
+      middleware = await loadMiddleware();
+    } catch (initError) {
+      try {
+        // eslint-disable-next-line no-console
+        console.error('[api] init failure:', initError);
+      } catch {
+        // ignore logger errors
+      }
+      writeJson(res, 500, errorPayload(initError, 'Failed to initialise API (module load). Check DATABASE_URL and server imports.'));
+      return;
+    }
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -116,6 +150,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     } catch {
       // ignore logger errors
     }
-    writeJson(res, 500, errorPayload(error));
+    writeJson(res, 500, errorPayload(error, 'Request handler raised an unhandled error.'));
   }
 }
