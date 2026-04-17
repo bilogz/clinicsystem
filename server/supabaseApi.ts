@@ -357,8 +357,8 @@ function createDbPool(options: SupabaseApiOptions): DbPool | null {
   const innerPool = new NodePgPool({
     connectionString: databaseUrl,
     ssl: { rejectUnauthorized: false },
-    // Prefer shared integration tables in `clinic` schema (integration-merge baseline).
-    options: '-c search_path=clinic,public'
+    // Prefer core app tables in `public`, while still resolving integration tables from `clinic`.
+    options: '-c search_path=public,clinic'
   });
 
   return {
