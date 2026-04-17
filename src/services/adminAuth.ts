@@ -40,12 +40,65 @@ function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '');
 }
 
+const DEFAULT_ADMIN_AUTH_URL = '/api/admin-auth';
+
+function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+/**
+ * fetch("login") from /admin/login resolves to the same URL → POST 405 on static hosts.
+ * Reject relative refs without a leading "/" and SPA paths mistaken for API URLs.
+ */
+function normalizeExplicitApiUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return DEFAULT_ADMIN_AUTH_URL;
+  if (!trimmed.startsWith('/') && !isHttpUrl(trimmed)) {
+    return DEFAULT_ADMIN_AUTH_URL;
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      const u = isHttpUrl(trimmed) ? new URL(trimmed) : new URL(trimmed, window.location.origin);
+      if (u.pathname === '/admin/login' || u.pathname.endsWith('/admin/login')) {
+        return DEFAULT_ADMIN_AUTH_URL;
+      }
+    } catch {
+      return DEFAULT_ADMIN_AUTH_URL;
+    }
+  }
+  return trimTrailingSlashes(trimmed);
+}
+
 function resolveApiUrl(): string {
   const directApi = import.meta.env.VITE_ADMIN_AUTH_API_URL?.trim();
-  if (directApi) return trimTrailingSlashes(directApi);
+  if (directApi) return normalizeExplicitApiUrl(directApi);
+
   const configured = import.meta.env.VITE_BACKEND_API_BASE_URL?.trim();
-  if (configured) return `${trimTrailingSlashes(configured)}/admin-auth`;
-  return '/api/admin-auth';
+  if (configured) {
+    if (!configured.startsWith('/') && !isHttpUrl(configured)) {
+      return DEFAULT_ADMIN_AUTH_URL;
+    }
+    const base = trimTrailingSlashes(configured);
+    if (isHttpUrl(base) && typeof window !== 'undefined') {
+      try {
+        const u = new URL(base);
+        if (u.origin === window.location.origin) {
+          const path = (u.pathname || '/').replace(/\/+$/, '') || '';
+          if (path === '' || path === '/') {
+            return `${u.origin}/api/admin-auth`;
+          }
+        }
+      } catch {
+        return DEFAULT_ADMIN_AUTH_URL;
+      }
+    }
+    if (base === '/api') {
+      return DEFAULT_ADMIN_AUTH_URL;
+    }
+    return `${base}/admin-auth`;
+  }
+
+  return DEFAULT_ADMIN_AUTH_URL;
 }
 
 function buildLocalFallbackUser(): AdminUser {
