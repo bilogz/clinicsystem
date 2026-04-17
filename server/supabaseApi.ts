@@ -6537,9 +6537,13 @@ export function supabaseApiPlugin(options: SupabaseApiOptions): Plugin {
 export function createSupabaseApiMiddleware(options: SupabaseApiOptions): (req: any, res: any, next: () => void) => void {
   let handler: (req: any, res: any, next: () => void) => void = (_req, _res, next) => next();
   const plugin = supabaseApiPlugin(options);
-  const register = plugin.configureServer as
-    | ((server: { middlewares: { use: (fn: (req: any, res: any, next: () => void) => void) => void } }) => void)
-    | undefined;
+  const configureServer = plugin.configureServer as unknown;
+  const register =
+    typeof configureServer === 'function'
+      ? configureServer
+      : configureServer && typeof configureServer === 'object' && 'handler' in configureServer && typeof (configureServer as any).handler === 'function'
+        ? (configureServer as any).handler
+        : undefined;
   register?.({
     middlewares: {
       use(fn: (req: any, res: any, next: () => void) => void) {
